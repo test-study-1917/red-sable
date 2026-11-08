@@ -20,6 +20,7 @@ mod notify_sdk_tests;
 
 pub(crate) use notify::{is_call_event_type, is_call_membership_event_type};
 mod runtime;
+mod termination;
 pub(crate) use runtime::State as CallRuntimeState;
 mod sfu;
 pub(crate) mod sticky;
@@ -905,6 +906,10 @@ impl Core {
         for mut call in calls {
             drop(call.updates.take());
             drop(call.postpone.take());
+            drop(call.termination_keys.take());
+            call.termination_cancel.send_replace(true);
+            call._handlers.clear();
+            call.state.lock().await.termination.pending.clear();
             let result = self.hang_up(&call).await;
             if let Err(error) = result {
                 tracing::warn!(?error, room_id = %call.room_id, "could not hang up on session end");
@@ -925,10 +930,203 @@ impl Core {
 
         drop(call.updates.take());
         drop(call.postpone.take());
+        drop(call.termination_keys.take());
+        call.termination_cancel.send_replace(true);
+        call._handlers.clear();
+        call.state.lock().await.termination.pending.clear();
         let result = self.hang_up(&call).await;
         // A call kept sync running past `Suspended`; stop it before the audio session ends.
         self.apply_app_activity(false).await;
         result
+    }
+
+    /// Send the control event directly through the SDK; the attempt is scoped
+    /// to this call and retains its transaction and payload across failures.
+    pub(crate) async fn end_call_for_everyone(
+        self: &Arc<Self>,
+        session: CallSessionId,
+    ) -> Result<(), RpcError> {
+        use std::sync::atomic::Ordering;
+        let generation = self.session_generation.load(Ordering::SeqCst);
+        let (room_id, shared, attempt, sender, mut cancel) = {
+            let calls = self.call_sessions.lock().await;
+            let call = calls.get(&session).ok_or(RpcError::UnknownCall)?;
+            let mut state = call.state.lock().await;
+            if state.termination.ended.is_some() {
+                return Ok(());
+            }
+            let sender = state.own_member().user_id.to_string();
+            let attempt = state
+                .termination
+                .begin_attempt(&sender, keys::now_ms())
+                .ok_or(RpcError::CallTerminationInProgress)?;
+            (
+                call.room_id.clone(),
+                call.state.clone(),
+                attempt,
+                sender,
+                call.termination_cancel.subscribe(),
+            )
+        };
+        let room = match self.room(&room_id).await {
+            Ok(room) => room,
+            Err(error) => {
+                if let Some(attempt) = shared.lock().await.termination.attempt.as_mut() {
+                    attempt.sending = false;
+                }
+                return Err(error);
+            }
+        };
+        // If leave or logout won before the HTTP request began, do not send.
+        let still_active = {
+            let calls = self.call_sessions.lock().await;
+            self.session_generation.load(Ordering::SeqCst) == generation
+                && calls
+                    .get(&session)
+                    .is_some_and(|call| Arc::ptr_eq(&call.state, &shared))
+        };
+        if !still_active {
+            return if shared.lock().await.termination.ended.is_some() {
+                Ok(())
+            } else {
+                Err(RpcError::UnknownCall)
+            };
+        }
+        let send = room
+            .send_raw(termination::EVENT_TYPE, attempt.content)
+            .with_transaction_id(&attempt.transaction_id)
+            .with_request_config(
+                matrix_sdk::config::RequestConfig::new()
+                    .timeout(Duration::from_secs(30))
+                    .disable_retry(),
+            );
+        let result = tokio::select! {
+            // A completed request may already have reached the homeserver;
+            // cancellation prevents only remaining local preparation/retries.
+            biased;
+            _ = async { let _ = cancel.wait_for(|cancelled| *cancelled).await; } => None,
+            result = send => Some(result),
+        };
+        let Some(result) = result else {
+            return if shared.lock().await.termination.ended.is_some() {
+                Ok(())
+            } else {
+                Err(RpcError::UnknownCall)
+            };
+        };
+        if self.session_generation.load(Ordering::SeqCst) != generation {
+            return Err(RpcError::NotLoggedIn);
+        }
+        match result {
+            Ok(sent) => {
+                let claimed = {
+                    let mut calls = self.call_sessions.lock().await;
+                    if self.session_generation.load(Ordering::SeqCst) != generation {
+                        return Err(RpcError::NotLoggedIn);
+                    }
+                    let mut state = shared.lock().await;
+                    let ended = if let Some(ended) = state.termination.ended.clone() {
+                        ended
+                    } else {
+                        let ended = termination::Ended {
+                            terminated_by: sender,
+                            event_id: sent.response.event_id.to_string(),
+                            local: true,
+                        };
+                        state.termination.ended = Some(ended.clone());
+                        ended
+                    };
+                    calls.remove(&session).map(|call| (call, ended))
+                };
+                if let Some((call, ended)) = claimed {
+                    self.complete_call_termination(generation, session, call, ended)
+                        .await;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let mut state = shared.lock().await;
+                if state.termination.ended.is_some() {
+                    return Ok(());
+                }
+                if let Some(attempt) = state.termination.attempt.as_mut() {
+                    attempt.sending = false;
+                }
+                tracing::warn!(?error, "could not confirm call termination event was sent");
+                Err(RpcError::Unavailable)
+            }
+        }
+    }
+
+    /// The first caller to remove the session owns signaling teardown. The UI
+    /// gets its normal-end event before any network cleanup can block it.
+    async fn complete_call_termination(
+        self: &Arc<Self>,
+        generation: u64,
+        session: CallSessionId,
+        mut call: CallSession,
+        ended: termination::Ended,
+    ) {
+        // Media can stop immediately, but a new join must not publish into
+        // the same membership state key until the old leave has completed.
+        let (cleanup_done, done) = tokio::sync::watch::channel(false);
+        {
+            let mut cleanups = self.call_cleanups.lock().await;
+            cleanups.retain(|_, cleanup| {
+                cleanup.generation == generation
+                    && !*cleanup.done.borrow()
+                    && cleanup.done.has_changed().is_ok()
+            });
+            cleanups.insert(
+                call.room_id.clone(),
+                crate::CallCleanup { generation, done },
+            );
+        }
+        drop(call.updates.take());
+        drop(call.postpone.take());
+        drop(call.termination_keys.take());
+        call._handlers.clear();
+        call.state.lock().await.termination.pending.clear();
+        self.emit_if_current(
+            generation,
+            crate::protocol::CoreEvent::CallTerminated {
+                session,
+                room_id: call.room_id.clone(),
+                terminated_by: ended.terminated_by,
+                event_id: ended.event_id,
+                local: ended.local,
+            },
+        );
+        call.termination_cancel.send_replace(true);
+        let core = self.clone();
+        self.track_session_task(spawn(async move {
+            if let Err(error) = core.hang_up(&call).await {
+                tracing::warn!(?error, room_id = %call.room_id, "call terminated but signaling cleanup failed");
+            }
+            core.apply_app_activity(false).await;
+            cleanup_done.send_replace(true);
+        }).abort_on_drop());
+    }
+
+    async fn wait_for_call_cleanup(&self, room_id: &OwnedRoomId, generation: u64) {
+        let pending = self
+            .call_cleanups
+            .lock()
+            .await
+            .get(room_id)
+            .and_then(|cleanup| (cleanup.generation == generation).then(|| cleanup.done.clone()));
+        if let Some(mut done) = pending {
+            // Dropping a session task on logout closes the channel as well.
+            // Do not hold the registry lock while waiting for network cleanup.
+            let _ = done.wait_for(|finished| *finished).await;
+            let mut cleanups = self.call_cleanups.lock().await;
+            if cleanups
+                .get(room_id)
+                .is_some_and(|cleanup| cleanup.done.same_channel(&done))
+            {
+                cleanups.remove(room_id);
+            }
+        }
     }
 
     pub(crate) async fn set_call_screen_sharing(

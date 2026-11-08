@@ -185,6 +185,25 @@
   provideNotificationCenter(notifications);
   const callSession = new CallSession(core, {
     roomName: (roomId) => roomList.byId(roomId)?.name,
+    onTerminated: ({ local, room_id: roomId, terminated_by: userId }) => {
+      if (local) {
+        toasts.info(i18n.t('call.endSent'));
+        return;
+      }
+      const accountRevision = core.accountRevision;
+      void core.rpc.members.member({ room_id: roomId, user_id: userId }).then(
+        (member) => {
+          if (accountRevision !== core.accountRevision) return;
+          const name = member?.display_name?.trim() || userId;
+          toasts.info(i18n.t('call.endedBy', { name }));
+        },
+        () => {
+          if (accountRevision === core.accountRevision) {
+            toasts.info(i18n.t('call.endedBy', { name: userId }));
+          }
+        }
+      );
+    },
   });
   provideCallSession(callSession);
   onMount(() => registerDesktopCallShortcuts(callSession));

@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{Handler, Json};
 use crate::Core;
-use crate::protocol::{CallBackendView, CallCompatibilityView, CallIntent, CallMode, CallModeReason, CallSessionId, CallSupportView, RpcError, TurnServerView};
+use crate::protocol::{
+    CallBackendView, CallCompatibilityView, CallIntent, CallMode, CallModeReason, CallSessionId,
+    CallSupportView, RpcError, TurnServerView,
+};
 
 domain! {
     turn_server,
@@ -15,6 +18,7 @@ domain! {
     compatibility,
     support,
     leave,
+    end_for_everyone,
     set_screen_sharing,
     decline,
 }
@@ -136,8 +140,7 @@ impl Handler for SupportParams {
     type Ok = CallSupportView;
 
     async fn run(self, core: &Arc<Core>) -> Result<CallSupportView, RpcError> {
-        core.call_support(self)
-            .await
+        core.call_support(self).await
     }
 }
 
@@ -157,6 +160,20 @@ impl Handler for LeaveParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct EndForEveryoneParams {
+    pub session: CallSessionId,
+}
+
+impl Handler for EndForEveryoneParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.end_call_for_everyone(self.session).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SetScreenSharingParams {
     pub session: CallSessionId,
     pub active: bool,
@@ -166,8 +183,7 @@ impl Handler for SetScreenSharingParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.set_call_screen_sharing(self)
-            .await
+        core.set_call_screen_sharing(self).await
     }
 }
 
@@ -183,7 +199,6 @@ impl Handler for DeclineParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.decline_call(self)
-            .await
+        core.decline_call(self).await
     }
 }

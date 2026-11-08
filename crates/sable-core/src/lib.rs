@@ -221,7 +221,13 @@ pub struct Core {
     server_search: Mutex<search::ServerSearch>,
     foreground_paginations: AtomicU32,
     call_sessions: Mutex<HashMap<protocol::CallSessionId, CallSession>>,
+    call_cleanups: Mutex<HashMap<OwnedRoomId, CallCleanup>>,
     desired_presence: parking_lot::Mutex<protocol::PresenceView>,
+}
+
+struct CallCleanup {
+    generation: u64,
+    done: watch::Receiver<bool>,
 }
 
 struct CallSession {
@@ -230,6 +236,8 @@ struct CallSession {
     delay_id: Arc<Mutex<calls::DelayState>>,
     postpone: Option<Task>,
     updates: Option<Task>,
+    termination_keys: Option<Task>,
+    termination_cancel: tokio::sync::watch::Sender<bool>,
     state: Arc<tokio::sync::Mutex<calls::CallRuntimeState>>,
     sticky_member: Option<String>,
     _handlers: Vec<matrix_sdk::event_handler::EventHandlerDropGuard>,
@@ -388,6 +396,7 @@ impl Core {
             search_crawl: Mutex::new(search::CrawlProgress::default()),
             server_search: Mutex::new(search::ServerSearch::default()),
             call_sessions: Mutex::new(HashMap::new()),
+            call_cleanups: Mutex::new(HashMap::new()),
             desired_presence: parking_lot::Mutex::new(protocol::PresenceView::Online),
         });
         #[cfg(not(target_family = "wasm"))]

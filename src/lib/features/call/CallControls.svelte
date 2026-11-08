@@ -512,6 +512,11 @@
     .controls:not(.compact) .action :global(.btn) {
       inline-size: 100%;
     }
+
+    .controls:not(.compact) .action :global(.end-action .end-caret) {
+      flex: none;
+      inline-size: var(--button-height);
+    }
   }
 
   .controls :global(.btn:not(.icon-button)) {

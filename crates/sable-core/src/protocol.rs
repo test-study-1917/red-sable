@@ -95,6 +95,17 @@ pub enum RpcError {
     NotLoggedIn,
     UnknownSubscription,
     UnknownCall,
+    /// A call ended normally before its join grant was returned.
+    CallTerminatedDuringJoin {
+        session: CallSessionId,
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        room_id: OwnedRoomId,
+        terminated_by: String,
+        event_id: String,
+        local: bool,
+    },
+    /// A termination request is already in flight for this call.
+    CallTerminationInProgress,
     NoCallFocus,
     InvalidPaginationDirection,
     UnknownRoom,
@@ -409,6 +420,16 @@ pub enum CoreEvent {
         session: CallSessionId,
         stage: CallSignalingStage,
         fatal: bool,
+    },
+
+    /// A participant ended the call normally, rather than a signalling failure.
+    CallTerminated {
+        session: CallSessionId,
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        room_id: OwnedRoomId,
+        terminated_by: String,
+        event_id: String,
+        local: bool,
     },
 
     CallMembers {

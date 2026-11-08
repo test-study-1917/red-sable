@@ -366,8 +366,11 @@ async fn an_element_call_peers_key_is_emitted_on_the_oldest_members_focus() {
         "sent_ts": now
     }))
     .unwrap();
+    let own = member(CallMode::Compatibility, now, &["https://sfu.example.org"]);
+    let termination = super::super::termination::Reader::new(&own, &members, now);
     let mut state = State {
-        own: member(CallMode::Compatibility, now, &["https://sfu.example.org"]),
+        own,
+        termination,
         sticky: super::StickyMemberships::default(),
         members,
         emitted_members: None,
@@ -557,6 +560,7 @@ async fn refresh_fixture(
         events,
         room,
         Mutex::new(State {
+            termination: super::super::termination::Reader::new(&own, &[], super::keys::now_ms()),
             own,
             sticky: super::StickyMemberships::default(),
             members: Vec::new(),

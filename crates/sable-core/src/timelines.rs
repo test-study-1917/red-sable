@@ -431,6 +431,15 @@ pub(crate) fn hidden_event_filter(event: &AnySyncTimelineEvent, rules: &RoomVers
     default_event_filter(event, rules) || !is_aggregation(event, rules)
 }
 
+// Ruma's parsed custom-event content drops unknown fields. Test the raw
+// content when building hidden aggregation rows instead of hiding every
+// io.element.call.reaction (which would also hide ordinary reactions).
+fn is_call_termination(event_type: &str, content: Option<&serde_json::Value>) -> bool {
+    event_type == "io.element.call.terminate"
+        || (event_type == "io.element.call.reaction"
+            && content.is_some_and(|content| content.get("io.element.call.terminate").is_some()))
+}
+
 pub(crate) fn aggregation_items(
     events: impl IntoIterator<Item = Event>,
     rules: &RoomVersionRules,
@@ -444,6 +453,9 @@ pub(crate) fn aggregation_items(
                 return None;
             }
             let content = event.raw().get_field::<serde_json::Value>("content").ok()?;
+            if is_call_termination(&parsed.event_type().to_string(), content.as_ref()) {
+                return None;
+            }
             let redacts = match &parsed {
                 AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(
                     redaction,
@@ -598,6 +610,49 @@ mod tests {
         .unwrap();
         assert!(super::is_aggregation(&ordinary, &rules));
         assert!(!super::hidden_event_filter(&ordinary, &rules));
+    }
+
+    #[test]
+    fn termination_controls_are_not_shown_as_hidden_aggregations() {
+        let rules = matrix_sdk::ruma::room_version_rules::RoomVersionRules::V11;
+        let raw = |kind, content: serde_json::Value| {
+            Raw::<matrix_sdk::ruma::events::AnySyncTimelineEvent>::from_json_string(
+                serde_json::json!({
+                    "type":kind, "event_id":"$end", "sender":"@alice:example.org",
+                    "origin_server_ts":1, "content":content, "unsigned":{}
+                })
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let controls = [
+            raw(
+                "io.element.call.terminate",
+                serde_json::json!({"terminated_by":"@alice:example.org","timestamp":1}),
+            ),
+            raw(
+                "io.element.call.reaction",
+                serde_json::json!({"io.element.call.terminate":{"terminated_by":"@alice:example.org","timestamp":1}}),
+            ),
+        ];
+        for control in &controls {
+            let parsed = control.deserialize().unwrap();
+            assert!(!super::timeline_event_filter(&parsed, &rules));
+        }
+        let ordinary = raw(
+            "io.element.call.reaction",
+            serde_json::json!({"emoji":"👋"}),
+        );
+        let items = super::aggregation_items(
+            controls.into_iter().chain([ordinary]).map(|raw| {
+                matrix_sdk_base::deserialized_responses::TimelineEvent::from_plaintext(
+                    raw.cast_unchecked(),
+                )
+            }),
+            &rules,
+            None,
+        );
+        assert_eq!(items.len(), 1);
     }
 
     #[test]

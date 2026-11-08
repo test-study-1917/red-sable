@@ -1358,6 +1358,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       }),
       'calls.rtc_transports': () => ({ rtc_transports: [] }),
       'calls.rtc_livekit': () => ({}),
+      'calls.end_for_everyone': () => null,
       'widgets.send_delayed_event': () => 'e2e-widget-delay',
       'widgets.send_sticky_event': () => '$e2e-widget-sticky',
       'widgets.room_sticky_events': () => [],

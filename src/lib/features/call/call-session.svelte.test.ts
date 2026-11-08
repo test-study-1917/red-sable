@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import type { CoreEvent } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
+import { CoreError } from '#src/transport';
 import {
   preferences,
   setPreference,
@@ -70,7 +71,23 @@ type Harness = {
   transport: CallTransport & { connected: CallTransportState[] };
   joinCall: ReturnType<typeof vi.fn>;
   leaveCall: ReturnType<typeof vi.fn>;
+  endCall: ReturnType<typeof vi.fn>;
   setCallScreenSharing: ReturnType<typeof vi.fn>;
+};
+
+const defaultGrant: Awaited<ReturnType<CoreClient['rpc']['calls']['join']>> = {
+  session: 7,
+  url: 'wss://sfu.example.org',
+  jwt: 'jwt',
+  identity: '@kris:example.org:LAPTOP',
+  encrypt_media: false,
+  mode: 'legacy',
+  mode_reason: 'fresh',
+  sticky_available: false,
+  peer_modes: [],
+  can_publish: true,
+  publisher_id: 'publisher',
+  backends: [],
 };
 
 function harness(
@@ -124,25 +141,25 @@ function harness(
   const joinCall = vi.fn(() => {
     if (options.joinError) return Promise.reject(options.joinError);
     return Promise.resolve({
-      session: 7,
-      url: 'wss://sfu.example.org',
-      jwt: 'jwt',
-      identity: '@kris:example.org:LAPTOP',
+      ...defaultGrant,
       encrypt_media: options.encryptMedia ?? false,
-      mode: 'legacy',
-      mode_reason: 'fresh',
-      sticky_available: false,
-      peer_modes: [],
       can_publish: options.canPublish ?? true,
-      publisher_id: 'publisher',
-      backends: [],
     });
   });
   const leaveCall = vi.fn(() => Promise.resolve());
+  const endCall = vi.fn(() => Promise.resolve());
   const setCallScreenSharing = vi.fn(() => Promise.resolve());
 
   const client = {
-    rpc: { calls: { join: joinCall, leave: leaveCall, setScreenSharing: setCallScreenSharing } },
+    session: { user_id: '@kris:example.org', device_id: 'LAPTOP' },
+    rpc: {
+      calls: {
+        join: joinCall,
+        leave: leaveCall,
+        endForEveryone: endCall,
+        setScreenSharing: setCallScreenSharing,
+      },
+    },
     subscribeEvents: (listener: (event: CoreEvent) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -165,6 +182,7 @@ function harness(
     transport,
     joinCall,
     leaveCall,
+    endCall,
     setCallScreenSharing,
   };
 }
@@ -1491,4 +1509,274 @@ test('a non-fatal signaling error stays a breadcrumb', async () => {
 
   expect(session.lifecycle).toBe('active');
   expect(sentry.captureException).not.toHaveBeenCalled();
+});
+
+const termination = (
+  overrides: Partial<{
+    session: number;
+    room_id: string;
+    terminated_by: string;
+    event_id: string;
+    local: boolean;
+  }> = {}
+): Extract<CoreEvent, { type: 'call_terminated' }> => ({
+  type: 'call_terminated',
+  session: 7,
+  room_id: '!room:example.org',
+  terminated_by: '@remote:example.org',
+  event_id: '$end:example.org',
+  local: false,
+  ...overrides,
+});
+
+function observeAnotherDevice(h: Harness): void {
+  h.emit({
+    type: 'call_members',
+    session: 7,
+    members: [
+      {
+        user_id: '@kris:example.org',
+        device_id: 'PHONE',
+        identity: '@kris:example.org:PHONE',
+        backend_id: null,
+        joined_ts: 1,
+        screen_sharing: false,
+      },
+    ],
+  });
+}
+
+test('end call waits for the core event, retries failures and never changes ordinary leave', async () => {
+  const h = harness();
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  expect(session.canEndForEveryone).toBe(false);
+  h.emit({
+    type: 'call_members',
+    session: 7,
+    members: [
+      {
+        user_id: '@kris:example.org',
+        device_id: 'LAPTOP',
+        identity: 'other-wire-identity-for-this-device',
+        backend_id: null,
+        joined_ts: 1,
+        screen_sharing: false,
+      },
+    ],
+  });
+  expect(session.canEndForEveryone).toBe(false);
+  observeAnotherDevice(h);
+  expect(session.canEndForEveryone).toBe(true);
+
+  let rejectSend!: (error: Error) => void;
+  h.endCall.mockReturnValueOnce(new Promise<void>((_resolve, reject) => (rejectSend = reject)));
+  const sending = session.endForEveryone();
+  expect(session.endStatus).toBe('sending');
+  await session.endForEveryone();
+  expect(h.endCall).toHaveBeenCalledOnce();
+  rejectSend(new Error('uncertain send'));
+  await sending;
+  expect(session.endStatus).toBe('failed');
+  expect(session.lifecycle).toBe('active');
+  expect(h.transport.disconnect).not.toHaveBeenCalled();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+
+  // A disappearing peer must not remove the retry for an uncertain send.
+  h.emit({ type: 'call_members', session: 7, members: [] });
+  await session.endForEveryone();
+  expect(h.endCall).toHaveBeenCalledTimes(2);
+  expect(h.endCall).toHaveBeenLastCalledWith({ session: 7 });
+  expect(session.endStatus).toBe('sending');
+  h.emit(termination({ terminated_by: '@kris:example.org', local: true }));
+  await vi.waitFor(() => {
+    expect(session.lifecycle).toBe('idle');
+  });
+  expect(session.failure).toBeNull();
+  expect(h.transport.disconnect).toHaveBeenCalledOnce();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).toHaveBeenCalledOnce();
+  expect(ended).toHaveBeenCalledWith(expect.objectContaining({ local: true }));
+
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  await session.leave();
+  expect(h.endCall).toHaveBeenCalledTimes(2);
+  expect(h.leaveCall).toHaveBeenCalledOnce();
+});
+
+test('a remote end and a concurrent leave share one teardown and notification', async () => {
+  const h = harness();
+  let release!: () => void;
+  h.transport.disconnect = vi.fn(() => new Promise<void>((resolve) => (release = resolve)));
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  const soundCount = sounds.played.filter((sound) => sound === 'call_leave').length;
+  const leaving = session.leave();
+  h.emit(termination({ terminated_by: '@kris:example.org' })); // same account, another device
+  h.emit(termination({ terminated_by: '@kris:example.org' }));
+  release();
+  await leaving;
+  expect(session.lifecycle).toBe('idle');
+  expect(session.failure).toBeNull();
+  expect(h.transport.disconnect).toHaveBeenCalledOnce();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).toHaveBeenCalledOnce();
+  expect(ended).toHaveBeenCalledWith(expect.objectContaining({ local: false }));
+  expect(sounds.played.filter((sound) => sound === 'call_leave')).toHaveLength(soundCount + 1);
+});
+
+test('a typed termination while joining ends normally without a grant', async () => {
+  const h = harness();
+  let rejectJoin!: (error: Error) => void;
+  h.joinCall.mockReturnValueOnce(new Promise((_resolve, reject) => (rejectJoin = reject)));
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  const joining = session.join('!room:example.org', { microphone: true, camera: false });
+  h.emit(termination());
+  rejectJoin(new CoreError({ code: 'call_terminated_during_join', ...termination() }));
+  await joining;
+  expect(session.lifecycle).toBe('idle');
+  expect(session.failure).toBeNull();
+  expect(h.transport.connect).not.toHaveBeenCalled();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).toHaveBeenCalledOnce();
+});
+
+test('a termination buffered before a grant stops media before connect and ignores unrelated sessions', async () => {
+  const h = harness();
+  let releaseGrant!: (grant: Awaited<ReturnType<CoreClient['rpc']['calls']['join']>>) => void;
+  h.joinCall.mockReturnValueOnce(new Promise((resolve) => (releaseGrant = resolve)));
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  const joining = session.join('!room:example.org', { microphone: true, camera: false });
+  h.emit(termination({ session: 100 }));
+  h.emit(termination({ room_id: '!other:example.org' }));
+  h.emit(termination());
+  releaseGrant(defaultGrant);
+  await joining;
+  await vi.waitFor(() => {
+    expect(session.lifecycle).toBe('idle');
+  });
+  expect(h.transport.connect).not.toHaveBeenCalled();
+  expect(h.transport.disconnect).toHaveBeenCalledOnce();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).toHaveBeenCalledOnce();
+});
+
+test('an old session event or late send failure cannot change a later call', async () => {
+  const h = harness();
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  observeAnotherDevice(h);
+  let rejectSend!: (error: Error) => void;
+  h.endCall.mockReturnValueOnce(new Promise<void>((_resolve, reject) => (rejectSend = reject)));
+  const sending = session.endForEveryone();
+  await session.leave();
+  h.joinCall.mockResolvedValueOnce({ ...defaultGrant, session: 8 });
+  await session.join('!other:example.org', { microphone: true, camera: false });
+  h.emit(termination());
+  rejectSend(new Error('late result'));
+  await sending;
+  expect(session.lifecycle).toBe('active');
+  expect(session.endStatus).toBe('idle');
+  expect(ended).not.toHaveBeenCalled();
+  await session.leave();
+});
+
+test('an end during media connection releases the owner and cannot activate the stale join', async () => {
+  const h = harness();
+  let releaseConnect!: () => void;
+  h.transport.connect = vi.fn(() => new Promise<void>((resolve) => (releaseConnect = resolve)));
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  const joining = session.join('!room:example.org', { microphone: true, camera: false });
+  await vi.waitFor(() => {
+    expect(h.transport.connect).toHaveBeenCalledOnce();
+  });
+  h.emit(termination());
+  await vi.waitFor(() => {
+    expect(session.lifecycle).toBe('idle');
+  });
+  releaseConnect();
+  await joining;
+  expect(session.lifecycle).toBe('idle');
+  expect(session.failure).toBeNull();
+  expect(h.transport.disconnect).toHaveBeenCalledOnce();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).toHaveBeenCalledOnce();
+  const next = new CallSession(h.client, { createTransport: () => h.transport });
+  h.transport.connect = vi.fn(() => Promise.resolve());
+  // The owner lease can be acquired immediately, even if the old connect resolves late.
+  const nextJoin = next.join('!other:example.org', { microphone: true, camera: false });
+  expect(next.failure).not.toBe('busy');
+  await nextJoin;
+  await next.leave();
+});
+
+test('a local end event before its RPC result produces only one teardown', async () => {
+  const h = harness();
+  let releaseSend!: () => void;
+  h.endCall.mockReturnValueOnce(new Promise<void>((resolve) => (releaseSend = resolve)));
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  observeAnotherDevice(h);
+  const sending = session.endForEveryone();
+  h.emit(termination({ terminated_by: '@kris:example.org', local: true }));
+  await vi.waitFor(() => {
+    expect(session.lifecycle).toBe('idle');
+  });
+  releaseSend();
+  await sending;
+  expect(session.endStatus).toBe('idle');
+  expect(h.transport.disconnect).toHaveBeenCalledOnce();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).toHaveBeenCalledOnce();
+});
+
+test('an account switch during remote teardown does not report the old call to the new account', async () => {
+  const h = harness();
+  h.client.accountRevision = 1;
+  let release!: () => void;
+  h.transport.disconnect = vi.fn(() => new Promise<void>((resolve) => (release = resolve)));
+  const ended = vi.fn();
+  const session = new CallSession(h.client, {
+    createTransport: () => h.transport,
+    onTerminated: ended,
+  });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  h.emit(termination());
+  expect(session.lifecycle).toBe('leaving');
+  h.client.accountRevision = 2;
+  const switching = session.leave();
+  release();
+  await switching;
+  expect(session.lifecycle).toBe('idle');
+  expect(h.transport.disconnect).toHaveBeenCalledOnce();
+  expect(h.leaveCall).not.toHaveBeenCalled();
+  expect(ended).not.toHaveBeenCalled();
 });

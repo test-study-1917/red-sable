@@ -25,6 +25,8 @@
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
   import CallControls from './CallControls.svelte';
+  import CallEndAction from './CallEndAction.svelte';
+  import CallEndNotice from './CallEndNotice.svelte';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { electronBridge } from '#lib/platform/electron.js';
   import CallModeDebug from './CallModeDebug.svelte';
@@ -103,7 +105,15 @@
         ? 'reconnecting'
         : 'live'
   );
-  let settled = $derived(ready && health === 'live' && session.deviceError === null);
+  let endOverlayOpen = $state(false);
+  let settled = $derived(
+    ready &&
+      health === 'live' &&
+      session.deviceError === null &&
+      session.endStatus !== 'sending' &&
+      session.endStatus !== 'failed' &&
+      !endOverlayOpen
+  );
 
   let remotes = $derived(
     presentParticipants(
@@ -328,7 +338,6 @@
         onToggleCamera={() => void session.setCameraEnabled(!session.transport.cameraEnabled)}
         onToggleScreenShare={() => void session.toggleScreenShare()}
         onToggleDeafen={() => session.setDeafened(!session.deafened)}
-        onHangUp={() => void session.leave()}
         onSwitchDevice={session.canSwitchCamera
           ? undefined
           : (kind, deviceId) => void session.switchDevice(kind, deviceId)}
@@ -336,7 +345,11 @@
         audioRoutes={session.audioRoutes}
         audioInputs={session.audioInputs}
         onOpenSettings={onOpenSettings ? openCallSettings : undefined}
-      />
+      >
+        {#snippet action()}
+          <CallEndAction {session} onOverlayChange={(open) => (endOverlayOpen = open)} />
+        {/snippet}
+      </CallControls>
       {#if busy}
         <p class="securing">{i18n.t('call.controlsLocked')}</p>
       {/if}
@@ -344,6 +357,7 @@
   {/if}
 
   <div class="notices" bind:clientHeight={noticeHeight}>
+    <CallEndNotice {session} />
     {#if session.desktopShortcutStatus === 'error'}
       <Alert variant="warning" class="notice">
         <p>{i18n.t('call.desktopShortcutsUnavailable')}</p>
@@ -386,7 +400,14 @@
   <div
     class={[
       'media',
-      { 'with-notice': session.deviceError !== null || session.listenOnly, locked: busy },
+      {
+        'with-notice':
+          session.deviceError !== null ||
+          session.listenOnly ||
+          session.endStatus === 'sending' ||
+          session.endStatus === 'failed',
+        locked: busy,
+      },
     ]}
     style:--tile-aspect={aspect}
     style:--notice-height="{noticeHeight}px"

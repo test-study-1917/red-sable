@@ -3,6 +3,7 @@ use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use futures_util::{StreamExt as _, pin_mut};
 use matrix_sdk::event_handler::EventHandlerDropGuard;
 use matrix_sdk::executor::{JoinHandleExt as _, spawn};
 use matrix_sdk::ruma::api::client::delayed_events::update_delayed_event::UpdateAction;
@@ -45,6 +46,7 @@ pub(crate) struct State {
     own: CallMember,
     sticky: StickyMemberships,
     members: Vec<CallMember>,
+    pub(super) termination: super::termination::Reader,
     emitted_members: Option<Vec<CallMemberView>>,
     backends: BTreeMap<String, CallBackendView>,
     pending_keys: Vec<PendingKey>,
@@ -74,7 +76,7 @@ impl State {
         self.slot_closed_midcall
     }
 
-    fn new(
+    pub(super) fn new(
         own: CallMember,
         members: Vec<CallMember>,
         sticky: StickyMemberships,
@@ -96,9 +98,11 @@ impl State {
             distributor.set_wire(own.wire);
             Arc::new(Mutex::new(distributor))
         });
+        let termination = super::termination::Reader::new(&own, &members, keys::now_ms());
         Self {
             own,
             members,
+            termination,
             sticky,
             distributor,
             emitted_members: None,
@@ -403,18 +407,57 @@ async fn publish_where_allowed(
     Ok((own, published))
 }
 
-fn join_handlers(
+pub(super) async fn join_handlers(
     core: &Arc<Core>,
     generation: u64,
     session: CallSessionId,
     room: &Room,
     state: &Arc<Mutex<State>>,
     encrypt_media: bool,
-) -> (Arc<Notify>, Vec<EventHandlerDropGuard>) {
+) -> (Arc<Notify>, Vec<EventHandlerDropGuard>, Option<crate::Task>) {
     let client = room.client();
     let room_id = room.room_id().to_owned();
     let wake = Arc::new(Notify::new());
-    let mut handlers = vec![watch_members(&client, &room_id, wake.clone())];
+    // Subscribe to room-key arrival before registering the live-event handler,
+    // so a key arriving during initial decryption cannot be missed.
+    let key_stream = client.encryption().room_keys_received_stream().await;
+    let decryption_changed = Arc::new(Notify::new());
+    let termination_handler = watch_termination(
+        core,
+        &client,
+        generation,
+        session,
+        room,
+        state,
+        decryption_changed.clone(),
+    );
+    let termination_keys = key_stream.map(|keys| {
+        let core = core.clone();
+        let room = room.clone();
+        let state = state.clone();
+        spawn(async move {
+            pin_mut!(keys);
+            loop {
+                tokio::select! {
+                    received = keys.next() => {
+                        let Some(result) = received else { break; };
+                        let relevant = result.as_ref().map_or(true, |keys| {
+                            keys.iter().any(|key| key.room_id == room.room_id())
+                        });
+                        if relevant { decryption_changed.notify_one(); }
+                    }
+                    () = decryption_changed.notified() => {
+                        retry_pending_terminations(&core, generation, session, &room, &state).await;
+                    }
+                }
+            }
+        })
+        .abort_on_drop()
+    });
+    let mut handlers = vec![
+        watch_members(&client, &room_id, state.clone(), wake.clone()),
+        termination_handler,
+    ];
     handlers.push(watch_redactions(
         &client,
         &room_id,
@@ -431,7 +474,7 @@ fn join_handlers(
             state.clone(),
         ));
     }
-    (wake, handlers)
+    (wake, handlers, termination_keys)
 }
 
 async fn confirm_join(
@@ -467,7 +510,7 @@ async fn confirm_join(
                 .any(|member| !member.is_own(&own.user_id, own.own_device_id())),
         )
     };
-    if !was_running {
+    if !was_running && state.lock().await.termination.ended.is_none() {
         core.announce_call(room, membership_event, &own).await;
     }
     Some((publisher_id, backends))
@@ -494,6 +537,7 @@ async fn discover_state(
         slot_closed,
         mode_info,
     } = discover(core, room, session, configured, requested).await?;
+    let members = verified_members(room, members, &own).await;
     let state = Arc::new(Mutex::new(State::new(
         own,
         members,
@@ -506,6 +550,10 @@ async fn discover_state(
     Ok((state, sticky_sync, mode_info))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "joining and atomically activating its termination listener share one lifecycle"
+)]
 pub(super) async fn join(
     core: &Arc<Core>,
     room_id: OwnedRoomId,
@@ -514,6 +562,10 @@ pub(super) async fn join(
     intent: Option<CallIntent>,
 ) -> Result<JoinOk, RpcError> {
     let generation = core.session_generation.load(Ordering::SeqCst);
+    core.wait_for_call_cleanup(&room_id, generation).await;
+    if core.session_generation.load(Ordering::SeqCst) != generation {
+        return Err(RpcError::NotLoggedIn);
+    }
     let room = core.room(&room_id).await?;
     let encrypt_media = core.room_is_encrypted(&room).await?;
     let session = CallSessionId(core.allocate_subscription().0);
@@ -527,7 +579,8 @@ pub(super) async fn join(
         encrypt_media,
     )
     .await?;
-    let (wake, handlers) = join_handlers(core, generation, session, &room, &state, encrypt_media);
+    let (wake, handlers, termination_keys) =
+        join_handlers(core, generation, session, &room, &state, encrypt_media).await;
     let (
         own,
         Published {
@@ -557,7 +610,11 @@ pub(super) async fn join(
     )
     .await
     else {
+        let ended = state.lock().await.termination.ended.clone();
         abort_join(core, &room, &own, delay, postpone).await;
+        if let Some(ended) = ended {
+            return Err(termination_during_join(session, room_id, ended));
+        }
         return Err(core.failed("join_call", "call membership was not confirmed"));
     };
     let mut calls = core.call_sessions.lock().await;
@@ -565,6 +622,15 @@ pub(super) async fn join(
         drop(calls);
         abort_join(core, &room, &own, delay, postpone).await;
         return Err(RpcError::NotLoggedIn);
+    }
+    // The same state lock is used by live event admission. Holding it while
+    // activating the session closes the registration-to-insertion window.
+    let state_guard = state.lock().await;
+    if let Some(ended) = state_guard.termination.ended.clone() {
+        drop(state_guard);
+        drop(calls);
+        abort_join(core, &room, &own, delay, postpone).await;
+        return Err(termination_during_join(session, room_id, ended));
     }
     let shared = state.clone();
     let delay = super::DelayState::shared(delay);
@@ -576,13 +642,14 @@ pub(super) async fn join(
             generation,
             session,
             room,
-            state,
+            state: state.clone(),
             wake,
             delay: delay.clone(),
             encrypted: encrypt_media,
         },
         sticky_sync,
     );
+    let (termination_cancel, _) = tokio::sync::watch::channel(false);
     calls.insert(
         session,
         CallSession {
@@ -592,10 +659,13 @@ pub(super) async fn join(
             postpone,
             _handlers: handlers,
             updates: Some(updates),
+            termination_keys,
+            termination_cancel,
             state: shared,
             sticky_member: own.member_id.filter(|_| mode == CallMode::Matrix2),
         },
     );
+    drop(state_guard);
     drop(calls);
     core.apply_app_activity(core.app_active.load(Ordering::Relaxed))
         .await;
@@ -679,7 +749,7 @@ enum Refreshed {
 async fn current_members(
     room: &Room,
     shared: &Mutex<State>,
-) -> Result<(Vec<CallMember>, CallMember), Refreshed> {
+) -> Result<(Vec<CallMember>, CallMember, Vec<CallMember>), Refreshed> {
     let mut members = membership::active_members(room).await;
     let own = {
         let mut state = shared.lock().await;
@@ -702,12 +772,13 @@ async fn current_members(
         state.own_observed |= present;
         state.own.clone()
     };
+    let observed_local = super::termination::local_members(&members, &own);
     members.retain(|member| {
         !(member.is_own(&own.user_id, own.own_device_id())
             || member.user_id == own.user_id && member.member_id == own.member_id)
     });
     members.push(own.clone());
-    Ok((members, own))
+    Ok((members, own, observed_local))
 }
 
 async fn verified_members(
@@ -780,7 +851,7 @@ async fn refresh(
     if shared.lock().await.slot_closed_midcall {
         return Refreshed::Ended;
     }
-    let (members, own) = match current_members(room, shared).await {
+    let (members, own, observed_local) = match current_members(room, shared).await {
         Ok(current) => current,
         Err(outcome) => return outcome,
     };
@@ -800,6 +871,10 @@ async fn refresh(
     let wanted = wanted_backends(room, &verified, &own);
     let missing = {
         let mut state = shared.lock().await;
+        let local = state.own.clone();
+        state
+            .termination
+            .observe_verified(&local, &verified, observed_local, keys::now_ms());
         state.members.clone_from(&verified);
         state.backends.retain(|id, _| wanted.contains_key(id));
         emit_pending(
@@ -1402,18 +1477,175 @@ fn watch_keys(
     ]
 }
 
+/// The SDK invokes this only for sync timeline events, not history pagination
+/// or local pending echoes. Unresolved encrypted envelopes stay in this state.
+pub(super) fn watch_termination(
+    core: &Arc<Core>,
+    client: &Client,
+    generation: u64,
+    session: CallSessionId,
+    room: &Room,
+    state: &Arc<Mutex<State>>,
+    decryption_changed: Arc<Notify>,
+) -> EventHandlerDropGuard {
+    use matrix_sdk::ruma::{events::AnySyncMessageLikeEvent, serde::Raw};
+    let core = core.clone();
+    let state = state.clone();
+    let handler = client.add_room_event_handler(
+        room.room_id(),
+        move |raw: Raw<AnySyncMessageLikeEvent>, room: Room| {
+            let core = core.clone();
+            let state = state.clone();
+            let decryption_changed = decryption_changed.clone();
+            async move {
+                let Ok(value) = serde_json::from_str(raw.json().get()) else {
+                    return;
+                };
+                receive_termination(&core, generation, session, &room, &state, value).await;
+                decryption_changed.notify_one();
+            }
+        },
+    );
+    client.event_handler_drop_guard(handler)
+}
+
+async fn retry_pending_terminations(
+    core: &Arc<Core>,
+    generation: u64,
+    session: CallSessionId,
+    room: &Room,
+    state: &Arc<Mutex<State>>,
+) {
+    let pending = {
+        let mut state = state.lock().await;
+        std::mem::take(&mut state.termination.pending)
+    };
+    for value in pending {
+        receive_termination(core, generation, session, room, state, value).await;
+    }
+}
+
+pub(super) async fn receive_termination(
+    core: &Arc<Core>,
+    generation: u64,
+    session: CallSessionId,
+    room: &Room,
+    state: &Arc<Mutex<State>>,
+    mut value: Value,
+) {
+    if core.session_generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    if value.get("type").and_then(Value::as_str) == Some("m.room.encrypted") {
+        use matrix_sdk::ruma::{
+            events::room::encrypted::OriginalSyncRoomEncryptedEvent, serde::Raw,
+        };
+        let Ok(raw) = Raw::new(&value).map(Raw::cast_unchecked::<OriginalSyncRoomEncryptedEvent>)
+        else {
+            return;
+        };
+        let decrypted = room.decrypt_event(&raw, None).await;
+        match decrypted {
+            Ok(event) if event.encryption_info().is_some() => {
+                let Ok(mut plaintext): Result<Value, _> =
+                    serde_json::from_str(event.raw().json().get())
+                else {
+                    return;
+                };
+                // The transaction ID is on the encrypted outer event. Keep
+                // unrelated unsigned fields supplied by the decryptor.
+                if let Some(transaction) = value.pointer("/unsigned/transaction_id")
+                    && let Some(object) = plaintext.as_object_mut()
+                {
+                    let unsigned = object
+                        .entry("unsigned")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(unsigned) = unsigned.as_object_mut() {
+                        unsigned.insert("transaction_id".to_owned(), transaction.clone());
+                    }
+                }
+                value = plaintext;
+            }
+            _ => {
+                let mut state = state.lock().await;
+                if core.session_generation.load(Ordering::SeqCst) == generation
+                    && state.termination.ended.is_none()
+                {
+                    state.termination.remember_pending(value);
+                }
+                return;
+            }
+        }
+    }
+    let claimed = {
+        // Admission, session removal and join activation share the lock order
+        // calls -> state. A joining session is not in the map yet; its ended
+        // marker is consumed by join before it can become active.
+        let mut calls = core.call_sessions.lock().await;
+        let mut current = state.lock().await;
+        if core.session_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        current
+            .termination
+            .admit(&value, keys::now_ms())
+            .and_then(|ended| calls.remove(&session).map(|call| (call, ended)))
+    };
+    if let Some((call, ended)) = claimed {
+        // Never abort the key-watcher task from within that same task.
+        let core = core.clone();
+        core.clone().track_session_task(
+            spawn(async move {
+                core.complete_call_termination(generation, session, call, ended)
+                    .await;
+            })
+            .abort_on_drop(),
+        );
+    }
+}
+
+pub(super) fn termination_during_join(
+    session: CallSessionId,
+    room_id: OwnedRoomId,
+    ended: super::termination::Ended,
+) -> RpcError {
+    RpcError::CallTerminatedDuringJoin {
+        session,
+        room_id,
+        terminated_by: ended.terminated_by,
+        event_id: ended.event_id,
+        local: ended.local,
+    }
+}
+
 fn watch_members(
     client: &Client,
     room_id: &OwnedRoomId,
+    state: Arc<Mutex<State>>,
     wake: Arc<Notify>,
 ) -> EventHandlerDropGuard {
     let handle = client.add_room_event_handler(
         room_id,
         move |_: matrix_sdk::ruma::serde::Raw<
             matrix_sdk::ruma::events::call::member::SyncCallMemberEvent,
-        >| {
+        >,
+              room: Room| {
             let wake = wake.clone();
-            async move { wake.notify_one() }
+            let state = state.clone();
+            async move {
+                // Admission must see membership changes before a later event
+                // in the same sync batch can be evaluated.
+                if let Ok((members, own, observed_local)) = current_members(&room, &state).await {
+                    let verified = verified_members(&room, members, &own).await;
+                    state.lock().await.termination.observe_verified(
+                        &own,
+                        &verified,
+                        observed_local,
+                        keys::now_ms(),
+                    );
+                }
+                wake.notify_one();
+            }
         },
     );
     client.event_handler_drop_guard(handle)

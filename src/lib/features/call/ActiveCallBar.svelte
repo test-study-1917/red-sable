@@ -5,6 +5,8 @@
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
   import CallControls from './CallControls.svelte';
+  import CallEndAction from './CallEndAction.svelte';
+  import CallEndNotice from './CallEndNotice.svelte';
   import type { CallSession } from './call-session.svelte.js';
   import { callStatusKey } from './call-status';
 
@@ -44,10 +46,12 @@
         {...props}
         class="call-room"
         type="button"
-        aria-label={collapsed ? `${statusLabel}, ${roomName}` : undefined}
+        aria-label={collapsed
+          ? `${statusLabel}, ${roomName}${count > 0 ? `, ${i18n.t('call.participants', { count })}` : ''}`
+          : undefined}
         onclick={onReturn}
       >
-        <WaveformIcon weight="bold" />
+        <WaveformIcon aria-hidden="true" weight="bold" />
         {#if !collapsed}
           <span class="status">{statusLabel}</span>
           <span class="room">{roomName}</span>
@@ -82,8 +86,12 @@
     onToggleCamera={() => void session.setCameraEnabled(!session.transport.cameraEnabled)}
     onToggleScreenShare={() => void session.toggleScreenShare()}
     onToggleDeafen={() => session.setDeafened(!session.deafened)}
-    onHangUp={() => void session.leave()}
-  />
+  >
+    {#snippet action()}
+      <CallEndAction {session} compact />
+    {/snippet}
+  </CallControls>
+  <CallEndNotice {session} compact={collapsed} />
 </section>
 
 <style>
@@ -195,13 +203,13 @@
 
   .collapsed :global(.controls) {
     display: grid;
-    gap: var(--space-200);
-    grid-template-columns: repeat(2, var(--avatar-size-400));
-    justify-content: center;
+    gap: var(--space-100);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
   }
 
   .collapsed :global(.controls .btn) {
-    --button-height: var(--avatar-size-400);
+    --button-height: var(--control-height-300);
     --button-icon-size: var(--size-x400);
 
     border-radius: var(--radius);

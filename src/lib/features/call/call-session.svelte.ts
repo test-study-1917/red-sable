@@ -7,6 +7,7 @@ import type { DesktopCallShortcutBackend } from '#lib/platform/call-shortcut-typ
 import type { CallMemberView, CoreEvent } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { joinCall, type CallGrant } from '#lib/core/api/calls.js';
+import { CoreError } from '#src/transport';
 
 import type {
   CallEncryptionKey,
@@ -55,6 +56,15 @@ export type CallVoiceState = {
 };
 
 export type CallDeviceError = 'microphone' | 'camera' | 'screen' | 'screenAudio';
+export type CallEndStatus = 'idle' | 'sending' | 'failed';
+
+export type CallTermination = {
+  session: number;
+  room_id: string;
+  terminated_by: string;
+  event_id: string;
+  local: boolean;
+};
 
 const OWN_KEY_TIMEOUT_MS = 10_000;
 const DEVICE_ERROR_TIMEOUT_MS = 5_000;
@@ -62,14 +72,22 @@ export const TALK_RELEASE_DELAY_MS = 150;
 
 type PendingEvent = Extract<
   CoreEvent,
-  { type: 'call_encryption_key' | 'call_members' | 'call_backends' | 'call_signaling_error' }
+  {
+    type:
+      | 'call_encryption_key'
+      | 'call_members'
+      | 'call_backends'
+      | 'call_signaling_error'
+      | 'call_terminated';
+  }
 >;
 
 const isCallEvent = (event: CoreEvent): event is PendingEvent =>
   event.type === 'call_encryption_key' ||
   event.type === 'call_members' ||
   event.type === 'call_backends' ||
-  event.type === 'call_signaling_error';
+  event.type === 'call_signaling_error' ||
+  event.type === 'call_terminated';
 
 export function voiceStates(
   members: readonly CallMemberView[],
@@ -109,6 +127,7 @@ export type CallSessionDeps = {
   createTransport?: (encryptMedia: boolean) => CallTransport;
   e2eeSupported?: () => boolean;
   roomName?: (roomId: string) => string | null | undefined;
+  onTerminated?: (termination: CallTermination) => void;
 };
 
 export class CallSession {
@@ -133,6 +152,7 @@ export class CallSession {
   listenOnly = $state(false);
   #deviceErrorTimer: ReturnType<typeof setTimeout> | undefined;
   choosingScreenAudio = $state(false);
+  endStatus = $state<CallEndStatus>('idle');
 
   toggleWatchScreenShare(trackId: string): void {
     this.watchedScreenShareIds = this.watchedScreenShareIds.includes(trackId)
@@ -172,6 +192,9 @@ export class CallSession {
     | undefined;
   #transportConnection: CallTransportState['connection'] | undefined;
   #teardownPromise: Promise<void> | undefined;
+  #finishPromise: Promise<void> | undefined;
+  #termination: CallTermination | undefined;
+  #accountRevision: number | undefined;
   #attemptGeneration = 0;
   #backendEnded = false;
   #ownKey: { resolve: () => void; reject: (error: Error) => void } | undefined;
@@ -246,6 +269,19 @@ export class CallSession {
     return this.lifecycle !== 'idle' && this.lifecycle !== 'failed';
   }
 
+  get canEndForEveryone(): boolean {
+    const own = this.#client.session;
+    return (
+      this.lifecycle === 'active' &&
+      this.#grant !== undefined &&
+      this.members.some(
+        (member) =>
+          member.identity !== this.#grant?.identity &&
+          (!own || member.user_id !== own.user_id || member.device_id !== own.device_id)
+      )
+    );
+  }
+
   async join(roomId: string, media: CallMedia, serviceUrl: string | null = null): Promise<void> {
     if (this.active) return;
 
@@ -256,6 +292,7 @@ export class CallSession {
     }
 
     this.#lease = lease;
+    this.#accountRevision = this.#client.accountRevision;
     this.#lastJoin = { roomId, media, serviceUrl };
     this.microphoneEnabled = media.microphone;
     this.inputMode = hasNativeCalls() ? 'voice-activity' : preferences.callInputMode;
@@ -273,6 +310,7 @@ export class CallSession {
     this.lifecycle = 'joining';
     this.failure = null;
     this.mediaReady = false;
+    this.endStatus = 'idle';
 
     this.#buffer = [];
     this.#backendEnded = false;
@@ -411,6 +449,7 @@ export class CallSession {
       this.encryptsMedia = grant.encrypt_media;
       this.mediaReady = false;
       this.#drain();
+      if (attempt !== this.#attemptGeneration) return;
 
       if (grant.encrypt_media) {
         await telemetry.step('call.encryption.wait_for_key', () => this.#waitForOwnKey());
@@ -463,6 +502,10 @@ export class CallSession {
       telemetry.finish('connected');
     } catch (error) {
       if (attempt !== this.#attemptGeneration) return;
+      if (error instanceof CoreError && error.detail.code === 'call_terminated_during_join') {
+        await this.#finish(error.detail);
+        return;
+      }
       telemetry.terminal('call.join', error);
       await this.#teardown();
       this.#fail(this.#classify(error));
@@ -472,16 +515,56 @@ export class CallSession {
 
   async leave(): Promise<void> {
     if (this.lifecycle === 'idle') return;
+    await this.#finish();
+  }
+
+  async endForEveryone(): Promise<void> {
+    if (
+      (!this.canEndForEveryone && this.endStatus !== 'failed') ||
+      this.lifecycle !== 'active' ||
+      this.endStatus === 'sending' ||
+      this.#session === undefined
+    )
+      return;
+    const session = this.#session;
+    const attempt = this.#attemptGeneration;
+    this.endStatus = 'sending';
+    try {
+      await this.#client.rpc.calls.endForEveryone({ session });
+    } catch {
+      if (attempt === this.#attemptGeneration && this.#session === session) {
+        this.endStatus = 'failed';
+      }
+    }
+  }
+
+  #finish(termination?: CallTermination): Promise<void> {
+    if (termination) {
+      this.#backendEnded = true;
+      this.#termination ??= termination;
+    }
+    if (this.#finishPromise) return this.#finishPromise;
     ++this.#attemptGeneration;
     this.lifecycle = 'leaving';
-    await this.#teardown();
-    this.#telemetry?.finish('cancelled');
-    this.lifecycle = 'idle';
-    this.failure = null;
-    this.roomId = null;
-    this.connectedAt = null;
-    this.clearDeviceError();
-    void playSound('call_leave');
+    this.#finishPromise = (async () => {
+      await this.#teardown();
+      this.#telemetry?.finish('cancelled');
+      this.lifecycle = 'idle';
+      this.failure = null;
+      this.roomId = null;
+      this.connectedAt = null;
+      this.endStatus = 'idle';
+      this.clearDeviceError();
+      const ended = this.#termination;
+      this.#termination = undefined;
+      if (ended && this.#accountRevision === this.#client.accountRevision) {
+        this.#deps.onTerminated?.(ended);
+      }
+      void playSound('call_leave');
+    })().finally(() => {
+      this.#finishPromise = undefined;
+    });
+    return this.#finishPromise;
   }
 
   clearFailure(): void {
@@ -709,6 +792,11 @@ export class CallSession {
 
   #apply(event: PendingEvent): void {
     if (this.#session === undefined || event.session !== this.#session) return;
+
+    if (event.type === 'call_terminated') {
+      if (event.room_id === this.roomId) void this.#finish(event);
+      return;
+    }
 
     if (event.type === 'call_signaling_error') {
       const signalingError = new Error('signaling-error');
