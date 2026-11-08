@@ -59,6 +59,7 @@
   import '../members/sender-identity.css';
   import { formatFullTimestamp, formatMessageTimestamp, formatTime } from '#lib/ui/date-time.js';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
+  import VideoCameraIcon from 'phosphor-svelte/lib/VideoCameraIcon';
   import { isAnnotation, isMessageRow } from './timeline-format';
 
   import { MessageActionExecutor } from '../messages/message-action-controller.svelte.js';
@@ -133,6 +134,7 @@
     currentUserId = null,
     onToggleReaction,
     onReply,
+    onQuoteSelected,
     onCancelContext,
     onOpenThread,
     onEdit,
@@ -234,6 +236,10 @@
   let replySender = $derived(item.in_reply_to?.sender ?? replyTarget?.sender ?? null);
   let emote = $derived(item.content.kind === 'message' && item.content.emote);
   let notice = $derived(item.content.kind === 'message' && item.content.notice);
+  let jitsiNotice = $derived(
+    item.content.kind === 'message' && item.content.notice &&
+    item.content.body.startsWith('📹 [Jitsi] ') ? item.content.body : null
+  );
   let jumbo = $derived(item.content.kind === 'message' ? (item.content.jumbo ?? null) : null);
   let stalled = $derived(item.send_state?.status === 'failed' ? item.send_state : null);
   let pending = $derived(item.send_state?.status === 'sending');
@@ -306,6 +312,7 @@
       onToggleReaction,
       onMarkUnread,
       onReply,
+      onQuoteSelected,
       onEdit: item.forwarded ? undefined : onEdit,
       onDelete,
       onOpenThread,
@@ -745,6 +752,16 @@
           </div>
         {:else if item.content.kind === 'message' && editor}
           {@render editor()}
+          {:else if item.content.kind === 'message' && jitsiNotice !== null}
+            <div class="jitsi-notice-card" role="note">
+              <VideoCameraIcon aria-hidden="true" />
+              <div>
+                <strong>{jitsiNotice.split('\n')[0].replace('📹 [Jitsi] ', '')}</strong>
+                {#if jitsiNotice.includes('\n')}
+                  <p>{jitsiNotice.slice(jitsiNotice.indexOf('\n') + 1)}</p>
+                {/if}
+              </div>
+            </div>
         {:else if item.content.kind === 'message'}
           {@const inlineReceipts = receiptsVisible && receiptsInline}
           <div
@@ -1422,6 +1439,18 @@
   }
 
   /* `m.notice` is usually a bot, and reads as an aside. */
+  .jitsi-notice-card {
+    align-items: flex-start;
+    background: var(--surface-container-active);
+    border: var(--border-width) solid var(--surface-container-line);
+    border-radius: var(--radius);
+    display: flex;
+    gap: var(--space-300);
+    padding: var(--space-400);
+  }
+  .jitsi-notice-card > :global(svg) { flex: none; height: var(--icon-size-medium); width: var(--icon-size-medium); }
+  .jitsi-notice-card strong { font-size: var(--font-size-heading); }
+  .jitsi-notice-card p { margin: var(--space-100) 0 0; }
   .notice {
     color: light-dark(
       color-mix(var(--surface-var-on-container), var(--primary-main) 70%),

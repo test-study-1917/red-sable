@@ -33,6 +33,7 @@
     membersOpen?: boolean;
     searchOpen?: boolean;
     onCall?: (() => void) | null;
+    elementCallActive?: boolean;
     onToggleChat?: (() => void) | null;
     chatOpen?: boolean;
     chatBeside?: boolean;
@@ -57,6 +58,7 @@
     membersOpen = false,
     searchOpen = false,
     onCall = null,
+    elementCallActive = false,
     onToggleChat = null,
     chatOpen = false,
     chatBeside = false,
@@ -98,6 +100,9 @@
         <button class="room-topic" type="button" onclick={onTopic}>{topic}</button>
       {/if}
     </div>
+    {#if elementCallActive}
+      <span class="call-state" role="status"><PhoneIcon /> Element Call 通话中</span>
+    {/if}
     {#if isVoice || inVoice.length > 0}
       <Tooltip label={voiceLabel}>
         {#snippet trigger({ props })}
@@ -169,9 +174,8 @@
     {/if}
     {#if onCall}
       <PanelHeaderButton
-        class="call-button"
         label={inVoice.length > 0 ? i18n.t('call.join') : i18n.t('call.start')}
-        onclick={onCall}
+        onclick={() => onCall?.()}
       >
         <PhoneIcon />
       </PanelHeaderButton>
@@ -192,6 +196,18 @@
 </PanelHeader>
 
 <style>
+  .call-state {
+    align-items: center;
+    background: var(--primary-container);
+    border-radius: var(--radius-pill);
+    color: var(--primary-on-container);
+    display: inline-flex;
+    font-size: var(--font-size-small);
+    gap: var(--space-100);
+    padding: var(--space-100) var(--space-200);
+    white-space: nowrap;
+  }
+  .call-state :global(svg) { height: var(--icon-size-small); width: var(--icon-size-small); }
   .room-identity {
     display: grid;
     flex: 1;

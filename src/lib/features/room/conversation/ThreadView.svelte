@@ -109,6 +109,19 @@
       : Promise.resolve();
   }
 
+  function quoteSelection(eventId: string, text: string): void {
+    if (conversation.context?.kind === 'edit' || conversation.context?.kind === 'schedule') {
+      conversation.clearContext();
+      void tick().then(() => {
+        conversation.reply(eventId);
+        void tick().then(() => composer?.insertQuote(text));
+      });
+      return;
+    }
+    conversation.reply(eventId);
+    void tick().then(() => composer?.insertQuote(text));
+  }
+
   $effect(() => {
     const target = focusEventId;
     if (target === null) {
@@ -279,6 +292,7 @@
     onRequestFuture={requestFuture}
     onRead={markRead}
     onReply={readOnly ? undefined : conversation.reply}
+    onQuoteSelected={readOnly ? undefined : quoteSelection}
     onCancelContext={conversation.clearContext}
     onEdit={readOnly ? undefined : conversation.edit}
     onDelete={conversation.redact}

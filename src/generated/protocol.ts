@@ -453,6 +453,10 @@ export type InboxItemView = {
 	is_direct: boolean,
 	encrypted: boolean,
 	read: boolean,
+	kind: string,
+	jump_event_id: string,
+	reaction_key: string | null,
+	keyword: string | null,
 };
 
 export type InviteAvatarsView = "on" | "off";
@@ -2633,6 +2637,7 @@ export type Rpc = {
 	recorded: number,
 	has_more: boolean,
 }>;
+    markNotificationSeen: (params: { event_id: string }) => Promise<null>;
     setContent: (params: {
 	visible: boolean,
 	encrypted: boolean,
@@ -3402,6 +3407,7 @@ export type RpcMethods = {
   'notifications.set_master_mute': Rpc['notifications']['setMasterMute'];
   'notifications.inbox': Rpc['notifications']['inbox'];
   'notifications.backfill_inbox': Rpc['notifications']['backfillInbox'];
+  'notifications.mark_notification_seen': Rpc['notifications']['markNotificationSeen'];
   'notifications.set_content': Rpc['notifications']['setContent'];
   'notifications.set_sounds': Rpc['notifications']['setSounds'];
   'notifications.set_notify_once': Rpc['notifications']['setNotifyOnce'];
@@ -3720,6 +3726,7 @@ export function createRpc(call: RpcCall): Rpc {
       setMasterMute: (params) => call('notifications.set_master_mute', params) as ReturnType<Rpc['notifications']['setMasterMute']>,
       inbox: (params) => call('notifications.inbox', params) as ReturnType<Rpc['notifications']['inbox']>,
       backfillInbox: (params) => call('notifications.backfill_inbox', params) as ReturnType<Rpc['notifications']['backfillInbox']>,
+      markNotificationSeen: (params) => call('notifications.mark_notification_seen', params) as ReturnType<Rpc['notifications']['markNotificationSeen']>,
       setContent: (params) => call('notifications.set_content', params) as ReturnType<Rpc['notifications']['setContent']>,
       setSounds: (params) => call('notifications.set_sounds', params) as ReturnType<Rpc['notifications']['setSounds']>,
       setNotifyOnce: (params) => call('notifications.set_notify_once', params) as ReturnType<Rpc['notifications']['setNotifyOnce']>,

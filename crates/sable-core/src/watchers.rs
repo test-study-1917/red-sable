@@ -132,6 +132,32 @@ impl Core {
         client: &matrix_sdk::Client,
         generation: u64,
     ) {
+        // Matrix reactions and keyword matches do not necessarily generate push
+        // notifications. Observe all synced room events independently of push.
+        let inbox_handle = client.add_event_handler({
+            let core = self.clone();
+            move |raw: Raw<AnySyncTimelineEvent>, room: matrix_sdk::Room| {
+                let core = core.clone();
+                async move {
+                    if core
+                        .session_generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        != generation
+                    {
+                        return;
+                    }
+                    if matches!(
+                        raw.get_field::<String>("type").ok().flatten().as_deref(),
+                        Some("m.reaction" | "m.room.message" | "m.sticker")
+                    ) {
+                        // Push rules are checked separately in the normal notification
+                        // worker. This path captures explicit mentions/keywords/reactions.
+                        core.record_live_inbox(&room, &raw, &[], generation).await;
+                    }
+                }
+            }
+        });
+        self.track_session_handler(client, inbox_handle);
         let (sender, mut pending) = tokio::sync::mpsc::unbounded_channel();
         let Some(account_id) = self
             .session

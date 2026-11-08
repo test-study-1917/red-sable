@@ -2668,6 +2668,10 @@ pub struct InboxItemView {
     pub is_direct: bool,
     pub encrypted: bool,
     pub read: bool,
+    pub kind: String,
+    pub jump_event_id: String,
+    pub reaction_key: Option<String>,
+    pub keyword: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { matrixLinkAction } from '#lib/rooms/matrix-link.js';
   import { MediaQuery } from 'svelte/reactivity';
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { on } from 'svelte/events';
   import type { RoomListItemView, PerMessageProfileView } from '#src/generated/protocol';
   import { goto } from '$app/navigation';
@@ -284,13 +284,6 @@
       callSupport.current.can_join &&
       (callSupport.current.has_focus || callParticipants.length > 0)
   );
-  let callOffered = $derived(
-    callable &&
-      ((resolvedRoom?.is_direct ?? false) ||
-        callParticipants.length > 0 ||
-        preferences.alwaysShowCallButton ||
-        memberLoader.members.length <= 10)
-  );
 
   let composerMounted = $state(false);
   $effect(() => {
@@ -519,6 +512,20 @@
 
   function mentionUser(userId: string, name: string): void {
     composer?.insertMention(userId, name);
+  }
+
+  function quoteSelection(eventId: string, text: string): void {
+    // End an existing edit first so its pre-edit draft is restored.
+    if (conversation.context?.kind === 'edit' || conversation.context?.kind === 'schedule') {
+      conversation.clearContext();
+      void tick().then(() => {
+        conversation.reply(eventId);
+        void tick().then(() => composer?.insertQuote(text));
+      });
+      return;
+    }
+    conversation.reply(eventId);
+    void tick().then(() => composer?.insertQuote(text));
   }
 
   function openProfile(
@@ -784,6 +791,18 @@
   }
 
   function startCall(): void {
+    if (!callable) {
+      if (call.active) {
+        toasts.error('已有 Element Call 通话正在进行。');
+      } else if (callSupport.current === null) {
+        toasts.error('尚未取得房间通话能力信息，请稍后重试。');
+      } else if (!callSupport.current.can_join) {
+        toasts.error('当前房间不支持 Element Call 或没有加入权限。');
+      } else {
+        toasts.error('当前房间缺少可用的通话服务。');
+      }
+      return;
+    }
     call.clearFailure();
     void call.join(
       resolvedRoomId,
@@ -842,6 +861,7 @@
         : conversation.toggleReaction}
       onDelete={conversation.redact}
       onReply={roomSession.permissions?.can_post === false ? undefined : conversation.reply}
+      onQuoteSelected={roomSession.permissions?.can_post === false ? undefined : quoteSelection}
       onCancelContext={conversation.clearContext}
       onOpenThread={openThread}
       onEdit={roomSession.permissions?.can_post === false ? undefined : conversation.edit}
@@ -954,7 +974,8 @@
       members={memberLoader.members}
       membersOpen={desktop ? panels.desktopMembersOpen : panels.membersOpen}
       searchOpen={panels.searchOpen}
-      onCall={callOffered && !isVoiceRoom ? startCall : null}
+      onCall={!isVoiceRoom ? startCall : null}
+      elementCallActive={Boolean(callShown && call.active)}
       onToggleChat={isVoiceRoom ? () => (voiceChat.open = !voiceChat.open) : null}
       chatOpen={voiceChat.open}
       chatBeside={desktop}

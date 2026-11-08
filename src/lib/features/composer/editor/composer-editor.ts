@@ -1244,6 +1244,46 @@ export class ComposerEditor {
     this.setDoc(textDoc(text));
   }
 
+  /** Insert a selected-message quote and place the caret on a fresh line. */
+  insertQuote(raw: string): void {
+    const view = this.view;
+    if (!view || !raw.trim()) return;
+    const text = raw.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
+    const { paragraph, blockquote, hard_break: hardBreak } = composerSchema.nodes;
+    const content: ProseMirrorNode[] = [];
+
+    if (this.markdownMode()) {
+      // A plain/source composer must contain literal Markdown (> ) lines.
+      for (const [index, line] of text.split('\n').entries()) {
+        if (index > 0) content.push(hardBreak.create());
+        content.push(composerSchema.text(`> ${line}`));
+      }
+      content.push(hardBreak.create(), hardBreak.create());
+      const quote = paragraph.create(null, content);
+      const tr = isPlaceholderDoc(view.state.doc)
+        ? view.state.tr.replaceWith(0, view.state.doc.content.size, quote)
+        : view.state.tr.insert(view.state.doc.content.size, quote);
+      tr.setSelection(Selection.atEnd(tr.doc));
+      view.dispatch(tr.scrollIntoView());
+      view.focus();
+      return;
+    }
+
+    // In rich-text mode use an actual blockquote for valid Matrix HTML.
+    for (const [index, line] of text.split('\n').entries()) {
+      if (index > 0) content.push(hardBreak.create());
+      if (line !== '') content.push(composerSchema.text(line));
+    }
+    const quote = blockquote.create(null, paragraph.create(null, content));
+    const blankLine = paragraph.create();
+    const tr = isPlaceholderDoc(view.state.doc)
+      ? view.state.tr.replaceWith(0, view.state.doc.content.size, [quote, blankLine])
+      : view.state.tr.insert(view.state.doc.content.size, [quote, blankLine]);
+    tr.setSelection(Selection.atEnd(tr.doc));
+    view.dispatch(tr.scrollIntoView());
+    view.focus();
+  }
+
   insert(node: ProseMirrorNode): void {
     const view = this.view;
     if (!view) return;

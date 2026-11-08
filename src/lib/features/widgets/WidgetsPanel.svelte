@@ -3,6 +3,7 @@
   import GridFourIcon from 'phosphor-svelte/lib/GridFourIcon';
   import PlusIcon from 'phosphor-svelte/lib/PlusIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
+  import { isJitsiWidget } from './jitsi-widget.js';
 
   import { i18n } from '#lib/i18n.js';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
@@ -23,6 +24,8 @@
   interface Props {
     roomId: string;
     widgets: readonly RoomWidget[];
+    autoOpenWidgetId?: string | null;
+    onActiveWidgetChange?: (widgetId: string | null) => void;
     userId: string;
     displayName: string;
     avatarUrl: string;
@@ -36,6 +39,8 @@
   let {
     roomId,
     widgets,
+    autoOpenWidgetId = null,
+    onActiveWidgetChange,
     userId,
     displayName,
     avatarUrl,
@@ -54,6 +59,10 @@
   const storedWidth = Number.parseFloat(localStorage.getItem(WIDTH_STORAGE_KEY) ?? '');
   let width = $state(Number.isFinite(storedWidth) ? clampWidth(storedWidth) : 22);
   let activeId = $state<string | null>(null);
+  $effect(() => {
+    const requested = autoOpenWidgetId;
+    if (requested && widgets.some((widget) => widget.id === requested)) activeId = requested;
+  });
 
   function clampWidth(next: number): number {
     return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, next));
@@ -112,7 +121,8 @@
     };
   }
 
-  let activeWidget = $derived(widgets.find((widget) => widget.id === activeId) ?? null);
+  let visibleWidgets = $derived(widgets.filter((widget) => !isJitsiWidget(widget)));
+  let activeWidget = $derived(visibleWidgets.find((widget) => widget.id === activeId) ?? null);
   let activeUrl = $derived(
     activeWidget
       ? templateWidgetUrl(activeWidget, {
@@ -123,6 +133,11 @@
         })
       : null
   );
+  function selectWidget(widget: RoomWidget): void {
+    activeId = widget.id;
+    onActiveWidgetChange?.(widget.id);
+  }
+
 </script>
 
 <aside
@@ -146,7 +161,7 @@
   <PanelHeader class="widgets-header" title={activeWidget?.name || i18n.t('widgets.title')}>
     {#snippet prefix()}
       {#if activeWidget}
-        <PanelHeaderButton label={i18n.t('widgets.back')} onclick={() => (activeId = null)}>
+        <PanelHeaderButton label={i18n.t('widgets.back')} onclick={() => { activeId = null; onActiveWidgetChange?.(null); }}>
           <ArrowLeftIcon />
         </PanelHeaderButton>
       {:else}
@@ -172,14 +187,15 @@
         />
       </div>
     {/key}
-  {:else}
+  {/if}
+  {#if !activeWidget}
     <div class="widgets-list" {@attach scrollHint}>
-      {#if widgets.length === 0}
+      {#if visibleWidgets.length === 0}
         <p class="widgets-empty">{i18n.t('widgets.empty')}</p>
       {/if}
-      {#each widgets as widget (widget.id)}
+      {#each visibleWidgets as widget (widget.id)}
         <div class="widgets-item choice">
-          <button type="button" onclick={() => (activeId = widget.id)}>
+          <button type="button" onclick={() => selectWidget(widget)}>
             {widget.name}
           </button>
           {#if canManage}
@@ -283,6 +299,16 @@
     border-left: var(--border-width) solid var(--surface-container-line);
     flex: 0 0 auto;
   }
+  .widgets-panel.modal {
+  position: fixed;
+  inset: 0px 0px
+    0px auto;
+  height: auto;
+  width: min(22rem, 85vw);
+  z-index: calc(var(--layer-overlay, 1000) + 1);
+  border-left: var(--border-width) solid var(--surface-container-line);
+  box-shadow: var(--shadow-dialog);
+}
 
   .widgets-panel :global(.resize-handle) {
     left: -0.25rem;
@@ -357,5 +383,13 @@
     height: 100%;
     max-width: 100%;
     width: 100%;
+  }
+  .widgets-frame {
+    display: flex;
+    flex-direction: column;
+  }
+  .widgets-frame :global(.widget-frame) {
+    flex: 1 1 auto;
+    min-height: 0;
   }
 </style>

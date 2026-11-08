@@ -970,6 +970,11 @@
     typing.update(empty);
   }
 
+  export function insertQuote(text: string): void {
+    if (readOnly) return;
+    editor.insertQuote(text);
+  }
+
   // The popover hands focus back to its trigger as it closes.
   function focusEditorAfterPick(): void {
     requestAnimationFrame(() => editor.focus());

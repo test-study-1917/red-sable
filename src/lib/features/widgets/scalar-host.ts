@@ -139,6 +139,39 @@ export async function answerScalarRequest(
 
   const target = request.user_id;
   switch (request.action) {
+    case 'send_event': {
+      const data = request;
+
+      // Only allow Scalar integration installation state events.
+      if (
+        !isRecord(data) ||
+        data.type !== 'io.element.integrations.installations' ||
+        typeof data.state_key !== 'string' ||
+        !isRecord(data.content) ||
+        (data.room_id !== undefined && data.room_id !== roomId)
+      ) {
+        throw new ScalarError('Unsupported send_event request');
+      }
+
+      // Check the current user's permission to write room state.
+      if (!(await canSend(rpc, roomId, userId, data.type, true))) {
+        throw new ScalarError('You do not have permission to do that in this room');
+      }
+
+      // Send the integration installation state event.
+      const event_id = await rpc.room_state.sendEvent({
+        room_id: roomId,
+        event_type: data.type,
+        state_key: data.state_key,
+        content: data.content,
+      });
+
+      return {
+        room_id: roomId,
+        event_id,
+      };
+    }
+
     case 'get_widgets':
       return getWidgets(rpc, roomId);
     case 'set_widget':

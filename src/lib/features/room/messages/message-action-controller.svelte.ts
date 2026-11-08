@@ -24,6 +24,7 @@ export interface MessageCallbacks {
   ) => void;
   onMarkUnread?: (eventId: string) => void;
   onReply?: (eventId: string, version?: ReplyVersion) => void;
+  onQuoteSelected?: (eventId: string, text: string) => void;
   onCancelContext?: () => void;
   onEdit?: (eventId: string, body: string, html: string | null, mediaCaption?: boolean) => void;
   onDelete?: (eventId: string, reason: string | null) => void;
@@ -74,6 +75,7 @@ export class MessageActionExecutor {
       onToggleReaction,
       onMarkUnread,
       onReply,
+      onQuoteSelected,
       onEdit,
       onDelete,
       onOpenThread,
@@ -249,6 +251,12 @@ export class MessageActionExecutor {
             onReply?.(policy.eventId);
           }
         : undefined,
+      onQuoteSelected:
+        policy.reply && onQuoteSelected
+          ? (text: string) => {
+              onQuoteSelected(policy.eventId, text);
+            }
+          : undefined,
       onEdit: policy.edit
         ? () => {
             if (policy.body === null) return;

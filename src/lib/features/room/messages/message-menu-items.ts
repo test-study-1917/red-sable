@@ -31,6 +31,8 @@ export type MessageActions = {
   onEditHistory?: () => void;
   onMarkUnread?: () => void;
   onReply?: () => void;
+  onQuoteSelected?: (text: string) => void;
+  onQuoteSelection?: () => void;
   onOpenThread?: () => void;
   onEdit?: () => void;
   onReproxy?: () => void;
@@ -97,7 +99,14 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onReproxy,
     });
   }
-  if (actions.onCopyText) {
+  if (actions.onQuoteSelection) {
+    rows.push({
+      key: 'quote-selection',
+      label: 'timeline.quoteSelection',
+      icon: ReplyIcon,
+      run: actions.onQuoteSelection,
+    });
+  } else if (actions.onCopyText) {
     rows.push({
       key: 'copy',
       label: actions.copyTextLabel ?? 'timeline.copyMessage',

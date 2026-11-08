@@ -24,6 +24,8 @@
     memberLoader: RoomMemberLoader;
     roomSession: RoomSession;
     canManageWidgets: boolean;
+    autoOpenWidgetId?: string | null;
+    onActiveWidgetChange?: (widgetId: string | null) => void;
     onOpenThread: (rootEventId: string) => void;
     onJump: (eventId: string) => void;
     onOpenMedia: (items: MediaItem[], eventId: string) => void;
@@ -39,6 +41,8 @@
     memberLoader,
     roomSession,
     canManageWidgets,
+    autoOpenWidgetId = null,
+    onActiveWidgetChange,
     onOpenThread,
     onJump,
     onOpenMedia,
@@ -126,19 +130,6 @@
       {onMemberProfile}
     />
   {/if}
-  {#if panels.widgetsOpen}
-    <WidgetsPanel
-      {roomId}
-      widgets={roomSession.widgets}
-      userId={core.session?.user_id ?? ''}
-      displayName={ownMember?.display_name ?? core.session?.user_id ?? ''}
-      avatarUrl={ownMember?.avatar_url ?? ''}
-      canManage={canManageWidgets}
-      onClose={closeWidgets}
-      onAdd={addWidget}
-      onRemove={removeWidget}
-    />
-  {/if}
 {:else}
   <DialogFrame bind:open={panels.membersOpen} variant="drawer">
     <MembersDrawer
@@ -154,25 +145,19 @@
   </DialogFrame>
 {/if}
 
-{#if !desktop}
-  <DialogFrame
-    open={panels.widgetsOpen}
-    onOpenChange={(open: boolean) => {
-      if (!open) closeWidgets();
-    }}
-    variant="drawer"
-  >
-    <WidgetsPanel
-      {roomId}
-      widgets={roomSession.widgets}
-      userId={core.session?.user_id ?? ''}
-      displayName={ownMember?.display_name ?? core.session?.user_id ?? ''}
-      avatarUrl={ownMember?.avatar_url ?? ''}
-      canManage={canManageWidgets}
-      modal
-      onClose={closeWidgets}
-      onAdd={addWidget}
-      onRemove={removeWidget}
-    />
-  </DialogFrame>
+{#if panels.widgetsOpen}
+  <WidgetsPanel
+    {autoOpenWidgetId}
+    {onActiveWidgetChange}
+    {roomId}
+    widgets={roomSession.widgets}
+    userId={core.session?.user_id ?? ''}
+    displayName={ownMember?.display_name ?? core.session?.user_id ?? ''}
+    avatarUrl={ownMember?.avatar_url ?? ''}
+    canManage={canManageWidgets}
+    modal={!desktop}
+    onClose={closeWidgets}
+    onAdd={addWidget}
+    onRemove={removeWidget}
+  />
 {/if}

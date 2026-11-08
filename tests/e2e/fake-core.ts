@@ -1089,7 +1089,16 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
             (params.filter !== 'mentions' || item.highlight) &&
             (params.filter !== 'direct' || item.is_direct)
         );
-        return { items, has_more: false };
+        return {
+          items: items.map((item) => ({
+            ...item,
+            kind: 'message' as const,
+            jump_event_id: item.event_id,
+            reaction_key: '',
+            keyword: '',
+          })),
+          has_more: false,
+        };
       },
       'notifications.backfill_inbox': () => ({ recorded: 0, has_more: false }),
       'notifications.add_keyword': (params) => {

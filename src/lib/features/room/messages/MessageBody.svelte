@@ -10,6 +10,7 @@
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { i18n } from '#lib/i18n.js';
   import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
+  import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
 
   import { preferences } from '#lib/settings/preferences.svelte.js';
 
@@ -95,11 +96,16 @@
 
 {#if ((item.content.kind !== 'image' && spoiler !== null) || hiddenByPolicy) && revealedSpoiler !== spoilerKey}
   <Button
-    class="spoiler-reveal"
+    class={hiddenByPolicy && (item.content.kind === 'image' || item.content.kind === 'gallery')
+      ? 'spoiler-reveal sable-hidden-image-card' : 'spoiler-reveal'}
     onclick={() => {
       revealedSpoiler = spoilerKey;
     }}
   >
+    {#if hiddenByPolicy && (item.content.kind === 'image' || item.content.kind === 'gallery')}
+      <ImageIcon size={40} aria-hidden="true" />
+      <span class="sable-hidden-image-note">图片尚未预览</span>
+    {/if}
     {spoiler ? `${spoiler} — ` : ''}{i18n.t(
       spoiler === null ? 'timeline.hiddenMedia' : 'timeline.spoilerMedia'
     )}
@@ -264,6 +270,33 @@
 {/if}
 
 <style>
+  /* SABLE_UNLOADED_IMAGE_CARD_V1: 仅未预览的图片或图片组 */
+  :global(.btn.sable-hidden-image-card) {
+    --button-icon-size: 2.5rem;
+    --button-container: var(--surface-container);
+    --button-container-hover: var(--surface-container-hover);
+    --button-container-active: var(--surface-container-active);
+    --button-on-container: var(--surface-on-container);
+
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+
+    width: min(100%, 36rem);
+    height: clamp(12rem, 30vh, 20rem);
+    max-width: 100%;
+
+    padding: var(--space-400);
+    gap: var(--space-200);
+
+    outline: var(--border-width) dashed var(--surface-container-line);
+    outline-offset: calc(-1 * var(--border-width));
+  }
+
+  :global(.sable-hidden-image-card .sable-hidden-image-note) {
+    font-size: var(--font-size-body);
+    font-weight: var(--font-weight-600);
+  }
   .body {
     line-height: var(--line-height-body);
     margin: 0;

@@ -158,6 +158,7 @@
     currentUserId,
     onToggleReaction,
     onReply,
+    onQuoteSelected,
     onCancelContext,
     onOpenThread,
     onEdit,
@@ -1012,6 +1013,7 @@
     {currentUserId}
     {onToggleReaction}
     {onReply}
+    {onQuoteSelected}
     {onCancelContext}
     {onOpenThread}
     {onEdit}

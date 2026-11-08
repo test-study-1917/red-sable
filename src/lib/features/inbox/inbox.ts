@@ -6,7 +6,7 @@ import { hasUnread, type RoomUnread, roomUnread } from '#lib/rooms/unread.js';
 import type { UnreadCount } from '#lib/rooms/unread.js';
 
 export type NotificationFilter = 'all' | 'mentions' | 'direct';
-export type InboxTab = 'notifications' | 'invites' | 'requests';
+export type InboxTab = 'notifications' | 'bookmarks';
 
 export const NOTIFICATION_GROUP_LIMIT = 5;
 
@@ -42,9 +42,7 @@ export function parseInboxTab(
   value: string | null,
   fallback: InboxTab = 'notifications'
 ): InboxTab {
-  return value === 'notifications' || value === 'invites' || value === 'requests'
-    ? value
-    : fallback;
+  return value === 'notifications' || value === 'bookmarks' ? value : fallback;
 }
 
 export function parseFilter(value: string | null): NotificationFilter {

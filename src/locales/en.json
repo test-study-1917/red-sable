@@ -158,8 +158,6 @@
     "noAlerts": "No alerts"
   },
   "inbox": {
-    "invitesTab": "Invites",
-    "invitesEmpty": "No pending invitations.",
     "notifications": "Notifications",
     "invites": "Pending invites",
     "navLabel_one": "Inbox, {{count, number}} waiting",
@@ -1123,6 +1121,7 @@
     "deleteReason": "Reason (optional, shown to the room)",
     "copyMessage": "Copy message",
     "copySelection": "Copy selection",
+    "quoteSelection": "Quote reply",
     "copyLink": "Copy link address",
     "copyMessageLink": "Copy link to message",
     "moreActions": "More actions",

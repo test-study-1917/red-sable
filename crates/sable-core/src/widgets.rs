@@ -225,7 +225,6 @@ fn integration_manager_page(
     room_id: &matrix_sdk::ruma::RoomId,
 ) -> Option<String> {
     let mut url = url::Url::parse(ui_url).ok()?;
-    url.set_path("/index.html");
     {
         let mut query = url.query_pairs_mut();
         if let Some(token) = scalar_token {
@@ -237,10 +236,15 @@ fn integration_manager_page(
 }
 
 fn terms_url(api_url: &str) -> String {
-    format!(
-        "{}/_matrix/integrations/v1/terms",
-        api_url.trim_end_matches('/')
-    )
+    let api_url = api_url.trim_end_matches('/');
+
+    let base_url = if api_url == DEFAULT_INTEGRATION_MANAGER.0 {
+        DEFAULT_INTEGRATION_MANAGER.1
+    } else {
+        api_url
+    };
+
+    format!("{base_url}/_matrix/integrations/v1/terms")
 }
 
 fn pending_policies(terms: &Value, accepted: &[String]) -> Vec<TermsPolicyView> {
