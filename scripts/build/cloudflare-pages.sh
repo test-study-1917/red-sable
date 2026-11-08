@@ -5,8 +5,16 @@ set -euo pipefail
 curl --fail --silent --show-error --location https://mise.run | sh
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
+# Pages 的构建镜像也使用 mise；只读取仓库的工具配置，
+# 不继承镜像的 .tool-versions（其中可能声明 dart-sass-embedded）。
+unset MISE_ENV
+export MISE_CONFIG_FILE="$PWD/.mise/config.toml"
+export MISE_GLOBAL_CONFIG_FILE="$MISE_CONFIG_FILE"
+export MISE_OVERRIDE_CONFIG_FILENAMES='.mise/config.toml'
+export MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES='.pages-tool-versions'
+
 # 按仓库配置安装 Node、pnpm、Rust 和 WASM 工具
-mise trust
+mise trust "$PWD/.mise/config.toml"
 mise install
 
 mise exec -- pnpm install --frozen-lockfile
