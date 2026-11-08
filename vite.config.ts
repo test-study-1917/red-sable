@@ -53,7 +53,7 @@ export default defineConfig({
   },
   server: {
     // Keep the frontend endpoint aligned with src-tauri/tauri.conf.json.
-    port: 3000,
+    port: 3001,
     strictPort: true,
     watch: {
       ignored: (path) => {

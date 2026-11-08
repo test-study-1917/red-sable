@@ -1,5 +1,7 @@
 # <img src="src/lib/assets/res/svg/logo.svg" alt="Sable" width="32" height="32"> Sable
 
+[English](README.md) | [简体中文](README_zh.md)
+
 An almost stable Matrix client, written from scratch in Rust and Svelte.  
 Trying to be feature-complete while enhancing the user experience with quality-of-life features, cosmetics, utilities and sheer usability.
 
