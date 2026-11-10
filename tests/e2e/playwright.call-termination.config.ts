@@ -9,7 +9,7 @@ const origin = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'call-termination.spec.ts',
+  testMatch: ['call-termination.spec.ts', 'call-dual-layout.spec.ts'],
   workers: 1,
   outputDir: join(tmpdir(), `sable-call-termination-${String(process.pid)}`),
   preserveOutput: 'always',

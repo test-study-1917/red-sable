@@ -31,6 +31,8 @@
     gap: var(--grid-gap);
     list-style: none;
     margin: 0;
+    min-height: 0;
+    min-width: 0;
     padding: 0;
     place-content: center;
   }

@@ -77,6 +77,7 @@
   import { RoomPanels } from './room-panels.svelte.js';
   import { TombstoneJoin } from './room-tombstone-join.svelte.js';
   import RoomCallStage from './RoomCallStage.svelte';
+  import RoomCallLayout from './RoomCallLayout.svelte';
   import RoomVoiceChat from './RoomVoiceChat.svelte';
   import RoomSidePanels from './RoomSidePanels.svelte';
   import RoomDialogs from './RoomDialogs.svelte';
@@ -321,14 +322,6 @@
   );
   let timelineEventId = $derived(resolvedPermalink?.rootEventId ?? eventId);
   const sidePanels = new MediaQuery(BREAKPOINTS.sidePanels);
-  const callStageRatio = new PanelWidth(
-    'sable-call-stage-ratio',
-    sidePanels.current ? 0.65 : 0.4,
-    0.2,
-    0.8
-  );
-  callStageRatio.restore();
-  let timelineHeight = $state(0);
   let isVoiceRoom = $derived(resolvedRoom?.room_kind === 'voice');
   const voiceChatWidth = new PanelWidth('sable-voice-chat-width', 400, 300, 1000);
   voiceChatWidth.restore();
@@ -899,7 +892,6 @@
   <div
     class={['timeline', { 'thread-covered': panels.threadRootId !== null && !threadInPanel }]}
     inert={panels.threadRootId !== null && !threadInPanel}
-    bind:clientHeight={timelineHeight}
   >
     {#snippet headerActions()}
       <RoomHeaderActions
@@ -972,36 +964,36 @@
         />
       {/snippet}
     </RoomHeader>
-    {#if callShown && (voiceView || !isVoiceRoom)}
-      <RoomCallStage
-        docked={!voiceView}
-        ratio={callStageRatio}
-        {timelineHeight}
-        members={memberLoader.members}
-        onInvite={roomSession.permissions?.can_invite ? () => (inviteOpen = true) : undefined}
-      />
-    {/if}
-    {#if voiceView}
-      {#if !callShown}
-        <VoiceLobby
-          participants={callParticipants}
-          screenSharers={resolvedRoom?.screen_sharers ?? []}
+    <RoomCallLayout active={!!callShown && (voiceView || !isVoiceRoom)} docked={!voiceView}>
+      {#snippet callStage(layout)}
+        <RoomCallStage
+          layout={voiceView ? undefined : layout}
           members={memberLoader.members}
-          media={prescreenMedia}
-          joining={call.lifecycle === 'joining'}
-          canJoin={callable}
-          hasPermission={callSupport.current?.can_join ?? false}
-          hasFocus={callSupport.current?.has_focus ?? true}
-          {roomName}
-          selfId={core.session?.user_id ?? null}
-          onChange={(media: CallMedia) => (prescreenMedia = media)}
-          onJoin={joinCall}
-          onOpenSettings={(event: MouseEvent) => openSettingsOver(event, 'calls')}
+          onInvite={roomSession.permissions?.can_invite ? () => (inviteOpen = true) : undefined}
         />
+      {/snippet}
+      {#if voiceView}
+        {#if !callShown}
+          <VoiceLobby
+            participants={callParticipants}
+            screenSharers={resolvedRoom?.screen_sharers ?? []}
+            members={memberLoader.members}
+            media={prescreenMedia}
+            joining={call.lifecycle === 'joining'}
+            canJoin={callable}
+            hasPermission={callSupport.current?.can_join ?? false}
+            hasFocus={callSupport.current?.has_focus ?? true}
+            {roomName}
+            selfId={core.session?.user_id ?? null}
+            onChange={(media: CallMedia) => (prescreenMedia = media)}
+            onJoin={joinCall}
+            onOpenSettings={(event: MouseEvent) => openSettingsOver(event, 'calls')}
+          />
+        {/if}
+      {:else}
+        {@render chat()}
       {/if}
-    {:else}
-      {@render chat()}
-    {/if}
+    </RoomCallLayout>
   </div>
 
   {#if panels.threadRootId !== null}

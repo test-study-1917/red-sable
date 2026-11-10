@@ -39,7 +39,7 @@ export default defineConfig({
       name: 'chromium',
       dependencies: ['setup'],
       testIgnore:
-        /(?:global\.(?:setup|teardown)|call-termination\.spec|drag-list\.spec|ws-server\.spec|\.test)\.ts/,
+        /(?:global\.(?:setup|teardown)|call-(?:termination|dual-layout)\.spec|drag-list\.spec|ws-server\.spec|\.test)\.ts/,
       use: devices['Desktop Chrome'],
     },
     {

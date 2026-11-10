@@ -1,5 +1,8 @@
 <script lang="ts">
   import { i18n } from '#lib/i18n.js';
+  import ColumnsIcon from 'phosphor-svelte/lib/ColumnsIcon';
+  import RowsIcon from 'phosphor-svelte/lib/RowsIcon';
+  import type { RoomCallLayoutState } from '../room/room-call-layout.svelte.js';
   import CornersInIcon from 'phosphor-svelte/lib/CornersInIcon';
   import CornersOutIcon from 'phosphor-svelte/lib/CornersOutIcon';
   import LockIcon from 'phosphor-svelte/lib/LockSimpleIcon';
@@ -48,13 +51,14 @@
   import { callFullscreen } from './call-fullscreen.svelte.js';
 
   interface Props {
+    roomLayout?: RoomCallLayoutState;
     session: CallSession;
     members: readonly MemberView[];
     onInvite?: () => void;
     onOpenSettings?: (event: MouseEvent) => void;
   }
 
-  let { session, members, onInvite, onOpenSettings }: Props = $props();
+  let { session, members, onInvite, onOpenSettings, roomLayout }: Props = $props();
 
   const CHROME_IDLE_MS = 3500;
 
@@ -143,6 +147,8 @@
   );
 
   let noticeHeight = $state(0);
+  let dockHeight = $state(0);
+  let topHeight = $state(0);
   let mediaWidth = $state(0);
   let mediaHeight = $state(0);
   let aspect = $derived(mediaWidth > 0 && mediaWidth < NARROW_STAGE_PX ? 1 : 16 / 9);
@@ -234,6 +240,8 @@
   class={['stage', { resting: !chromeVisible, expanded: fullscreen.expanded }]}
   aria-label={i18n.t('call.title')}
   bind:this={stage}
+  style:--dock-height="{failed ? 0 : dockHeight}px"
+  style:--top-height="{topHeight}px"
   onpointermove={wake}
   onpointerdown={wake}
   onpointerleave={(event) => {
@@ -246,7 +254,7 @@
   }}
   onfocusout={() => (chromeHeld = false)}
 >
-  <header class="top chrome">
+  <header class="top chrome" bind:clientHeight={topHeight}>
     <p class="status" role="status">
       {#if busy}
         <Spinner small />
@@ -306,6 +314,31 @@
           {/if}
         </IconButton>
       {/if}
+      {#if roomLayout && !fullscreen.active}
+        {@const label = i18n.t(
+          roomLayout.horizontal
+            ? 'call.stackChat'
+            : roomLayout.wide
+              ? 'call.chatBeside'
+              : 'call.chatBesideUnavailable'
+        )}
+        <Tooltip {label}>
+          {#snippet trigger({ props })}
+            <IconButton
+              {...props}
+              variant="secondary"
+              size="small"
+              {label}
+              aria-disabled={!roomLayout.horizontal && !roomLayout.wide}
+              onclick={() => roomLayout?.toggle()}
+            >
+              {#if roomLayout.horizontal}<RowsIcon weight="bold" />{:else}<ColumnsIcon
+                  weight="bold"
+                />{/if}
+            </IconButton>
+          {/snippet}
+        </Tooltip>
+      {/if}
       {#if fullscreen.available}
         <IconButton
           variant="secondary"
@@ -324,7 +357,7 @@
   </header>
 
   {#if !failed}
-    <div class="dock chrome">
+    <div class="dock chrome" bind:clientHeight={dockHeight}>
       <CallControls
         microphoneEnabled={session.microphoneEnabled && !session.deafened}
         pushToTalk={session.inputMode === 'push-to-talk'}
@@ -401,11 +434,7 @@
     class={[
       'media',
       {
-        'with-notice':
-          session.deviceError !== null ||
-          session.listenOnly ||
-          session.endStatus === 'sending' ||
-          session.endStatus === 'failed',
+        'with-notice': noticeHeight > 0,
         locked: busy,
       },
     ]}
@@ -564,6 +593,7 @@
   .top {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-200);
     inset: 0 0 auto;
     justify-content: space-between;
@@ -638,9 +668,9 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-200);
-    inset: calc(var(--space-200) + var(--control-height-300) + var(--space-200)) var(--space-300)
-      auto;
-    pointer-events: none;
+    inset: var(--top-height) var(--space-300) auto;
+    max-height: max(0px, calc(100% - var(--top-height) - var(--dock-height)));
+    overflow-y: auto;
     position: absolute;
     z-index: 3;
   }
@@ -682,24 +712,11 @@
     display: flex;
     flex: 1;
     min-height: 0;
-    padding: calc(var(--space-200) + var(--control-height-300) + var(--space-200)) var(--space-300)
-      calc(
-        var(--control-height-500) + var(--space-150) * 2 + var(--border-width) * 2 +
-          var(--space-300) * 2
-      );
+    padding: var(--top-height) var(--space-300) var(--dock-height);
   }
 
   .media.with-notice {
-    padding-block-start: calc(
-      var(--space-200) + var(--control-height-300) + var(--space-400) + var(--notice-height)
-    );
-  }
-
-  .media.locked {
-    padding-block-end: calc(
-      var(--control-height-500) + var(--space-150) * 3 + var(--border-width) * 2 +
-        var(--space-300) * 2 + var(--space-500)
-    );
+    padding-block-start: calc(var(--top-height) + var(--space-200) + var(--notice-height));
   }
 
   .failed {
