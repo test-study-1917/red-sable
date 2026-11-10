@@ -132,7 +132,11 @@ function core(): CoreClient {
     },
     rpc: {
       members: { list: () => Promise.resolve(members) },
-      messages: { mediaConfig, frequentReactions: () => Promise.resolve([]) },
+      messages: {
+        mediaConfig,
+        frequentReactions: () => Promise.resolve([]),
+        rememberEmoji: () => Promise.resolve(null),
+      },
       room_state: { botCommands: () => Promise.resolve(botCommands) },
       personas: {
         list: () =>
@@ -410,12 +414,15 @@ test.each([
 
 test('an unmount stops the typing notice for the room it was mounted with', async () => {
   const typing = vi.fn(async () => {});
-  const instance = setup({ roomId: '!first:example.org', onTyping: typing });
-  await flushed();
+  draftText('hello');
+  const instance = setup({ roomId: '!room:example.org', onTyping: typing });
+  await vi.waitFor(() => {
+    expect(typing).toHaveBeenLastCalledWith('!room:example.org', true);
+  });
 
   instance.unmount();
 
-  expect(typing).toHaveBeenLastCalledWith('!first:example.org', false);
+  expect(typing).toHaveBeenLastCalledWith('!room:example.org', false);
 });
 
 test('stages any selected attachment, not only images, and sends it on submit', async () => {

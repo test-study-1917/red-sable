@@ -45,7 +45,7 @@
   import { providePanelStage } from '#lib/ui/motion.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
 
-  import { preferences, readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import VoiceLobby from '#lib/features/call/VoiceLobby.svelte';
   import { useCallSession, type CallMedia } from '#lib/features/call/call-session.svelte.js';
   import {
@@ -61,6 +61,7 @@
   import { canSendState } from './settings/permission-groups';
   import RoomPinMenu from './RoomPinMenu.svelte';
   import RoomPredecessorNotice from './RoomPredecessorNotice.svelte';
+  import RoomPresencePrompt from './RoomPresencePrompt.svelte';
   import RoomTombstoneBanner from './RoomTombstoneBanner.svelte';
   import RoomReadReceipts from './timeline/RoomReadReceipts.svelte';
   import TimelineList from './timeline/TimelineList.svelte';
@@ -175,8 +176,10 @@
   }
 
   function publishComposerClearance(node: HTMLElement): () => void {
+    const host = node.parentElement;
     const update = (): void => {
       composerClearance.px = Math.max(0, window.innerHeight - node.getBoundingClientRect().top);
+      host?.style.setProperty('--composer-height', `${String(node.offsetHeight)}px`);
     };
     const observer = new ResizeObserver(update);
     observer.observe(node);
@@ -185,6 +188,7 @@
       observer.disconnect();
       stopResize();
       composerClearance.px = 0;
+      host?.style.removeProperty('--composer-height');
     };
   }
 
@@ -646,7 +650,6 @@
     await core.rpc.timeline.markRead({
       room_id: resolvedRoomId,
       event_id: eventId,
-      private_receipt: readReceiptIsPrivate(),
       thread_root: null,
       subscription: timeline.subscriptionId,
       fully_read: fullyRead,
@@ -682,7 +685,6 @@
     await core.rpc.timeline.markRead({
       room_id: resolvedRoomId,
       event_id: null,
-      private_receipt: readReceiptIsPrivate(),
       thread_root: null,
       subscription: null,
       fully_read: true,
@@ -859,6 +861,7 @@
         onJoin={() => void tombstoneJoin.join()}
       />
     {:else}
+      <RoomPresencePrompt roomId={resolvedRoomId} roomName={resolvedRoom?.display_name ?? ''} />
       {#if composerMounted}
         <ScheduledMessages
           roomId={resolvedRoomId}
@@ -913,6 +916,7 @@
       {roomName}
       {roomAvatar}
       topic={roomTopic}
+      encrypted={resolvedRoom?.encrypted ?? null}
       isVoice={resolvedRoom?.room_kind === 'voice'}
       callParticipants={resolvedRoom?.call_participants ?? []}
       members={memberLoader.members}

@@ -1,4 +1,5 @@
 use crate::api::session::SearchTuning;
+use crate::now_ms;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -13,12 +14,12 @@ use matrix_sdk::ruma::api::client::message::get_message_events;
 use matrix_sdk::ruma::api::error::{ErrorKind, RetryAfter};
 use matrix_sdk::ruma::events::AnyTimelineEvent;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedRoomId, RoomId, UInt};
+use matrix_sdk::ruma::{OwnedRoomId, RoomId, UInt};
 use matrix_sdk::{EncryptionState, Room, RoomState};
 use tracing::warn;
 
 use super::persist::{self, Cover, StoredCrawlRoom};
-use super::sharing::DISCOVERY_MS;
+use super::sharing::DISCOVERY;
 use crate::Core;
 use crate::protocol::{
     CoreEvent, SearchCoverageState, SearchCoverageView, SearchCrawlPhase, SearchMetricsView,
@@ -157,10 +158,6 @@ fn decrypted_or_utd(
             },
         )
     })
-}
-
-fn now_ms() -> u64 {
-    MilliSecondsSinceUnixEpoch::now().get().into()
 }
 
 impl CrawlProgress {
@@ -471,7 +468,7 @@ impl Core {
 
         self.report_coverage(client, &mut reported).await;
         if self.search_sharing.discovering() {
-            let deadline = web_time::Instant::now() + Duration::from_millis(DISCOVERY_MS);
+            let deadline = web_time::Instant::now() + DISCOVERY;
             while self.search_sharing.discovering() && web_time::Instant::now() < deadline {
                 matrix_sdk::sleep::sleep(Duration::from_millis(100)).await;
             }
@@ -727,7 +724,7 @@ impl Core {
             running_ms: metrics
                 .started_ms
                 .map(|started| now_ms().saturating_sub(started)),
-            sharing: self.search_sharing_view().await,
+            sharing: self.search_sharing_view(),
         }
     }
 
@@ -1366,14 +1363,14 @@ mod tests {
             Box::new(crate::store::MemorySessionStore::default()),
         );
 
-        core.set_search_network_unmetered(false);
+        core.search_network.set_unmetered(false);
         core.crawl_once(&client, &room_id)
             .await
             .expect("paused crawl");
         assert_eq!(core.search_crawl.lock().await.metrics.batches, 0);
         assert!(core.search_crawl.lock().await.tokens.is_empty());
 
-        core.set_search_network_unmetered(true);
+        core.search_network.set_unmetered(true);
         core.crawl_once(&client, &room_id)
             .await
             .expect("resumed crawl");
@@ -1386,7 +1383,7 @@ mod tests {
             .mock_once()
             .mount()
             .await;
-        core.set_search_network_unmetered(false);
+        core.search_network.set_unmetered(false);
         let outcome = core
             .crawl_once(&client, &room_id)
             .await
@@ -1424,7 +1421,7 @@ mod tests {
             "metered-search-request",
             Box::new(crate::store::MemorySessionStore::default()),
         );
-        core.set_search_network_unmetered(true);
+        core.search_network.set_unmetered(true);
 
         let switch_network = async {
             loop {
@@ -1441,7 +1438,7 @@ mod tests {
                 }
                 tokio::task::yield_now().await;
             }
-            core.set_search_network_unmetered(false);
+            core.search_network.set_unmetered(false);
         };
         let (outcome, ()) = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::join!(core.crawl_once(&client, &room_id), switch_network)

@@ -30,10 +30,6 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
 
-mod search_peer;
-
-pub use search_peer::{SearchPeerDecoder, encode_search_peer_frame};
-
 /// Everything crosses as JSON, typed on the other side by the generated
 /// protocol types.
 fn json(value: &impl serde::Serialize) -> Result<String, JsError> {
@@ -458,6 +454,19 @@ pub fn rename_folder(items: &str, folder_id: &str, name: &str) -> Result<String,
         &sidebar_items(items)?,
         folder_id,
         name,
+    ))
+}
+
+#[wasm_bindgen(js_name = setFolderIcon)]
+pub fn set_folder_icon(
+    items: &str,
+    folder_id: &str,
+    icon: Option<String>,
+) -> Result<String, JsError> {
+    json(&sidebar::set_folder_icon(
+        &sidebar_items(items)?,
+        folder_id,
+        icon.as_deref(),
     ))
 }
 

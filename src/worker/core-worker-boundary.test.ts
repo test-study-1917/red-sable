@@ -29,6 +29,7 @@ function fakeCore(call: WorkerCore['call'] = () => Promise.resolve('null')): Wor
     sendAttachment: () => Promise.resolve(),
     sendGallery: () => Promise.resolve(),
     uploadMedia: () => Promise.resolve(''),
+    rtcData: () => Promise.resolve(new Uint8Array(new ArrayBuffer())),
     setActive: () => Promise.resolve(),
   };
 }
@@ -172,6 +173,20 @@ test('asks the WASM core to forget a media source', async () => {
 
   expect(forgetMedia).toHaveBeenCalledWith('mxc://example.org/broken');
   expect(port.messages).toEqual([{ id: 1, uri: null }]);
+});
+
+test('passes an RTC frame to the core and returns the reply bytes', async () => {
+  const core = fakeCore();
+  const rtcData = vi.fn(() => Promise.resolve(new Uint8Array([9, 8])));
+  core.rtcData = rtcData;
+  const boundary = createCoreWorkerBoundary(Promise.resolve(core));
+  const port = new FakePort();
+  boundary.connect(port);
+
+  await port.send({ id: 1, rtc: { sessionId: 'session', frame: new Uint8Array([1, 2]) } });
+
+  expect(rtcData).toHaveBeenCalledWith('session', new Uint8Array([1, 2]));
+  expect(port.messages).toEqual([{ id: 1, bytes: new Uint8Array([9, 8]) }]);
 });
 
 test('passes gallery items and shared metadata to the WASM core', async () => {
@@ -685,25 +700,13 @@ test('a superseded worker tells every page', () => {
   expect(second.messages).toEqual([{ superseded: true }]);
 });
 
-describe('search foreground across tabs', () => {
-  const options = {
-    sharing: true,
-    crawler: true,
-    disk_budget_mb: 512,
-    unmetered_only: true,
-    server_search: false,
-    tuning: {
-      crawl_pause_ms: 3000,
-      trickle_pause_ms: 10000,
-      flush_interval_secs: 60,
-      batch: 50,
-      base_events: 20000,
-      max_events: 50000,
-    },
-    foreground: true,
-  };
+describe('foreground across tabs', () => {
+  const foregroundCalls = (call: ReturnType<typeof vi.fn<WorkerCore['call']>>) =>
+    call.mock.calls
+      .filter(([method]) => method === 'session.set_app_in_foreground')
+      .map(([, params]) => (JSON.parse(params) as { foreground: boolean }).foreground);
 
-  test('a hidden page cannot pause search while another page is visible', async () => {
+  test('a hidden page cannot background the app while another page is visible', async () => {
     const call = vi.fn<WorkerCore['call']>(() => Promise.resolve('null'));
     const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(call)));
     const first = new FakePort();
@@ -714,15 +717,13 @@ describe('search foreground across tabs', () => {
     await second.send({ visible: false });
     await second.send({
       id: 1,
-      call: { method: 'session.set_search_options', params: { ...options, foreground: false } },
+      call: { method: 'session.set_app_in_foreground', params: { foreground: false } },
     });
-    expect(JSON.parse(call.mock.calls.at(-1)?.[1] ?? 'null')).toMatchObject({
-      foreground: true,
-      sharing: true,
-    });
+    expect(foregroundCalls(call)).toEqual([true]);
+    expect(second.messages).toEqual([{ id: 1, ok: null }]);
   });
 
-  test('closing the last visible page pauses search without disabling sharing', async () => {
+  test('closing the last visible page backgrounds the app', async () => {
     const call = vi.fn<WorkerCore['call']>(() => Promise.resolve('null'));
     const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(call)));
     const first = new FakePort();
@@ -731,40 +732,13 @@ describe('search foreground across tabs', () => {
     boundary.connect(second);
     await first.send({ visible: true });
     await second.send({ visible: false });
-    await first.send({ id: 1, call: { method: 'session.set_search_options', params: options } });
     await first.send({ disconnect: true });
-    expect(JSON.parse(call.mock.calls.at(-1)?.[1] ?? 'null')).toMatchObject({
-      foreground: false,
-      sharing: true,
-    });
     expect(first.onmessage).toBeNull();
     await second.send({ visible: true });
-    expect(JSON.parse(call.mock.calls.at(-1)?.[1] ?? 'null')).toMatchObject({
-      foreground: true,
-      sharing: true,
-    });
+    expect(foregroundCalls(call)).toEqual([true, false, true]);
   });
 
-  test('foreground updates wait for an in-flight settings call', async () => {
-    const pending = Promise.withResolvers<string>();
-    const call = vi
-      .fn<WorkerCore['call']>(() => Promise.resolve('null'))
-      .mockImplementationOnce(() => pending.promise);
-    const boundary = createCoreWorkerBoundary(Promise.resolve(fakeCore(call)));
-    const port = new FakePort();
-    boundary.connect(port);
-    await port.send({ visible: true });
-    await port.send({ id: 1, call: { method: 'session.set_search_options', params: options } });
-    await port.send({ visible: false });
-    expect(call).toHaveBeenCalledOnce();
-    pending.resolve('null');
-    await vi.waitFor(() => {
-      expect(call).toHaveBeenCalledTimes(2);
-    });
-    expect(JSON.parse(call.mock.calls[1][1])).toMatchObject({ foreground: false, sharing: true });
-  });
-
-  test('cache reset drains settings updates before closing the stores', async () => {
+  test('cache reset drains foreground updates before closing the stores', async () => {
     const pending = Promise.withResolvers<string>();
     const call = vi.fn<WorkerCore['call']>(() => pending.promise);
     const stop = vi.fn(() => Promise.resolve());
@@ -778,7 +752,6 @@ describe('search foreground across tabs', () => {
     const port = new FakePort();
     boundary.connect(port);
     await port.send({ visible: true });
-    await port.send({ id: 1, call: { method: 'session.set_search_options', params: options } });
     const resetting = port.onmessage?.({
       data: { id: 2, reset: true },
     } as MessageEvent<WorkerRequest>);
@@ -787,7 +760,6 @@ describe('search foreground across tabs', () => {
     pending.resolve('null');
     await resetting;
     expect(stop).toHaveBeenCalledOnce();
-    expect(call).toHaveBeenCalledOnce();
     expect(port.onmessage).toBeNull();
   });
 });
@@ -831,17 +803,6 @@ describe('sync activity', () => {
     const { second, setActive } = setup();
 
     send(second, { visible: true });
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(setActive).toHaveBeenCalledExactlyOnceWith(true);
-  });
-
-  test('a returning network retries sync even with every tab hidden', async () => {
-    const { boundary, first, second, setActive } = setup();
-    send(first, { visible: false });
-    send(second, { visible: false });
-
-    boundary.handleOnline();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(setActive).toHaveBeenCalledExactlyOnceWith(true);

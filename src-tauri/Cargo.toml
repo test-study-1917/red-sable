@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "2.3.7"
+version = "2.3.8"
 description = "A Tauri App"
 authors = ["you"]
 license.workspace = true
@@ -52,7 +52,7 @@ tauri-plugin-clipboard-manager = "2.4.1"
 # mobile targets below enable.
 # The published crate hands back a bare token; the fork takes a VAPID key and
 # returns the keys a UnifiedPush distributor produces.
-tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "e08810f534863509aa998c7d11e95c567c271c49", default-features = false }
+tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "8573c30823b4f3c4393b37e188b59c35960aa65c", default-features = false }
 sable-core = { path = "../crates/sable-core", version = "0.1.0" }
 tokio = { workspace = true }
 # default-features drags in reqwest and native-tls; ureq is a sync rustls
@@ -72,7 +72,7 @@ tauri-plugin-sentry = "0.8.0"
 # The plugin only compiles on a host build, which lints and tests the crate,
 # with a desktop backend.
 [target."cfg(any(target_os = \"linux\", target_os = \"macos\"))".dependencies]
-tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "e08810f534863509aa998c7d11e95c567c271c49", default-features = false, features = [
+tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "8573c30823b4f3c4393b37e188b59c35960aa65c", default-features = false, features = [
   "notify-rust",
 ] }
 
@@ -87,7 +87,7 @@ tauri-plugin-sable-push = { path = "../plugins/tauri-plugin-sable-push", version
 [target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]
 tauri-plugin-app-icon = { version = "0.1.0", git = "https://github.com/SableClient/tauri-plugin-app-icon", rev = "bb3b31dfe356425f36b4ff21cb4315fa5d3e535e" }
 tauri-plugin-geolocation = { version = "2.3.3", optional = true }
-tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "e08810f534863509aa998c7d11e95c567c271c49", default-features = false, features = [
+tauri-plugin-notifications = { version = "0.5.0", git = "https://github.com/SableClient/tauri-plugin-notifications.git", rev = "8573c30823b4f3c4393b37e188b59c35960aa65c", default-features = false, features = [
   "push-notifications",
 ] }
 tauri-plugin-livekit-mobile = { version = "0.2.0", git = "https://github.com/SableClient/tauri-plugin-livekit-mobile.git", rev = "a50cb0db7e812367cbf4be65fe049ae73a0a8d23" }
@@ -104,6 +104,13 @@ libc = "=0.2.191"
 tauri-plugin-auth-session = { version = "0.2.2", git = "https://github.com/yanqianglu/tauri-plugin-auth-session", rev = "b335cfff0662d04e468df8e32869c047e6400135" }
 block2 = "0.6"
 objc2 = "0.6"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "AVAsset",
+  "AVAssetExportSession",
+  "AVMediaFormat",
+  "block2",
+] }
 objc2-foundation = { version = "0.3", features = [
   "NSError",
   "NSString",

@@ -216,8 +216,7 @@ impl SableCore {
     ) -> napi::Result<PromiseRaw<'env, ()>> {
         let core = self.core.clone();
         env.spawn_future(async move {
-            core.set_app_active(active);
-            core.apply_app_activity(active).await;
+            core.update_app_active(active).await;
             Ok(())
         })
     }
@@ -322,6 +321,25 @@ impl SableCore {
                 .await
                 .map_err(|error| js_err(&error))
         })
+    }
+
+    #[napi]
+    pub fn rtc_data<'env>(
+        &self,
+        env: &'env Env,
+        session_id: String,
+        frame: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, Buffer>> {
+        let core = self.core.clone();
+        let frame = Vec::from(frame);
+        env.spawn_future_with_callback(
+            async move {
+                core.rtc_data(&session_id, &frame)
+                    .await
+                    .map_err(|error| js_err(&error))
+            },
+            |_env, bytes| Ok(Buffer::from(bytes)),
+        )
     }
 
     #[napi]

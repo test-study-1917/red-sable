@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use matrix_sdk::ruma::api::client::membership::get_mutual_rooms;
 use matrix_sdk::ruma::api::client::profile::{PropagateTo, set_profile_field};
@@ -10,10 +11,11 @@ use super::{Handler, Json};
 use crate::media::mxc_uri;
 use crate::profile_overrides::OverrideEdit;
 use crate::profiles::profile_view;
-use crate::protocol::{BookmarkView, NotificationModeView, RpcError, FieldEdit, InviteTriageView, MediaPreviewConfigView, MediaPreviewsView, MutualRoomView, PresenceView, ProfileOverridesView, ProfileView, SealedAccountDataView, UserDirectoryEntryView};
+use crate::protocol::{BookmarkView, NotificationModeView, RpcError, FieldEdit, InviteTriageView, MediaPreviewConfigView, MediaPreviewsView, MutualRoomView, PresenceSharingEdit, PresenceSharingView, PresenceView, ProfileOverridesView, ProfileView, SealedAccountDataView, UserDirectoryEntryView};
 use crate::{Core, ResultExt, presence};
 
 domain! {
+    set_read_receipts,
     user_profile,
     user_relations,
     well_known,
@@ -36,6 +38,8 @@ domain! {
     set_presence,
     set_device_activity,
     fetch_presence,
+    presence_sharing,
+    edit_presence_sharing,
     search_user_directory,
     dismissed_invites,
     set_invite_dismissed,
@@ -649,6 +653,21 @@ impl Handler for SetPresenceParams {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetReadReceiptsParams {
+    pub public: bool,
+}
+
+impl Handler for SetReadReceiptsParams {
+    type Ok = ();
+
+    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
+        core.private_receipts.store(!self.public, Ordering::Relaxed);
+        std::future::ready(Ok(()))
+    }
+}
+
 /// Fills in users the presence poll has not pushed yet.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
@@ -991,6 +1010,33 @@ impl Handler for SetProfileOverrideParams {
             color: self.color,
         };
         core.set_profile_override(&self.user_id, &edit).await
+    }
+}
+
+/// `None` when the homeserver does not support MSC4495.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PresenceSharingParams {}
+
+impl Handler for PresenceSharingParams {
+    type Ok = Option<PresenceSharingView>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<PresenceSharingView>, RpcError> {
+        core.presence_sharing().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct EditPresenceSharingParams {
+    pub edit: PresenceSharingEdit,
+}
+
+impl Handler for EditPresenceSharingParams {
+    type Ok = PresenceSharingView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<PresenceSharingView, RpcError> {
+        core.edit_presence_sharing(&self.edit).await
     }
 }
 

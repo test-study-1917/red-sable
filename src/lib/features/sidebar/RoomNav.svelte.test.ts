@@ -113,6 +113,7 @@ function makeRoom(overrides: Partial<RoomListItemView>): RoomListItemView {
     supports_restricted: true,
     supports_knock_restricted: true,
     space_children: [],
+    bridge: null,
     unread: 0,
     notifying: 0,
     highlight: 0,
@@ -380,6 +381,47 @@ test('each page renders its section in the order the core lists it', async () =>
   visit('/direct');
   await mountNav();
   expect(roomNames()).toEqual(['D', 'C']);
+});
+
+test('rows past the first screens render their details once they come near the viewport', async () => {
+  const callbacks = new Map<Element, IntersectionObserverCallback>();
+  globalThis.IntersectionObserver = class {
+    #callback: IntersectionObserverCallback;
+    disconnect = () => {};
+    unobserve = () => {};
+    takeRecords = () => [];
+    root = null;
+    rootMargin = '';
+    thresholds = [];
+    constructor(callback: IntersectionObserverCallback) {
+      this.#callback = callback;
+    }
+    observe(node: Element) {
+      callbacks.set(node, this.#callback);
+    }
+  } as unknown as typeof IntersectionObserver;
+  const ids = Array.from({ length: 60 }, (_, at) => `!r${String(at)}:example.org`);
+  roomsFixture.rooms = ids.map((roomId, at) =>
+    makeRoom({ room_id: roomId, name: `Room ${String(at)}` })
+  );
+  listSections(sectionView('unspaced', { rooms: ids }));
+  visit('/rooms');
+  await mountNav();
+
+  const near = document.querySelector<HTMLElement>('[data-row-key="!r0:example.org"]');
+  const far = document.querySelector<HTMLElement>('[data-row-key="!r59:example.org"]');
+  if (!near || !far) throw new Error('the rows were not rendered');
+  expect(document.querySelectorAll('[data-row-key] .room-name')).toHaveLength(60);
+  expect(near.querySelector('.room-options-slot')).not.toBeNull();
+  expect(far.querySelector('.room-options-slot')).toBeNull();
+
+  callbacks.get(far)?.(
+    [{ isIntersecting: true, target: far }] as unknown as IntersectionObserverEntry[],
+    null as never
+  );
+  await tick();
+
+  expect(far.querySelector('.room-options-slot')).not.toBeNull();
 });
 
 test('favourites sit in their own section above the rest of the list', async () => {
@@ -1279,4 +1321,24 @@ test('the room list is one tree with a single tab stop and the row actions out o
     'aria-expanded',
     'false'
   );
+});
+
+test('a bridged room carries its network on the avatar, a native one does not', async () => {
+  visit('/direct');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!discord:example.org',
+      name: 'Friend',
+      is_direct: true,
+      bridge: { network: 'Discord', avatar_url: 'mxc://example.org/discord' },
+    }),
+    makeRoom({ room_id: '!native:example.org', name: 'Native', is_direct: true }),
+  ];
+  await mountNav();
+
+  const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="treeitem"]');
+  expect(
+    within(rowOf('Friend') as HTMLElement).getByRole('img', { name: 'nav.bridgedFrom:Discord' })
+  ).toBeInTheDocument();
+  expect(rowOf('Native')?.querySelector('.room-bridge')).toBeNull();
 });

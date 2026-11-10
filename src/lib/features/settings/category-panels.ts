@@ -17,6 +17,7 @@ import FontSettings from '#lib/features/settings/FontSettings.svelte';
 import QuickCss from '#lib/features/settings/QuickCss.svelte';
 import LinkDeviceSetting from '#lib/features/settings/LinkDeviceSetting.svelte';
 import DoubleTapReaction from '#lib/features/settings/DoubleTapReaction.svelte';
+import MatrixLinkHandler from '#lib/features/settings/MatrixLinkHandler.svelte';
 import MediaPreviewPrivacy from '#lib/features/settings/MediaPreviewPrivacy.svelte';
 import MentionNotifications from '#lib/features/notifications/MentionNotifications.svelte';
 import NotificationTroubleshooter from '#lib/features/notifications/NotificationTroubleshooter.svelte';
@@ -40,6 +41,7 @@ import DeveloperPushHistory from '#lib/features/settings/DeveloperPushHistory.sv
 import DeveloperSearchMetrics from '#lib/features/settings/DeveloperSearchMetrics.svelte';
 import SearchSharingStatus from '#lib/features/settings/SearchSharingStatus.svelte';
 import DeveloperSentry from '#lib/features/settings/DeveloperSentry.svelte';
+import PresenceSharingSettings from '#lib/features/settings/PresenceSharingSettings.svelte';
 import DeveloperServerFeatures from '#lib/features/settings/DeveloperServerFeatures.svelte';
 import DeveloperSyncDiagnostics from '#lib/features/settings/DeveloperSyncDiagnostics.svelte';
 import SoundVolumeSettings from '../call/SoundVolumeSettings.svelte';
@@ -56,6 +58,7 @@ export const panelComponents: Partial<Record<string, Component>> = {
   'composer-enter': ComposerEnterSetting,
   'composer-buttons': ComposerButtons,
   'double-tap-reaction': DoubleTapReaction,
+  'matrix-link-handler': MatrixLinkHandler,
   'developer-search-metrics': DeveloperSearchMetrics,
   'search-sharing-status': SearchSharingStatus,
   'notification-permission': NotificationPermission,
@@ -71,6 +74,7 @@ export const panelComponents: Partial<Record<string, Component>> = {
   'call-compat': CallCompatibilityDebug,
   'sound-volumes': SoundVolumeSettings,
   'media-preview-privacy': MediaPreviewPrivacy,
+  'presence-sharing': PresenceSharingSettings,
   personas: PersonaSettings,
   'link-device': LinkDeviceSetting,
   'settings-sync-status': SettingsSyncStatus,

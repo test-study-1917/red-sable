@@ -50,6 +50,7 @@ import {
   localNetworkDenied,
   LocalNetworkBlockedError,
 } from '#lib/platform/local-network.js';
+import { sleep } from '#lib/sleep.js';
 
 type WellKnownResponse = { 'm.homeserver'?: { base_url?: unknown } };
 export type { OutgoingMentions } from './api/messages.svelte.js';
@@ -722,7 +723,7 @@ export class CoreClient {
           wait > 0;
           wait = this.profileResumeAt - Date.now()
         ) {
-          await new Promise((resolve) => setTimeout(resolve, wait));
+          await sleep(wait);
         }
       }
       try {
@@ -792,7 +793,7 @@ export class CoreClient {
       } catch (error) {
         if (generation !== this.generation) return;
         console.warn('[sable core] search coverage unavailable', error);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await sleep(1000);
       }
     }
 
@@ -933,6 +934,10 @@ export class CoreClient {
     const uri = await this.ensureTransport().uploadMedia(mime, bytes);
     await this.rpc.account.setAvatarUrl({ url: uri, propagate_to: propagateTo });
     return uri;
+  }
+
+  rtcData(sessionId: string, frame: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+    return this.ensureTransport().rtcData(sessionId, frame);
   }
 
   subscribeEvents(onEvent: (event: CoreEvent) => void): () => void {

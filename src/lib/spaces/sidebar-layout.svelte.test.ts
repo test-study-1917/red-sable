@@ -39,7 +39,13 @@ function fakeCore(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-const folder: SidebarItem = { kind: 'folder', id: 'f', name: 'Work', content: ['!a:example.org'] };
+const folder: SidebarItem = {
+  kind: 'folder',
+  id: 'f',
+  name: 'Work',
+  icon: null,
+  content: ['!a:example.org'],
+};
 const lifted: SidebarItem[] = [{ kind: 'space', room_id: '!a:example.org' }];
 
 test('loads the stored layout', async () => {
@@ -208,6 +214,17 @@ test('persists which folders are open and forgets ones that are gone', async () 
 
   sidebar.write([{ kind: 'space', room_id: '!a:example.org' }]);
   expect(sidebar.openFolders.has('f')).toBe(false);
+  expect(localStorage.getItem('sable-open-space-folders')).toBe('[]');
+});
+
+test('collapses every open folder at once', () => {
+  const sidebar = new SpaceSidebar();
+  sidebar.toggleFolder('f');
+  sidebar.toggleFolder('g');
+
+  sidebar.collapseAllFolders();
+
+  expect(sidebar.openFolders.size).toBe(0);
   expect(localStorage.getItem('sable-open-space-folders')).toBe('[]');
 });
 

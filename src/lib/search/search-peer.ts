@@ -1,5 +1,4 @@
 import type { CoreEvent, Rpc } from '#src/generated/protocol';
-import { SearchPeerDecoder, encodeSearchPeerFrame } from '#lib/model/model.js';
 import {
   connectRtc,
   iceServers,
@@ -9,65 +8,26 @@ import {
 } from '#lib/rtc/connect.js';
 import { reportSearchPeerConnection, selectedRoute } from '#lib/search/search-peer-diagnostics.js';
 
-// The message and segment formats are described in docs/search-sharing.md.
+// Messages and their framing are described in docs/search-sharing.md.
 const CHANNEL = 'sable-search-v1';
-const MAX_MESSAGE_BYTES = 6 * 1024 * 1024;
-const FRAME_BYTES = 16 * 1024;
-const MAX_QUEUED_BYTES = 2 * MAX_MESSAGE_BYTES;
-const MAX_QUEUED_MESSAGES = 8;
-const MAX_SESSIONS = 4;
-const BUFFER_HIGH = 64 * 1024;
-const BUFFER_LOW = 32 * 1024;
+const CHUNK_BYTES = 16 * 1024;
 const NEGOTIATION_MS = 20_000;
-const IDLE_MS = 60_000;
-const DISCOVERY_MS = 60_000;
+const IDLE_MS = 120_000;
+const START_INTERVAL_MS = 60_000;
 
 export interface SearchPeerCore {
   session: { account_id: string } | null;
   rpc: RtcCore['rpc'] & {
-    search: Pick<Rpc['search'], 'peerStart' | 'peerExchange'>;
+    search: Pick<Rpc['search'], 'peerStart'>;
     calls: Pick<Rpc['calls'], 'turnServer'>;
   };
+  rtcData(sessionId: string, frame: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>>;
   subscribeEvents(callback: (event: CoreEvent) => void): () => void;
 }
 
-interface NetworkConnection extends EventTarget {
-  type?: string;
-  metered?: boolean;
-  saveData?: boolean;
-}
-
 interface SearchPeerOptions {
-  unmeteredOnly: boolean;
   stunServers: string[];
   beforeStart?: () => Promise<unknown>;
-}
-
-function waitFor(
-  target: EventTarget,
-  event: string,
-  ready: () => boolean,
-  signal: AbortSignal
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      target.removeEventListener(event, check);
-      signal.removeEventListener('abort', abort);
-    };
-    const check = (): void => {
-      if (!ready()) return;
-      cleanup();
-      resolve();
-    };
-    const abort = (): void => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    target.addEventListener(event, check);
-    signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) abort();
-    else check();
-  });
 }
 
 export function watchSearchPeers(core: SearchPeerCore, options: SearchPeerOptions): () => void {
@@ -131,39 +91,26 @@ function connectSearchPeers(
   options: SearchPeerOptions,
   account: string
 ): () => void {
-  const sessions = new Map<
-    string,
-    { receive(event: RtcEvent): Promise<void>; close: () => void }
-  >();
-  const connection = (navigator as Navigator & { connection?: NetworkConnection }).connection;
+  // The core runs one copy at a time, as sender or receiver.
+  let session: { id: string; receive(event: RtcEvent): Promise<void>; close: () => void } | null =
+    null;
   const rpc = core.rpc.search;
   let stopped = false;
   let discovering = false;
+  let paused = false;
   let servers: RTCIceServer[] = options.stunServers.map((urls) => ({ urls }));
 
   const current = (): boolean => !stopped && core.session?.account_id === account;
-  const allowed = (): boolean =>
-    current() &&
-    navigator.onLine &&
-    (!options.unmeteredOnly ||
-      (connection?.type !== 'cellular' &&
-        connection?.metered !== true &&
-        connection?.saveData !== true));
+  const allowed = (): boolean => current() && !paused;
 
+  // The sender creates the channel. Framing and turn-taking live in the core.
   function create(sessionId: string, initiator: boolean) {
-    const decoder = new SearchPeerDecoder();
     const rtc = connectRtc(core, { sessionId, sender: initiator, iceServers: servers }, close);
     const { peer } = rtc;
-    const abort = new AbortController();
     let channel: RTCDataChannel | null = null;
     let closed = false;
-    let started = false;
-    let hello: ReturnType<typeof setInterval> | undefined;
-    let idle: ReturnType<typeof setTimeout>;
-    let frameBytes = 0;
-    let incomingBytes = 0;
-    let incomingMessages = 0;
-    let processing = Promise.resolve();
+    let pending = Promise.resolve();
+    let idle: ReturnType<typeof setTimeout> | undefined;
     const negotiation = setTimeout(close, NEGOTIATION_MS);
     const active = (): boolean => !closed && allowed();
     const report = (route: RTCIceCandidateType | null = null): void => {
@@ -182,7 +129,6 @@ function connectSearchPeers(
         });
       else report();
     });
-    const channelOpen = (): boolean => channel?.readyState === 'open' && active();
 
     function touch(): void {
       clearTimeout(idle);
@@ -193,97 +139,47 @@ function connectSearchPeers(
       if (closed) return;
       closed = true;
       clearTimeout(negotiation);
-      clearInterval(hello);
       clearTimeout(idle);
-      abort.abort();
-      decoder.free();
       channel?.close();
-      sessions.delete(sessionId);
+      if (session?.id === sessionId) session = null;
       if (current()) rtc.close();
       else peer.close();
     }
 
-    async function sendFrame(frame: string | ArrayBuffer): Promise<void> {
-      if (!channel || !channelOpen()) throw new Error('closed');
-      if (channel.bufferedAmount > BUFFER_HIGH) {
-        const target = channel;
-        await waitFor(
-          target,
-          'bufferedamountlow',
-          () => target.bufferedAmount <= BUFFER_LOW,
-          abort.signal
-        );
+    function send(bytes: Uint8Array<ArrayBuffer>): void {
+      if (!channel || channel.readyState !== 'open' || !active()) throw new Error('closed');
+      for (let start = 0; start < bytes.length; start += CHUNK_BYTES) {
+        channel.send(bytes.slice(start, start + CHUNK_BYTES));
       }
-      if (!channelOpen()) throw new Error('closed');
-      if (typeof frame === 'string') channel.send(frame);
-      else channel.send(frame);
       touch();
     }
 
-    async function send(data: string): Promise<void> {
-      const bytes = encodeSearchPeerFrame(data);
-      for (let start = 0; start < bytes.length; start += FRAME_BYTES) {
-        await sendFrame(new Uint8Array(bytes.subarray(start, start + FRAME_BYTES)).buffer);
-      }
-    }
-
-    function exchange(data: string | null, bytes = 0): void {
-      processing = processing
+    // Frames reach the core one at a time and in order.
+    function forward(frame: Uint8Array<ArrayBuffer>): void {
+      pending = pending
         .then(async () => {
-          try {
-            if (!active()) return;
-            const reply = await rpc.peerExchange({ session_id: sessionId, data });
-            if (reply !== null && active()) await send(reply);
-          } finally {
-            incomingBytes -= bytes;
-            incomingMessages -= 1;
-          }
+          if (!active()) return;
+          const reply = await core.rtcData(sessionId, frame);
+          if (reply.byteLength > 0 && active()) send(reply);
         })
         .catch(close);
     }
 
     function receive(event: MessageEvent<unknown>): void {
-      try {
-        const frame = event.data;
-        if (!allowed()) throw new Error('invalid frame');
-        touch();
-        if (frame === 'ready') {
-          void sendFrame('ack').catch(close);
-          return;
-        }
-        if (frame === 'ack') {
-          if (!started) {
-            started = true;
-            clearInterval(hello);
-            clearTimeout(negotiation);
-            if (!initiator) {
-              incomingMessages += 1;
-              exchange(null);
-            }
-          }
-          return;
-        }
-        if (
-          !(frame instanceof ArrayBuffer) ||
-          frame.byteLength === 0 ||
-          frame.byteLength > FRAME_BYTES
-        )
-          throw new Error('invalid frame');
-        if (frameBytes === 0 && incomingMessages >= MAX_QUEUED_MESSAGES)
-          throw new Error('receive queue full');
-        incomingBytes += frame.byteLength;
-        frameBytes += frame.byteLength;
-        if (incomingBytes > MAX_QUEUED_BYTES) throw new Error('receive queue full');
-        const message = decoder.push(new Uint8Array(frame));
-        if (message !== undefined) {
-          incomingMessages += 1;
-          const bytes = frameBytes;
-          frameBytes = 0;
-          exchange(message, bytes);
-        }
-      } catch {
+      const frame = event.data;
+      // An empty frame tells the core the channel opened.
+      if (!active() || !(frame instanceof ArrayBuffer) || frame.byteLength === 0) {
         close();
+        return;
       }
+      touch();
+      forward(new Uint8Array(frame));
+    }
+
+    function opened(): void {
+      clearTimeout(negotiation);
+      touch();
+      forward(new Uint8Array(0));
     }
 
     function attach(target: RTCDataChannel): void {
@@ -300,23 +196,11 @@ function connectSearchPeers(
       }
       channel = target;
       target.binaryType = 'arraybuffer';
-      target.bufferedAmountLowThreshold = BUFFER_LOW;
       target.addEventListener('close', close);
       target.addEventListener('error', close);
       target.addEventListener('message', receive);
-      target.addEventListener(
-        'open',
-        () => {
-          touch();
-          if (started) return;
-          const greet = (): void => {
-            void sendFrame('ready').catch(close);
-          };
-          hello = setInterval(greet, 250);
-          greet();
-        },
-        { once: true }
-      );
+      if (target.readyState === 'open') opened();
+      else target.addEventListener('open', opened, { once: true });
     }
 
     peer.addEventListener('datachannel', (event) => {
@@ -330,6 +214,7 @@ function connectSearchPeers(
     }
 
     return {
+      id: sessionId,
       close,
       receive(event: RtcEvent): Promise<void> {
         if (!active()) {
@@ -342,26 +227,33 @@ function connectSearchPeers(
   }
 
   const unsubscribe = core.subscribeEvents((event) => {
-    if (!isRtcEvent(event, 'search_sharing') || !current()) return;
-    let session = sessions.get(event.session_id);
-    if (!allowed() || event.signal.kind === 'close') {
-      session?.close();
+    if (event.type === 'search_sharing') {
+      const resumed = paused && event.sharing.pause === null;
+      paused = event.sharing.pause !== null;
+      if (paused) session?.close();
+      else if (resumed) discover();
       return;
     }
-    if (!session) {
+    if (!isRtcEvent(event, 'search_sharing') || !current()) return;
+    let target = session?.id === event.session_id ? session : null;
+    if (!allowed() || event.signal.kind === 'close') {
+      target?.close();
+      return;
+    }
+    if (!target) {
       const opens = event.sender === (event.signal.kind === 'open');
-      if (!opens || sessions.size >= MAX_SESSIONS) {
+      if (!opens || session) {
         void core.rpc.rtc.close({ session_id: event.session_id }).catch(() => {});
         return;
       }
       try {
-        session = create(event.session_id, event.sender);
-        sessions.set(event.session_id, session);
+        target = create(event.session_id, event.sender);
+        session = target;
       } catch {
         return;
       }
     }
-    void session.receive(event).catch(session.close);
+    void target.receive(event).catch(target.close);
   });
 
   const discover = (): void => {
@@ -378,25 +270,14 @@ function connectSearchPeers(
         discovering = false;
       });
   };
-  const networkChanged = (): void => {
-    if (!allowed()) {
-      for (const session of sessions.values()) session.close();
-    } else discover();
-  };
-  const timer = setInterval(discover, DISCOVERY_MS);
-  window.addEventListener('online', networkChanged);
-  window.addEventListener('offline', networkChanged);
-  connection?.addEventListener('change', networkChanged);
+  const timer = setInterval(discover, START_INTERVAL_MS);
   discover();
 
   return () => {
     if (stopped) return;
     unsubscribe();
     clearInterval(timer);
-    window.removeEventListener('online', networkChanged);
-    window.removeEventListener('offline', networkChanged);
-    connection?.removeEventListener('change', networkChanged);
-    for (const session of sessions.values()) session.close();
+    session?.close();
     stopped = true;
   };
 }

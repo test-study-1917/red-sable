@@ -184,6 +184,10 @@ impl Core {
         self.account_locked.load(Ordering::SeqCst) || self.sync_suspended.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn sync_allowed(&self) -> bool {
+        !self.sync_paused() && self.network_available.load(Ordering::SeqCst)
+    }
+
     pub(crate) async fn claim_session_generation(&self) -> SessionGeneration<'_> {
         let guard = self.session_activation_lock.lock().await;
         SessionGeneration {
@@ -408,6 +412,7 @@ impl Core {
         if let Some(session) = self.take_session().await {
             session.sync_service.stop().await;
         }
+        self.settle_retired_search(None).await;
         let accounts: Vec<String> = self.account_clients.lock().await.keys().cloned().collect();
         for account_id in accounts {
             self.invalidate_account_client(&account_id).await;
@@ -427,6 +432,7 @@ impl Core {
             if let Some(session) = self.take_session().await {
                 session.sync_service.stop().await;
             }
+            self.settle_retired_search(None).await;
             let accounts = self.accounts().await?;
             let mut outcome = Ok(());
             for account in &accounts.accounts {
@@ -901,6 +907,7 @@ impl Core {
         let Some(account_id) = account_id else {
             return self.clear_persisted_session().await;
         };
+        self.settle_retired_search(Some(account_id)).await;
 
         let _guard = self.session_store_lock.lock().await;
         let mut accounts = self.accounts.lock().await;
@@ -962,6 +969,23 @@ impl Core {
     }
 
     pub(crate) async fn take_session(&self) -> Option<Session> {
+        let (session, index) = self.detach_session().await;
+        if let Some(session) = &session {
+            search::save_index(&session.client, index).await;
+        }
+        session
+    }
+
+    async fn retire_session(&self) -> Option<Session> {
+        let (session, index) = self.detach_session().await;
+        if let Some(session) = &session {
+            self.retire_search_index(&session.account_id, &session.client, index)
+                .await;
+        }
+        session
+    }
+
+    async fn detach_session(&self) -> (Option<Session>, search::MessageIndex) {
         self.end_all_calls().await;
         let client = self
             .session
@@ -970,14 +994,15 @@ impl Core {
             .as_ref()
             .map(|session| session.client.clone());
         if let Some(client) = client {
-            self.flush_search_index(&client).await;
             self.flush_inbox(&client).await;
         }
+        // An aborted task must not be holding a flush it took from the index.
+        let flushing = self.search_flush.lock().await;
         let mut session = self.session.write().await;
         self.session_handlers.lock().clear();
         self.session_tasks.lock().clear();
         self.to_device_inbox.lock().take();
-        self.search_sharing.reset_session().await;
+        self.search_sharing.reset_session();
         self.rtc.clear();
         self.subscriptions.lock().await.clear();
         self.room_subscriptions.lock().await.clear();
@@ -997,10 +1022,14 @@ impl Core {
             .send_replace(crate::nicknames::Nicknames::default());
         *self.probed_state() = crate::probed_state::ProbedState::default();
         *self.recent_state.lock() = crate::probed_state::RecentState::default();
-        *self.search_index.lock().await = search::MessageIndex::new();
+        let index = std::mem::replace(
+            &mut *self.search_index.lock().await,
+            search::MessageIndex::new(),
+        );
+        drop(flushing);
         self.search_crawl.lock().await.reset();
         self.server_search.lock().await.reset();
-        session.take()
+        (session.take(), index)
     }
 
     pub(crate) async fn finish_sign_in(
@@ -1068,8 +1097,8 @@ impl Core {
             .await?;
 
         // Do not disrupt the active session unless its replacement started
-        // successfully. `take_session` also aborts its owned watcher tasks.
-        if let Some(previous) = self.take_session().await {
+        // successfully. `retire_session` also aborts its owned watcher tasks.
+        if let Some(previous) = self.retire_session().await {
             previous.sync_service.stop().await;
         }
 
@@ -1137,7 +1166,7 @@ impl Core {
             .registered_store_id(&account_id)
             .await
             .unwrap_or_else(|| self.store_id.clone());
-        self.watch_search_index(&client, &store_id);
+        self.watch_search_index(&account_id, &client, &store_id);
         self.watch_ignored_users(&client);
         self.watch_ignored_history(&client, &sync_service);
         #[cfg(target_family = "wasm")]
@@ -1265,7 +1294,7 @@ impl Core {
         generation: u64,
     ) -> bool {
         let matrix_sdk::SessionChange::UnknownToken(data) = change else {
-            if self.session_generation.load(Ordering::SeqCst) == generation {
+            if self.is_current(generation) {
                 tracing::info!("session tokens: refreshed");
                 self.emit(CoreEvent::SessionTokensRefreshed);
             }
@@ -1273,14 +1302,14 @@ impl Core {
         };
         let soft_logout = data.soft_logout;
 
-        if self.session_generation.load(Ordering::SeqCst) != generation {
+        if !self.is_current(generation) {
             return true;
         }
 
         let core = self.clone();
         drop(spawn(async move {
             let _transition = core.lock_session_transition().await;
-            if core.session_generation.load(Ordering::SeqCst) != generation {
+            if !core.is_current(generation) {
                 return;
             }
             let invalidated = core
@@ -1884,8 +1913,7 @@ mod regression_tests {
         let sync_service = core.sync_service().await.unwrap();
         assert!(matches!(sync_service.state().get(), State::Idle));
 
-        core.set_app_active(true);
-        core.apply_app_activity(true).await;
+        core.update_app_active(true).await;
         assert!(!matches!(sync_service.state().get(), State::Idle));
         assert!(
             !core
@@ -1893,8 +1921,7 @@ mod regression_tests {
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
 
-        core.set_app_active(false);
-        core.apply_app_activity(false).await;
+        core.update_app_active(false).await;
         assert!(matches!(sync_service.state().get(), State::Idle));
         assert!(
             core.sync_suspended
@@ -1908,13 +1935,12 @@ mod regression_tests {
 
         let (_store, _server, core, _room) = core_with_room().await;
         let sync_service = core.sync_service().await.unwrap();
-        core.set_network_available(false).await;
+        core.update_network_conditions(false, true).await;
 
-        core.set_app_active(true);
-        core.apply_app_activity(true).await;
+        core.update_app_active(true).await;
         assert!(matches!(sync_service.state().get(), State::Idle));
 
-        core.set_network_available(true).await;
+        core.update_network_conditions(true, true).await;
         assert!(!matches!(sync_service.state().get(), State::Idle));
     }
 
@@ -1924,24 +1950,21 @@ mod regression_tests {
 
         let (_store, _server, core, _room) = core_with_room().await;
         let sync_service = core.sync_service().await.unwrap();
-        core.set_app_active(false);
-        core.apply_app_activity(false).await;
-        core.set_network_available(false).await;
+        core.update_app_active(false).await;
+        core.update_network_conditions(false, true).await;
 
-        core.set_network_available(true).await;
+        core.update_network_conditions(true, true).await;
         assert!(matches!(sync_service.state().get(), State::Idle));
     }
 
     #[tokio::test]
     async fn foregrounding_without_a_session_clears_the_previous_pause() {
         let (_store, _server, core, _room) = core_with_room().await;
-        core.set_app_active(false);
-        core.apply_app_activity(false).await;
+        core.update_app_active(false).await;
         assert!(core.sync_paused());
         core.take_session().await;
 
-        core.set_app_active(true);
-        core.apply_app_activity(true).await;
+        core.update_app_active(true).await;
 
         assert!(!core.sync_paused());
     }
@@ -1964,8 +1987,7 @@ mod regression_tests {
             .mount()
             .await;
         core.lock_account(core.session_generation.load(Ordering::SeqCst));
-        core.set_app_active(false);
-        core.apply_app_activity(false).await;
+        core.update_app_active(false).await;
 
         tokio::time::timeout(Duration::from_secs(35), async {
             while core.account_locked.load(Ordering::SeqCst) {
@@ -2041,8 +2063,7 @@ mod regression_tests {
         use matrix_sdk_ui::sync_service::State;
 
         let (_store, _server, core, _room) = core_with_room().await;
-        core.set_app_active(true);
-        core.apply_app_activity(true).await;
+        core.update_app_active(true).await;
         let sync = core.sync_service().await.unwrap();
 
         let serial = core.activity_lock.lock().await;

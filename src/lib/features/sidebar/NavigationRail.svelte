@@ -52,6 +52,7 @@
   import FolderOpenIcon from 'phosphor-svelte/lib/FolderOpenIcon';
   import HashIcon from 'phosphor-svelte/lib/HashIcon';
   import HouseIcon from 'phosphor-svelte/lib/HouseIcon';
+  import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
   import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import SpeakerHighIcon from 'phosphor-svelte/lib/SpeakerHighIcon';
@@ -98,7 +99,10 @@
     layout?: readonly SidebarItem[];
     openFolders?: ReadonlySet<string>;
     onToggleFolder?: (folderId: string) => void;
+    onCollapseFolders?: () => void;
     onRenameFolder?: (folder: SidebarFolder) => void;
+    onChangeFolderIcon?: (folder: SidebarFolder) => void;
+    onChangeSpaceIcon?: (roomId: string) => void;
     onUngroupFolder?: (folderId: string) => void;
     onMarkFolderRead?: (folder: SidebarFolder) => void;
     onRemoveFromFolder?: (roomId: string, folderId: string) => void;
@@ -124,7 +128,10 @@
     layout = [],
     openFolders = new Set(),
     onToggleFolder,
+    onCollapseFolders,
     onRenameFolder,
+    onChangeFolderIcon,
+    onChangeSpaceIcon,
     onUngroupFolder,
     onMarkFolderRead,
     onRemoveFromFolder,
@@ -577,7 +584,7 @@
     <span class="icon" aria-hidden="true"><item.icon weight={active ? 'fill' : 'regular'} /></span>
   {:else}
     {@const avatar =
-      item.space && item.roomId ? spacesById.get(item.roomId)?.avatar_url : item.avatar}
+      item.space && item.roomId ? spacesById.get(item.roomId)?.display_avatar_url : item.avatar}
     <Avatar
       class="space-initial"
       id={item.roomId ?? null}
@@ -736,7 +743,7 @@
       <Avatar
         class="folder-tile"
         id={roomId}
-        src={space?.avatar_url}
+        src={space?.display_avatar_url}
         name={spaceName(space?.name ?? null, roomId)}
         size="small"
         uniform
@@ -761,7 +768,17 @@
     }}
   >
     <span class="nav-tab-hit-area" aria-hidden="true"></span>
-    {@render folderTiles(folder)}
+    {#if folder.icon}
+      <Avatar
+        class="space-initial"
+        id={folder.id}
+        src={folder.icon}
+        name={folderLabel(folder)}
+        uniform
+      />
+    {:else}
+      {@render folderTiles(folder)}
+    {/if}
     {@render unreadMark(folderUnread(folder), false, unreadId(folder.id))}
   </button>
 {/snippet}
@@ -946,6 +963,14 @@
         <span>{i18n.t(toggle.label)}</span>
       </ActionMenuItem>
     {/each}
+
+    {#if onCollapseFolders}
+      <ActionMenuSeparator />
+      <ActionMenuItem disabled={openFolders.size === 0} onSelect={onCollapseFolders}>
+        <span class="menu-check" aria-hidden="true"></span>
+        <span>{i18n.t('nav.folderCollapseAll')}</span>
+      </ActionMenuItem>
+    {/if}
   </ActionMenu>
 {/if}
 
@@ -1015,6 +1040,16 @@
       <PencilSimpleIcon />
       {i18n.t('nav.folderRename')}
     </ActionMenuItem>
+    {#if onChangeFolderIcon}
+      <ActionMenuItem
+        onSelect={() => {
+          onChangeFolderIcon(folder);
+        }}
+      >
+        <ImageIcon />
+        {i18n.t('nav.changeIcon')}
+      </ActionMenuItem>
+    {/if}
     <ActionMenuItem
       onSelect={() => {
         onUngroupFolder?.(folder.id);
@@ -1023,6 +1058,12 @@
       <FolderOpenIcon />
       {i18n.t('nav.folderUngroup')}
     </ActionMenuItem>
+    {#if onCollapseFolders}
+      <ActionMenuItem disabled={openFolders.size === 0} onSelect={onCollapseFolders}>
+        <CaretUpIcon />
+        {i18n.t('nav.folderCollapseAll')}
+      </ActionMenuItem>
+    {/if}
   </ActionMenu>
 {/if}
 
@@ -1047,6 +1088,11 @@
     onMoveDown={mobile && contextIndex !== -1 && contextIndex < entries.length - 1
       ? () => {
           moveContextSpace('down');
+        }
+      : undefined}
+    onChangeIcon={onChangeSpaceIcon
+      ? () => {
+          if (contextSpace) onChangeSpaceIcon(contextSpace.room_id);
         }
       : undefined}
     onRemoveFromFolder={contextFolderId !== null

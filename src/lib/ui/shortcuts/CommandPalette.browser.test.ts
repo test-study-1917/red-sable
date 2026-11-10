@@ -35,6 +35,7 @@ const rooms = ['Alpha', 'Beta'].map((name) =>
     topic: null,
     topic_html: null,
     avatar_url: null,
+    bridge: null,
     is_direct: false,
     direct_targets: [],
     join_rule: 'invite',

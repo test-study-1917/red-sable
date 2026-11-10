@@ -241,8 +241,7 @@ impl SableCore {
 
     #[wasm_bindgen(js_name = setActive)]
     pub async fn set_active(&self, active: bool) {
-        self.core.set_app_active(active);
-        self.core.apply_app_activity(active).await;
+        self.core.update_app_active(active).await;
     }
 
     /// Resolves with the raw thumbnail bytes.
@@ -313,6 +312,19 @@ impl SableCore {
     pub async fn upload_media(&self, mime: String, bytes: Vec<u8>) -> Result<String, String> {
         self.core
             .upload_media(mime, bytes)
+            .await
+            .map_err(|error| js_err(&error))
+    }
+
+    /// Resolves with the bytes to send back, empty when there is nothing to send.
+    ///
+    /// # Errors
+    ///
+    /// Returns a JSON-encoded command error when the frame cannot be handled.
+    #[wasm_bindgen(js_name = rtcData)]
+    pub async fn rtc_data(&self, session_id: String, frame: Vec<u8>) -> Result<Vec<u8>, String> {
+        self.core
+            .rtc_data(&session_id, &frame)
             .await
             .map_err(|error| js_err(&error))
     }

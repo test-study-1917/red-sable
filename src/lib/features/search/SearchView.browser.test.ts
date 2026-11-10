@@ -44,6 +44,7 @@ function room(overrides: Partial<RoomListItemView>): RoomListItemView {
     topic: null,
     topic_html: null,
     avatar_url: null,
+    bridge: null,
     is_direct: false,
     direct_targets: [],
     join_rule: 'invite',
@@ -121,14 +122,13 @@ function hit(eventId: string): SearchHitView {
 }
 
 test('typing an operator prefix offers completions and Tab accepts one', async () => {
-  const { screen, field, listbox } = await mount();
+  const { field, listbox } = await mount();
 
   await userEvent.fill(field.element(), 'fr');
   await expect.element(listbox.getByRole('option', { name: /^from:/ })).toBeVisible();
 
   await userEvent.keyboard('{Tab}');
   await expect.element(field).toHaveValue('from:');
-  expect(screen).toBeDefined();
 });
 
 test('completing an operator with Tab offers its values', async () => {

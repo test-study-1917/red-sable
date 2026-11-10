@@ -9,7 +9,11 @@ import type { UrlPreviewView } from '#src/generated/protocol';
 
 vi.mock('#lib/core/context.js');
 vi.mock('#lib/config/runtime-config.js', () => ({
-  runtimeConfig: () => Promise.resolve({ embeds: { serviceUrl: 'https://embeds.test' } }),
+  runtimeConfig: () =>
+    Promise.resolve({
+      embeds: { serviceUrl: 'https://embeds.test' },
+      gifs: { klipyApiKey: null },
+    }),
 }));
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
@@ -42,6 +46,7 @@ function preview(overrides: Partial<UrlPreviewView> = {}): UrlPreviewView {
     theme_color: null,
     card: null,
     author_name: null,
+    post: null,
     ...overrides,
   };
 }
@@ -229,7 +234,9 @@ test('client-side embeds alone preview without asking the homeserver', async () 
   expect(core.rpc.messages.urlPreview).toHaveBeenCalledTimes(1);
   expect(core.rpc.messages.urlPreview).toHaveBeenCalledWith({
     url: 'https://example.org/c1',
+    client: true,
     service: 'https://embeds.test',
+    klipy_api_key: null,
   });
   expect(screen.getByRole('link', { name: /Example/ })).toBeInTheDocument();
 });
@@ -237,14 +244,21 @@ test('client-side embeds alone preview without asking the homeserver', async () 
 test('the homeserver is asked only when the client side has no answer', async () => {
   preferences.clientEmbeds = true;
   preferences.urlPreviews = true;
-  core.rpc.messages.urlPreview.mockImplementation(({ service }) =>
-    Promise.resolve(service !== null ? null : preview({ url: 'https://example.org/c2' }))
+  core.rpc.messages.urlPreview.mockImplementation(({ client }) =>
+    Promise.resolve(client ? null : preview({ url: 'https://example.org/c2' }))
   );
   render(LinkPreviewCard, { url: 'https://example.org/c2', encrypted: false });
   await settle();
 
   expect(core.rpc.messages.urlPreview.mock.calls).toEqual([
-    [{ url: 'https://example.org/c2', service: 'https://embeds.test' }],
+    [
+      {
+        url: 'https://example.org/c2',
+        client: true,
+        service: 'https://embeds.test',
+        klipy_api_key: null,
+      },
+    ],
     [{ url: 'https://example.org/c2', service: null }],
   ]);
   expect(screen.getByRole('link', { name: /Example/ })).toBeInTheDocument();
@@ -471,6 +485,7 @@ test('a video-only preview plays inline without the card', async () => {
         mime: 'video/mp4',
         width: 1280,
         height: 720,
+        gif: false,
       },
     })
   );
@@ -496,7 +511,13 @@ test('a GIF poster on a video preview stays still while GIF autoplay is off', as
       url: 'https://tenor.example/view/clip',
       image: 'mxc://example.org/poster',
       image_mime: 'image/gif',
-      video: { source: 'mxc://example.org/clip', mime: 'video/mp4', width: 480, height: 362 },
+      video: {
+        source: 'mxc://example.org/clip',
+        mime: 'video/mp4',
+        width: 480,
+        height: 362,
+        gif: false,
+      },
     })
   );
   const { container } = render(LinkPreviewCard, {
@@ -517,10 +538,11 @@ test('a page with a video keeps its text under the player', async () => {
       title: 'A clip',
       author_name: 'someone',
       video: {
-        source: 'mxc://example.org/clip',
+        source: 'mxc://example.org/watch',
         mime: 'video/mp4',
         width: null,
         height: null,
+        gif: false,
       },
     })
   );
@@ -562,4 +584,34 @@ test('the theme colour becomes the card accent and a summary card is compact', a
   const card = container.querySelector('.link-preview');
   expect(card).toHaveClass('accented', 'compact');
   expect((card as HTMLElement).style.getPropertyValue('--link-preview-accent')).toBe('#ff4500');
+});
+
+test('a GIF video preview loops muted without controls or a play button', async () => {
+  preferences.urlPreviews = true;
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url: 'https://giphy.example/gifs/cat',
+      image: 'mxc://example.org/poster',
+      image_mime: 'image/webp',
+      video: {
+        source: 'mxc://example.org/clip',
+        mime: 'video/mp4',
+        width: 480,
+        height: 480,
+        gif: true,
+      },
+    })
+  );
+  const { container } = render(LinkPreviewCard, {
+    url: 'https://giphy.example/gifs/cat',
+    encrypted: false,
+  });
+
+  await vi.waitFor(() => {
+    expect(container.querySelector('video')).not.toBeNull();
+  });
+  const video = container.querySelector('video');
+  expect(video).toHaveAttribute('loop');
+  expect(video).not.toHaveAttribute('controls');
+  expect(screen.queryByRole('button', { name: /Play/ })).toBeNull();
 });

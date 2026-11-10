@@ -84,9 +84,6 @@ export function loadModel(source?: Promise<Response>): Promise<unknown> {
   return pending;
 }
 
-export const SearchPeerDecoder = wasm.SearchPeerDecoder;
-export const encodeSearchPeerFrame = wasm.encodeSearchPeerFrame;
-
 export function parseSearchQuery(input: string): ParsedQuery {
   return JSON.parse(wasm.parseSearchQuery(input)) as ParsedQuery;
 }
@@ -395,6 +392,14 @@ export function renameFolder(
   name: string
 ): SidebarItemView[] {
   return items(wasm.renameFolder(JSON.stringify(layout), folderId, name));
+}
+
+export function setFolderIcon(
+  layout: readonly SidebarItemView[],
+  folderId: string,
+  icon: string | null
+): SidebarItemView[] {
+  return items(wasm.setFolderIcon(JSON.stringify(layout), folderId, icon));
 }
 
 export function ungroupFolder(

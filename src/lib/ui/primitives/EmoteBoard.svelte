@@ -32,7 +32,7 @@
   import { emojiGroups, searchReactionEmoji, shortcodeFor } from '#lib/emoji/emoji.js';
   import { RecentReactions } from '#lib/emoji/recents.svelte.js';
   import { emoteRecents } from '#lib/model/model.js';
-  import { readRecent, rememberEmote } from '#lib/emoji/recent-packs.svelte.js';
+  import { readRecentStickers, rememberSticker } from '#lib/emoji/recent-packs.svelte.js';
 
   interface Props {
     roomId: string;
@@ -94,7 +94,7 @@
   let packs = $state.raw<ImagePackView[]>([]);
   let loading = $state(true);
   let failed = $state(false);
-  let recent = $derived(readRecent(tab === 'sticker' ? 'sticker' : 'emoticon'));
+  let recent = $derived(tab === 'sticker' ? readRecentStickers() : []);
   let preview = $state.raw<{ image: PackImageView; pack: ImagePackView } | null>(null);
   let activeCell = $state.raw<{ section: string; index: number }>({ section: '', index: 0 });
   let gridWidth = $state(0);
@@ -444,14 +444,22 @@
       const style = getComputedStyle(list);
       // Measure the row width after space is reserved for the scrollbar.
       const measured = size?.inlineSize ?? Number.parseFloat(style.width);
-      if (Number.isFinite(measured)) gridWidth = measured;
+      // Zoom makes sizes jitter by a fraction of a pixel, and storing that jitter remeasures forever.
+      const settled = (a: number, b: number): boolean => Math.abs(a - b) < 0.5;
+      const lastWidth = untrack(() => gridWidth);
+      if (Number.isFinite(measured) && !settled(measured, lastWidth)) gridWidth = measured;
       const bounds = cell.getBoundingClientRect();
       // Match fractional cell sizes to flex wrapping.
       const width = bounds.width;
       const gap = Number.parseFloat(style.columnGap) || 0;
       const row = bounds.height + (Number.parseFloat(style.marginBottom) || 0);
       const last = untrack(() => imageMeasure);
-      if (last?.tab === measuredTab && last.width === width && last.gap === gap && last.row === row)
+      if (
+        last?.tab === measuredTab &&
+        settled(last.width, width) &&
+        settled(last.gap, gap) &&
+        settled(last.row, row)
+      )
         return;
       imageMeasure = { tab: measuredTab, width, gap, row };
     };
@@ -477,7 +485,7 @@
       return;
     }
     keepPickFocus(keepOpen, cell.emoji);
-    if (!reactions) rememberEmote(cell.emoji);
+    if (!reactions) rememberEmoji(cell.emoji);
     onPickUnicode?.(cell.emoji, keepOpen);
   }
 
@@ -608,8 +616,17 @@
 
   function pick(image: PackImageView, keepOpen: boolean): void {
     keepPickFocus(keepOpen, image.url);
-    if (!reactions) rememberEmote(image.url, tab === 'sticker' ? 'sticker' : 'emoticon');
+    if (!reactions) {
+      if (tab === 'sticker') rememberSticker(image.url);
+      else rememberEmoji(image.url);
+    }
     onPick(image, tab as ImageUsageView, keepOpen);
+  }
+
+  function rememberEmoji(key: string): void {
+    core.rpc.messages.rememberEmoji({ key }).catch((error: unknown) => {
+      console.warn('[sable emotes] the pick could not be remembered', error);
+    });
   }
 
   const MIN_BOARD_WIDTH = 250;

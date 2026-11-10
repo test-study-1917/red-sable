@@ -1,3 +1,4 @@
+use crate::now_ms;
 use backon::Retryable;
 use std::io::Read;
 use std::time::Duration;
@@ -14,8 +15,7 @@ use matrix_sdk::ruma::api::Metadata;
 use matrix_sdk::ruma::api::client::authenticated_media;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::{
-    MilliSecondsSinceUnixEpoch, OwnedMxcUri, OwnedServerName, ServerName, UInt,
-    events::room::message::TextMessageEventContent,
+    OwnedMxcUri, OwnedServerName, ServerName, UInt, events::room::message::TextMessageEventContent,
 };
 use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
 use mime::Mime;
@@ -110,25 +110,25 @@ impl Core {
         self.upload_media(mime, bytes).await
     }
 
-    /// Authenticated media needs the access token, so the fetch happens here.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the media URI is invalid, the user is logged out,
-    /// or the homeserver rejects the request.
-    pub async fn media_thumbnail(
-        &self,
-        source: String,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>, RpcError> {
-        self.fetch_media(source, width, height, false).await
-    }
-
     /// # Errors
     ///
     /// Returns an error for invalid media, missing sessions, or failed downloads.
     pub async fn fetch_media(
+        &self,
+        source: String,
+        width: u32,
+        height: u32,
+        background: bool,
+    ) -> Result<Vec<u8>, RpcError> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(bytes) = crate::link_previews::scraped_media(&source).await {
+            return bytes;
+        }
+        self.fetch_matrix_media(source, width, height, background)
+            .await
+    }
+
+    async fn fetch_matrix_media(
         &self,
         source: String,
         width: u32,
@@ -325,6 +325,7 @@ impl Core {
                 .await?
                 .get_media_content(&request)
                 .await?
+            && !content.is_empty()
         {
             return Ok(content);
         }
@@ -921,6 +922,9 @@ async fn store_media(
     request: &MediaRequestParameters,
     content: &[u8],
 ) -> matrix_sdk::Result<()> {
+    if content.is_empty() {
+        return Ok(());
+    }
     let store = client.media_store().lock().await?;
     let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
     if store.media_retention_policy().exceeds_max_file_size(size) {
@@ -948,6 +952,7 @@ async fn cached_media(
             format,
         };
         if let Ok(Some(bytes)) = store.get_media_content(&request).await
+            && !bytes.is_empty()
             && (!preview
                 || !matches!(request.format, MediaFormat::File)
                 || bytes.len() <= MAX_CACHED_PREVIEW_ORIGINAL_BYTES)
@@ -956,10 +961,6 @@ async fn cached_media(
         }
     }
     None
-}
-
-fn now_ms() -> u64 {
-    MilliSecondsSinceUnixEpoch::now().get().into()
 }
 
 fn media_origin(source: &MediaSource) -> Option<(OwnedServerName, String)> {
@@ -1277,5 +1278,41 @@ mod tests {
 
         assert_eq!(profile["com.beeper.per_message_profile"]["id"], "hatchy");
         assert!(profile.get("body").is_none());
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn an_empty_body_is_never_served_from_the_store() {
+        use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+        use matrix_sdk::ruma::{events::room::MediaSource, owned_mxc_uri};
+
+        let server = matrix_sdk::test_utils::mocks::MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let source = MediaSource::Plain(owned_mxc_uri!("mxc://example.org/empty"));
+        let request = MediaRequestParameters {
+            source: source.clone(),
+            format: MediaFormat::File,
+        };
+
+        super::store_media(&client, &request, &[])
+            .await
+            .expect("store");
+        let store = client.media_store().lock().await.expect("media store");
+        assert_eq!(store.get_media_content(&request).await.expect("read"), None);
+
+        store
+            .add_media_content(&request, Vec::new(), super::IgnoreMediaRetentionPolicy::No)
+            .await
+            .expect("stored empty body");
+        drop(store);
+        assert_eq!(super::cached_media(&client, &source, 0, 0).await, None);
+
+        super::store_media(&client, &request, &[1])
+            .await
+            .expect("store");
+        assert_eq!(
+            super::cached_media(&client, &source, 0, 0).await,
+            Some(vec![1])
+        );
     }
 }
