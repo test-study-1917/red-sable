@@ -16,6 +16,7 @@
   import { mediaFailureHold, mediaRetryDelay } from '#lib/ui/media-retry.js';
   import { CoreError } from '#src/transport';
   import {
+    cachedMediaAnimated,
     cachedMediaType,
     cachedMediaUrl,
     discardMediaUrl,
@@ -23,16 +24,20 @@
     isEncryptedMedia,
     loadMediaUrl,
     mediaAspectRatio,
+    mediaUrlShown,
+    recoverMediaUrl,
     retryMediaUrl,
   } from '#lib/ui/media-url.js';
   import { animationsPaused, stillFrame } from '#lib/ui/still-frame.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
+  import '#lib/ui/media-size.css';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import ImageBrokenIcon from 'phosphor-svelte/lib/ImageBrokenIcon';
   import ImageSpoilerControl from './ImageSpoilerControl.svelte';
   import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import PlayIcon from 'phosphor-svelte/lib/PlayIcon';
+  import { sleep } from '#lib/sleep.js';
 
   const BLURHASH_DECODE_WIDTH = 32;
   const ORIENTATION_TOLERANCE = 0.05;
@@ -249,8 +254,21 @@
       ((animated || original) &&
         (animationsPaused() || (emoticon && !preferences.autoplayStickers)))
   );
-  let heldFrame = $derived(paused && imageLoaded && imageElement ? stillFrame(imageElement) : null);
-  let heldUrl = $derived(heldFrame ?? url);
+  let heldFrame = $state<{ url: string; still: string } | null>(null);
+  let heldUrl = $derived(paused && heldFrame && heldFrame.url === url ? heldFrame.still : url);
+  $effect(() => {
+    const image = imageElement;
+    const source = url;
+    if (!paused || !imageLoaded || !image || !source) return;
+    if (cachedMediaAnimated(core, requested, requestedWidth, requestedHeight) === false) return;
+    let current = true;
+    void stillFrame(image, source).then((still) => {
+      if (current && still) heldFrame = { url: source, still };
+    });
+    return () => {
+      current = false;
+    };
+  });
   let steppedGif = $derived(gifFrames !== null);
   let heldGif = $derived(manualGif && !gifPlaying && gifPreviewReady);
   let painted = $derived(manualGif ? gifPreviewReady : imageLoaded);
@@ -432,7 +450,7 @@
     const stopped = (): boolean => !running;
     const step = async (): Promise<void> => {
       while (!stopped()) {
-        await new Promise((resolve) => setTimeout(resolve, gifFrameMs));
+        await sleep(gifFrameMs);
         if (stopped()) return;
         await paintFrame(playback, (gifFrameIndex + 1) % playback.frameCount);
       }
@@ -532,16 +550,34 @@
   }
 
   function freezeFrame(): void {
+    mediaUrlShown(core, requested, requestedWidth, requestedHeight);
     backoff = { ...backoff, manual: 0, automatic: 0, at: 0 };
     previewUrl = drawFrame() ? url : null;
   }
 
   function imageShown(): void {
+    mediaUrlShown(core, requested, requestedWidth, requestedHeight);
     backoff = { ...backoff, manual: 0, automatic: 0, at: 0 };
     loadedUrl = url;
   }
 
   function brokenImage(): void {
+    const recovery =
+      url && recoverMediaUrl(core, requested, requestedWidth, requestedHeight, url, mime);
+    if (recovery) {
+      const key = requestKey;
+      const shownSource = source;
+      void recovery.then(
+        (nextUrl) => {
+          outcome = { key, url: nextUrl };
+        },
+        () => {
+          outcome = { key, url: null };
+          onfailed?.(shownSource);
+        }
+      );
+      return;
+    }
     if (url) discardMediaUrl(core, requested, requestedWidth, requestedHeight, url);
     if (!asIs) {
       undecodableThumbnail = source;
@@ -894,17 +930,6 @@
     inset: 0;
     justify-content: center;
     position: absolute;
-  }
-
-  .media-image-size {
-    background: var(--surface-container);
-    border-radius: var(--radius-pill);
-    bottom: var(--space-100);
-    color: var(--surface-on-container);
-    font-size: var(--font-size-small);
-    padding: var(--space-050) var(--space-100);
-    position: absolute;
-    right: var(--space-100);
   }
 
   @container (max-width: 8rem) {

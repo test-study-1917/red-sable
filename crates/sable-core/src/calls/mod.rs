@@ -448,7 +448,7 @@ fn left_membership() -> CallMemberEventContent {
 
 pub(crate) async fn screen_sharers(room: &Room) -> Vec<OwnedUserId> {
     let mut members = membership::active_members(room).await;
-    let now = keys::now_ms();
+    let now = crate::now_ms();
     let encrypted = !matches!(
         room.latest_encryption_state().await,
         Ok(matrix_sdk::EncryptionState::NotEncrypted)
@@ -584,10 +584,10 @@ impl Core {
             if let Ok(events) = sync.sync(&room, Duration::ZERO).await {
                 let mut sticky_members = membership::StickyMemberships::default();
                 for event in events {
-                    event.apply(&mut sticky_members, encrypted, keys::now_ms());
+                    event.apply(&mut sticky_members, encrypted, crate::now_ms());
                 }
                 has_focus =
-                    !membership::advertised_service_urls(&sticky_members.members(keys::now_ms()))
+                    !membership::advertised_service_urls(&sticky_members.members(crate::now_ms()))
                         .is_empty();
             }
         }
@@ -716,9 +716,9 @@ impl Core {
                     .as_str()
                     .and_then(|user| UserId::parse(user).ok())
                     .is_some_and(|sender| power_levels.user_can_trigger_room_notification(&sender));
-                current.apply(&event, keys::now_ms(), allowed);
+                current.apply(&event, crate::now_ms(), allowed);
             }
-            if current.duplicate(&content, &users, keys::now_ms()) {
+            if current.duplicate(&content, &users, crate::now_ms()) {
                 return;
             }
             if let Err(error) = room
@@ -844,7 +844,7 @@ impl Core {
             .await
             .ok_or_else(|| self.failed("decline_call", "could not read the invitation"))?;
         if (value["content"].get("slot_id").is_some() || value["type"] == "m.rtc.invite")
-            && invites::Invite::parse(&value, keys::now_ms()).is_none_or(|invite| invite.modern)
+            && invites::Invite::parse(&value, crate::now_ms()).is_none_or(|invite| invite.modern)
         {
             let (invite, _) = invite_service::active_invite(&room, &value)
                 .await
@@ -958,7 +958,7 @@ impl Core {
             let sender = state.own_member().user_id.to_string();
             let attempt = state
                 .termination
-                .begin_attempt(&sender, keys::now_ms())
+                .begin_attempt(&sender, crate::now_ms())
                 .ok_or(RpcError::CallTerminationInProgress)?;
             (
                 call.room_id.clone(),

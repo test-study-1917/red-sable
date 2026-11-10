@@ -14,6 +14,7 @@
   import FingerprintIcon from 'phosphor-svelte/lib/FingerprintIcon';
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
   import GearIcon from 'phosphor-svelte/lib/GearIcon';
+  import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
   import ListBulletsIcon from 'phosphor-svelte/lib/ListBulletsIcon';
   import PushPinSlashIcon from 'phosphor-svelte/lib/PushPinSlashIcon';
@@ -33,7 +34,7 @@
   import { copyRoomLink } from '#lib/rooms/permalink.js';
   import { isQuiet, setQuiet } from '#lib/rooms/quiet-rooms.svelte.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { preferences, readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
@@ -64,6 +65,7 @@
     onMoveDown?: () => void;
     onUnpin?: () => void;
     onRemoveFromFolder?: () => void;
+    onChangeIcon?: () => void;
   }
 
   let {
@@ -80,6 +82,7 @@
     onMoveDown,
     onUnpin,
     onRemoveFromFolder,
+    onChangeIcon,
   }: Props = $props();
   const core = useCoreClient();
   const roomList = useRoomList();
@@ -259,7 +262,7 @@
   }
 
   function markRead(): void {
-    markRoomsRead(readable, core.rpc.timeline, readReceiptIsPrivate());
+    markRoomsRead(readable, core.rpc.timeline);
   }
 
   function markUnread(): void {
@@ -422,6 +425,12 @@
       <ActionMenuItem onSelect={onRemoveFromFolder}>
         <ArrowLineUpIcon />
         {i18n.t('nav.folderRemoveSpace')}
+      </ActionMenuItem>
+    {/if}
+    {#if onChangeIcon}
+      <ActionMenuItem onSelect={onChangeIcon}>
+        <ImageIcon />
+        {i18n.t('nav.changeIcon')}
       </ActionMenuItem>
     {/if}
 

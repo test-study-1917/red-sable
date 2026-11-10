@@ -186,6 +186,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       supports_restricted: false,
       supports_knock_restricted: false,
       space_children: [],
+      bridge: null,
       unread:
         workerMode === 'room_name_overflow'
           ? 0
@@ -906,7 +907,6 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
     };
 
     const rpcHandlers: RpcHandlers = {
-      'auth.discover_homeserver': () => 'https://example.test',
       'auth.login': () => {
         signedOut = false;
         saveOnboarding();
@@ -1135,6 +1135,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
               theme_color: null,
               card: null,
               author_name: null,
+              post: null,
             }
           : null,
       'messages.schedule': () => 'e2e-delay',
@@ -1235,7 +1236,6 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'push.web_pushers': () => [],
       'push.ping_gateway': () => null,
       'push.send_diagnostic': () => ({ kind: 'no_pusher' }),
-      'push.discover_gateway': () => null,
       'session.restore': () => {
         if (workerMode === 'loading') return NO_REPLY;
         if (workerMode === 'error') throw new FakeCoreError('failed');
@@ -1278,7 +1278,6 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'session.integration_manager_url': () => 'https://integrations.example.test/index.html',
       'search.messages': (params) => ({ hits: searchHits(params), older: null }),
       'search.peer_start': () => null,
-      'search.peer_exchange': () => null,
       'rtc.signal': () => null,
       'rtc.close': () => null,
       'search.coverage': () => ({
@@ -1315,11 +1314,9 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           outcome: null,
           peer: null,
           rooms_copied: 0,
-          rooms_received: 0,
           last_copy: null,
           automatic: false,
           asked: 0,
-          serving: 0,
           candidates: [],
         },
       }),

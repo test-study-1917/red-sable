@@ -8,6 +8,8 @@
   pnpmConfigHook,
   nodejs_26,
   pkg-config,
+  aws-lc,
+  sqlite,
   pipewire,
   libpulseaudio,
   autoPatchelfHook,
@@ -46,6 +48,8 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   buildInputs = [
+    aws-lc
+    sqlite
     pipewire
     libpulseaudio
     stdenv.cc.cc.lib
@@ -65,7 +69,8 @@ stdenv.mkDerivation (finalAttrs: {
     chmod -R u+w electron-dist
     pnpm --dir electron package --linux --dir \
       -c.electronDist=$PWD/electron-dist \
-      -c.electronVersion=${electron.version}
+      -c.electronVersion=${electron.version} \
+      -c.extraMetadata.autoUpdate=false
 
     runHook postBuild
   '';

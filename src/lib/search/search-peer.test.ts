@@ -2,8 +2,7 @@
 
 import { afterEach, beforeEach, expect, test, vi, type Mock } from 'vitest';
 
-import { SearchPeerDecoder, encodeSearchPeerFrame } from '#lib/model/model.js';
-import type { RtcEvent } from '#lib/rtc/connect.js';
+import type { CoreEvent, SearchPeerPause } from '#src/generated/protocol';
 import { watchSearchPeers, type SearchPeerCore } from './search-peer';
 
 class Channel extends EventTarget {
@@ -12,71 +11,20 @@ class Channel extends EventTarget {
   maxRetransmits = null;
   maxPacketLifeTime = null;
   readyState = 'connecting';
-  bufferedAmount = 0;
-  bufferedAmountLowThreshold = 0;
-  send = vi.fn<(data: string | ArrayBuffer) => void>();
+  send = vi.fn<(data: Uint8Array) => void>();
   close = vi.fn(() => {
     this.readyState = 'closed';
   });
   open(): void {
     this.readyState = 'open';
     this.dispatchEvent(new Event('open'));
-    this.dispatchEvent(new MessageEvent('message', { data: 'ack' }));
+  }
+  deliver(...frames: number[][]): void {
+    for (const frame of frames) {
+      this.dispatchEvent(new MessageEvent('message', { data: new Uint8Array(frame).buffer }));
+    }
   }
 }
-
-function framed(message: string): ArrayBuffer {
-  const bytes = new TextEncoder().encode(message);
-  const frame = new Uint8Array(4 + bytes.length);
-  new DataView(frame.buffer).setUint32(0, bytes.length);
-  frame.set(bytes, 4);
-  return frame.buffer;
-}
-
-test('length-delimited frames decode across arbitrary byte boundaries', () => {
-  const decoder = new SearchPeerDecoder();
-  try {
-    const bytes = encodeSearchPeerFrame('中文🙂');
-    for (const byte of bytes.subarray(0, -1)) {
-      expect(decoder.push(new Uint8Array([byte]))).toBeUndefined();
-    }
-    expect(decoder.push(bytes.subarray(-1))).toBe('中文🙂');
-    expect(decoder.push(new Uint8Array([0, 0, 0, 0]))).toBe('');
-  } finally {
-    decoder.free();
-  }
-});
-
-test('length-delimited frames reject oversized and malformed payloads', () => {
-  for (const bytes of [
-    new Uint8Array([0, 96, 0, 1]),
-    new Uint8Array([0, 0, 0, 1, 255]),
-    new Uint8Array([0, 0, 0, 0, 0]),
-  ]) {
-    const decoder = new SearchPeerDecoder();
-    try {
-      expect(() => decoder.push(bytes)).toThrow();
-    } finally {
-      decoder.free();
-    }
-  }
-  expect(() => encodeSearchPeerFrame('x'.repeat(6 * 1024 * 1024 + 1))).toThrow();
-});
-
-test('a maximum-sized frame survives 16 KiB data-channel chunks', () => {
-  const message = 'x'.repeat(6 * 1024 * 1024);
-  const bytes = encodeSearchPeerFrame(message);
-  const decoder = new SearchPeerDecoder();
-  try {
-    let decoded: string | undefined;
-    for (let offset = 0; offset < bytes.length; offset += 16 * 1024) {
-      decoded = decoder.push(bytes.subarray(offset, offset + 16 * 1024));
-    }
-    expect(decoded).toBe(message);
-  } finally {
-    decoder.free();
-  }
-});
 
 class Peer extends EventTarget {
   static instances: Peer[] = [];
@@ -108,28 +56,28 @@ class Peer extends EventTarget {
   }
 }
 
-let listener: (event: RtcEvent) => void;
+let listener: (event: CoreEvent) => void;
 let subscribeEvents: Mock<SearchPeerCore['subscribeEvents']>;
+let rtcData: Mock<SearchPeerCore['rtcData']>;
 let core: SearchPeerCore;
 let stop: (() => void) | undefined;
-let connection: EventTarget & { type: string };
 
 beforeEach(() => {
   Peer.instances = [];
   vi.stubGlobal('RTCPeerConnection', Peer);
-  connection = Object.assign(new EventTarget(), { type: 'wifi' });
-  vi.stubGlobal('navigator', { onLine: true, connection });
+  vi.stubGlobal('navigator', {});
   subscribeEvents = vi.fn<SearchPeerCore['subscribeEvents']>((callback) => {
     listener = callback;
     return vi.fn();
   });
+  rtcData = vi.fn<SearchPeerCore['rtcData']>(() => Promise.resolve(new Uint8Array(0)));
   core = {
     session: { account_id: 'account' },
     subscribeEvents,
+    rtcData,
     rpc: {
       search: {
         peerStart: vi.fn(() => Promise.resolve(null)),
-        peerExchange: vi.fn(() => Promise.resolve(null)),
       },
       rtc: {
         signal: vi.fn(() => Promise.resolve(null)),
@@ -148,7 +96,7 @@ afterEach(() => {
 });
 
 function start(): Channel {
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   listener({
     type: 'rtc',
     purpose: 'search_sharing',
@@ -160,7 +108,7 @@ function start(): Channel {
 }
 
 function receive(): Channel {
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   listener({
     type: 'rtc',
     purpose: 'search_sharing',
@@ -175,7 +123,7 @@ function receive(): Channel {
 
 test('unsupported browsers do not start discovery', () => {
   vi.stubGlobal('RTCPeerConnection', undefined);
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   expect(core.rpc.search.peerStart).not.toHaveBeenCalled();
   expect(subscribeEvents).not.toHaveBeenCalled();
 });
@@ -183,7 +131,6 @@ test('unsupported browsers do not start discovery', () => {
 test('foreground options finish applying before discovery starts', async () => {
   const ready = Promise.withResolvers<null>();
   stop = watchSearchPeers(core, {
-    unmeteredOnly: true,
     stunServers: [],
     beforeStart: () => ready.promise,
   });
@@ -198,7 +145,6 @@ test('foreground options finish applying before discovery starts', async () => {
 test('an account switch cancels startup while foreground options are pending', async () => {
   const ready = Promise.withResolvers<null>();
   stop = watchSearchPeers(core, {
-    unmeteredOnly: true,
     stunServers: [],
     beforeStart: () => ready.promise,
   });
@@ -217,7 +163,7 @@ test('a visibility change during startup closes the connection', () => {
     document.dispatchEvent(new Event('visibilitychange'));
     return unsubscribe;
   });
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   expect(unsubscribe).toHaveBeenCalledOnce();
   expect(core.rpc.search.peerStart).not.toHaveBeenCalled();
   visibility.mockRestore();
@@ -226,7 +172,7 @@ test('a visibility change during startup closes the connection', () => {
 test('a failed foreground update can retry on the next activation', async () => {
   const ready = Promise.withResolvers<null>();
   const beforeStart = vi.fn(() => ready.promise);
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [], beforeStart });
+  stop = watchSearchPeers(core, { stunServers: [], beforeStart });
   ready.reject(new Error('options unavailable'));
   await ready.promise.catch(() => {});
   await Promise.resolve();
@@ -249,7 +195,7 @@ test('a datachannel setup failure releases the peer immediately', () => {
       }
     }
   );
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   listener({
     type: 'rtc',
     purpose: 'search_sharing',
@@ -276,12 +222,12 @@ test('deferred signaling rejection after cleanup does not reopen or double-close
 });
 
 test('a deferred exchange rejection after an account switch cannot call the new account', async () => {
-  const exchange = Promise.withResolvers<string | null>();
-  vi.mocked(core.rpc.search.peerExchange).mockReturnValue(exchange.promise);
+  const exchange = Promise.withResolvers<Uint8Array<ArrayBuffer>>();
+  rtcData.mockReturnValue(exchange.promise);
   const channel = receive();
   channel.open();
   await vi.waitFor(() => {
-    expect(core.rpc.search.peerExchange).toHaveBeenCalledOnce();
+    expect(rtcData).toHaveBeenCalledOnce();
   });
   core.session = { account_id: 'other' };
   stop?.();
@@ -292,7 +238,7 @@ test('a deferred exchange rejection after an account switch cannot call the new 
 });
 
 test('rtc sessions of other features are left alone', () => {
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   listener({
     type: 'rtc',
     purpose: 'file_transfer' as 'search_sharing',
@@ -304,31 +250,16 @@ test('rtc sessions of other features are left alone', () => {
   expect(core.rpc.rtc.close).not.toHaveBeenCalled();
 });
 
-test('the sending device waits for the receiver to request history', async () => {
-  const channel = start();
+test.each([
+  ['sending', start],
+  ['receiving', receive],
+])('the %s device tells the core when its channel opens', async (_, open) => {
+  const channel = open();
   channel.open();
-  await Promise.resolve();
-  expect(core.rpc.search.peerExchange).not.toHaveBeenCalled();
-  expect(channel.send).toHaveBeenCalledWith('ready');
-});
-
-test('index requests wait for acknowledgement and retry a lost greeting', async () => {
-  vi.useFakeTimers();
-  const channel = receive();
-  channel.readyState = 'open';
-  channel.dispatchEvent(new Event('open'));
-  await vi.advanceTimersByTimeAsync(250);
-  expect(channel.send.mock.calls).toEqual([['ready'], ['ready']]);
-  expect(core.rpc.search.peerExchange).not.toHaveBeenCalled();
-  channel.dispatchEvent(new MessageEvent('message', { data: 'ready' }));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(channel.send).toHaveBeenLastCalledWith('ack');
-  expect(core.rpc.search.peerExchange).not.toHaveBeenCalled();
-  channel.dispatchEvent(new MessageEvent('message', { data: 'ack' }));
-  channel.dispatchEvent(new MessageEvent('message', { data: 'ack' }));
-  await vi.advanceTimersByTimeAsync(1000);
-  expect(core.rpc.search.peerExchange).toHaveBeenCalledOnce();
-  expect(channel.send.mock.calls).toEqual([['ready'], ['ready'], ['ack']]);
+  await vi.waitFor(() => {
+    expect(rtcData).toHaveBeenCalledWith('test', new Uint8Array(0));
+  });
+  expect(channel.send).not.toHaveBeenCalled();
 });
 
 test('a negotiation timeout releases the connection', async () => {
@@ -339,10 +270,10 @@ test('a negotiation timeout releases the connection', async () => {
   expect(core.rpc.rtc.close).toHaveBeenCalledWith({ session_id: 'test' });
 });
 
-test('discovery retries on resume and at regular intervals', async () => {
+test('the core is started on resume and at regular intervals', async () => {
   vi.useFakeTimers();
   const visibility = vi.spyOn(document, 'visibilityState', 'get');
-  stop = watchSearchPeers(core, { unmeteredOnly: true, stunServers: [] });
+  stop = watchSearchPeers(core, { stunServers: [] });
   await vi.advanceTimersByTimeAsync(1000);
   visibility.mockReturnValue('hidden');
   document.dispatchEvent(new Event('visibilitychange'));
@@ -356,21 +287,39 @@ test('discovery retries on resume and at regular intervals', async () => {
   visibility.mockRestore();
 });
 
-test('idle channels close after sixty seconds', async () => {
+test('idle channels close after two minutes', async () => {
   vi.useFakeTimers();
   const channel = start();
   channel.open();
-  await vi.advanceTimersByTimeAsync(60_000);
+  await vi.advanceTimersByTimeAsync(119_000);
+  expect(channel.close).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1_000);
   expect(channel.close).toHaveBeenCalledOnce();
 });
 
-test('metered and offline transitions close active transfers', () => {
+function pauseSharing(pause: SearchPeerPause | null): void {
+  listener({
+    type: 'search_sharing',
+    sharing: {
+      state: 'idle',
+      pause,
+      outcome: null,
+      peer: null,
+      rooms_copied: 0,
+      last_copy: null,
+      automatic: false,
+      asked: 0,
+      candidates: [],
+    },
+  });
+}
+
+test('a core pause closes the transfer and its end restarts discovery', async () => {
   start();
-  connection.type = 'cellular';
-  connection.dispatchEvent(new Event('change'));
+  expect(core.rpc.search.peerStart).toHaveBeenCalledOnce();
+  pauseSharing('metered');
   expect(Peer.instances[0].close).toHaveBeenCalledOnce();
   expect(core.rpc.rtc.close).toHaveBeenCalledOnce();
-  connection.type = 'wifi';
   listener({
     type: 'rtc',
     purpose: 'search_sharing',
@@ -378,9 +327,10 @@ test('metered and offline transitions close active transfers', () => {
     sender: true,
     signal: { kind: 'open' },
   });
-  vi.stubGlobal('navigator', { onLine: false, connection });
-  window.dispatchEvent(new Event('offline'));
-  expect(Peer.instances[1].close).toHaveBeenCalledOnce();
+  expect(Peer.instances).toHaveLength(1);
+  await new Promise((resolve) => setTimeout(resolve));
+  pauseSharing(null);
+  expect(core.rpc.search.peerStart).toHaveBeenCalledTimes(2);
 });
 
 test('late account cleanup does not send old session RPCs to the new account', () => {
@@ -404,79 +354,53 @@ test('a backend cancellation closes the browser channel', () => {
   expect(Peer.instances[0].close).toHaveBeenCalledOnce();
 });
 
-test('invalid or oversized frames close before reaching the core', () => {
+test.each([
+  ['text', 'end'],
+  ['empty', new ArrayBuffer(0)],
+])('%s frames close before reaching the core', (_, data) => {
   const channel = start();
-  channel.dispatchEvent(
-    new MessageEvent('message', { data: new Uint8Array([0, 96, 0, 1]).buffer })
-  );
+  channel.dispatchEvent(new MessageEvent('message', { data }));
   expect(channel.close).toHaveBeenCalledOnce();
-  expect(core.rpc.search.peerExchange).not.toHaveBeenCalled();
+  expect(rtcData).not.toHaveBeenCalled();
 });
 
-test('incoming messages reach the core in order without overlapping RPCs', async () => {
+test('frames reach the core one at a time and in order', async () => {
+  const opening = Promise.withResolvers<Uint8Array<ArrayBuffer>>();
+  rtcData.mockReturnValueOnce(opening.promise);
   const channel = receive();
-  const first = Promise.withResolvers<null>();
-  vi.mocked(core.rpc.search.peerExchange).mockImplementation(({ data }) =>
-    data === 'a' ? first.promise : Promise.resolve(null)
-  );
   channel.open();
+  channel.deliver([1], [2, 3]);
   await vi.waitFor(() => {
-    expect(core.rpc.search.peerExchange).toHaveBeenCalledOnce();
+    expect(rtcData).toHaveBeenCalledOnce();
   });
-  for (const data of ['a', 'b']) {
-    channel.dispatchEvent(new MessageEvent('message', { data: framed(data) }));
-  }
+  await Promise.resolve();
+  expect(rtcData).toHaveBeenCalledOnce();
+  opening.resolve(new Uint8Array(0));
   await vi.waitFor(() => {
-    expect(core.rpc.search.peerExchange).toHaveBeenCalledTimes(2);
+    expect(rtcData).toHaveBeenCalledTimes(3);
   });
-  expect(vi.mocked(core.rpc.search.peerExchange).mock.calls[1][0].data).toBe('a');
-  first.resolve(null);
-  await vi.waitFor(() => {
-    expect(core.rpc.search.peerExchange).toHaveBeenCalledTimes(3);
-  });
-  expect(vi.mocked(core.rpc.search.peerExchange).mock.calls[2][0].data).toBe('b');
+  expect(rtcData.mock.calls.map(([, frame]) => [...frame])).toEqual([[], [1], [2, 3]]);
+  expect(channel.close).not.toHaveBeenCalled();
 });
 
-test('too many queued messages close the channel while the core is busy', async () => {
+test('replies are sent in chunks of at most 16 KiB', async () => {
+  const reply = new Uint8Array(40 * 1024).map((_, index) => index % 251);
+  rtcData.mockResolvedValueOnce(reply);
   const channel = receive();
-  const pending = Promise.withResolvers<null>();
-  vi.mocked(core.rpc.search.peerExchange).mockReturnValue(pending.promise);
   channel.open();
   await vi.waitFor(() => {
-    expect(core.rpc.search.peerExchange).toHaveBeenCalledOnce();
+    expect(channel.send).toHaveBeenCalledTimes(3);
   });
-  for (let index = 0; index < 9; index += 1) {
-    channel.dispatchEvent(new MessageEvent('message', { data: framed('') }));
-  }
-  expect(channel.close).toHaveBeenCalledOnce();
-  expect(core.rpc.search.peerExchange).toHaveBeenCalledOnce();
-  pending.resolve(null);
+  const chunks = channel.send.mock.calls.map(([frame]) => frame);
+  expect(chunks.map((chunk) => chunk.byteLength)).toEqual([16 * 1024, 16 * 1024, 8 * 1024]);
+  expect(new Uint8Array(chunks.flatMap((chunk) => [...chunk]))).toEqual(reply);
 });
 
-test('UTF-8 chunks fit the datachannel limit and wait for backpressure', async () => {
-  const data = '中文🙂'.repeat(10_000);
-  vi.mocked(core.rpc.search.peerExchange).mockResolvedValueOnce(data);
+test('a core error closes the channel', async () => {
+  rtcData.mockRejectedValueOnce(new Error('malformed'));
   const channel = receive();
-  channel.bufferedAmount = 80 * 1024;
   channel.open();
   await vi.waitFor(() => {
-    expect(core.rpc.search.peerExchange).toHaveBeenCalledOnce();
+    expect(channel.close).toHaveBeenCalledOnce();
   });
-  expect(channel.send).not.toHaveBeenCalled();
-  channel.bufferedAmount = 0;
-  channel.dispatchEvent(new Event('bufferedamountlow'));
-  await vi.waitFor(() => {
-    expect(channel.send.mock.calls.length).toBeGreaterThan(5);
-  });
-  const frames = channel.send.mock.calls.map(([frame]) => frame);
-  const chunks = frames.filter((frame): frame is ArrayBuffer => frame instanceof ArrayBuffer);
-  const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
-  let offset = 0;
-  for (const chunk of chunks) {
-    expect(chunk.byteLength).toBeLessThanOrEqual(16 * 1024);
-    bytes.set(new Uint8Array(chunk), offset);
-    offset += chunk.byteLength;
-  }
-  expect(new DataView(bytes.buffer).getUint32(0)).toBe(bytes.length - 4);
-  expect(new TextDecoder().decode(bytes.subarray(4))).toBe(data);
 });

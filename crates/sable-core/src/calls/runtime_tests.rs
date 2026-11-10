@@ -211,7 +211,7 @@ async fn pending_key_with_a_custom_membership_id_is_emitted() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let parsed_room_id = room_id!("!call:example.org");
-    let now = super::keys::now_ms();
+    let now = crate::now_ms();
     let event = json!({
         "type": "org.matrix.msc3401.call.member",
         "state_key": "_@user:example.org_DEVICE_m.call",
@@ -259,7 +259,7 @@ async fn pending_key_with_a_custom_membership_id_is_emitted() {
             session: super::keys::SessionRef::default(),
             sent_ts: Some(1),
         },
-        received: super::keys::now_ms(),
+        received: crate::now_ms(),
         reported: false,
     };
     let mut state = State::new(
@@ -324,7 +324,7 @@ async fn an_element_call_peers_key_is_emitted_on_the_oldest_members_focus() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let parsed_room_id = room_id!("!call:example.org");
-    let now = super::keys::now_ms();
+    let now = crate::now_ms();
     let event = json!({
         "type": "org.matrix.msc3401.call.member",
         "state_key": "_@peer:remote.example.org_PEERDEVICE_m.call",
@@ -435,7 +435,7 @@ async fn a_key_whose_member_has_not_resolved_waits_for_the_roster() {
         sender: owned_user_id!("@user:example.org"),
         device: owned_device_id!("DEVICE"),
         content,
-        received: super::keys::now_ms() - super::UNRESOLVED_KEY_REPORT_MS,
+        received: crate::now_ms() - super::UNRESOLVED_KEY_REPORT_MS,
         reported: false,
     }];
 
@@ -462,7 +462,7 @@ async fn an_element_call_focus_without_an_alias_still_counts() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let parsed_room_id = room_id!("!call:example.org");
-    let now = super::keys::now_ms();
+    let now = crate::now_ms();
     let event = json!({
         "type": "org.matrix.msc3401.call.member",
         "state_key": "_@peer:remote.example.org_PEERDEVICE_m.call",
@@ -560,7 +560,7 @@ async fn refresh_fixture(
         events,
         room,
         Mutex::new(State {
-            termination: super::super::termination::Reader::new(&own, &[], super::keys::now_ms()),
+            termination: super::super::termination::Reader::new(&own, &[], crate::now_ms()),
             own,
             sticky: super::StickyMemberships::default(),
             members: Vec::new(),
@@ -585,7 +585,7 @@ async fn refresh_fixture(
 
 #[tokio::test]
 async fn refresh_rejoins_when_an_observed_membership_disappears() {
-    let (core, _events, room, state) = refresh_fixture(super::keys::now_ms(), true).await;
+    let (core, _events, room, state) = refresh_fixture(crate::now_ms(), true).await;
     assert_eq!(
         refresh(&core, 0, CallSessionId(1), &room, &state).await,
         Refreshed::Absent
@@ -643,7 +643,7 @@ async fn sdk_redaction_removes_sticky_membership_and_wakes_the_call() {
 
 #[tokio::test]
 async fn refresh_allows_a_recent_unobserved_membership() {
-    let (core, _events, room, state) = refresh_fixture(super::keys::now_ms(), false).await;
+    let (core, _events, room, state) = refresh_fixture(crate::now_ms(), false).await;
     assert_eq!(
         refresh(&core, 0, CallSessionId(1), &room, &state).await,
         Refreshed::Current
@@ -652,7 +652,7 @@ async fn refresh_allows_a_recent_unobserved_membership() {
 
 #[tokio::test]
 async fn an_unchanged_roster_is_emitted_once() {
-    let (core, mut events, room, state) = refresh_fixture(super::keys::now_ms(), false).await;
+    let (core, mut events, room, state) = refresh_fixture(crate::now_ms(), false).await;
     assert_eq!(
         refresh(&core, 1, CallSessionId(1), &room, &state).await,
         Refreshed::Current
@@ -673,7 +673,7 @@ async fn an_unchanged_roster_is_emitted_once() {
 #[tokio::test]
 async fn refresh_stops_when_an_unobserved_membership_is_old() {
     let (core, _events, room, state) =
-        refresh_fixture(super::keys::now_ms().saturating_sub(30_001), false).await;
+        refresh_fixture(crate::now_ms().saturating_sub(30_001), false).await;
     assert_eq!(
         refresh(&core, 0, CallSessionId(1), &room, &state).await,
         Refreshed::Ended
@@ -998,9 +998,9 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
     assert!(!core.sync_suspended.load(Ordering::SeqCst));
     assert!(!core.app_active.load(Ordering::Relaxed));
 
-    core.set_network_available(false).await;
+    core.update_network_conditions(false, true).await;
     sync_service.stop().await;
-    core.set_network_available(true).await;
+    core.update_network_conditions(true, true).await;
     assert!(matches!(sync_service.state().get(), SyncState::Running));
 
     core.leave_call(second.session).await.unwrap();
@@ -1249,7 +1249,7 @@ async fn a_key_without_a_sent_timestamp_is_accepted() {
         sender: owned_user_id!("@user:example.org"),
         device: owned_device_id!("DEVICE"),
         content,
-        received: super::keys::now_ms(),
+        received: crate::now_ms(),
         reported: false,
     }];
 
@@ -1311,7 +1311,7 @@ async fn a_key_sent_again_unchanged_is_not_applied_twice() {
             session: super::keys::SessionRef::default(),
             sent_ts: Some(sent_ts),
         },
-        received: super::keys::now_ms(),
+        received: crate::now_ms(),
         reported: false,
     };
     let mut state = State::new(
@@ -1376,7 +1376,7 @@ async fn a_key_older_than_one_already_emitted_for_the_same_index_is_dropped() {
             session: super::keys::SessionRef::default(),
             sent_ts: Some(sent_ts),
         },
-        received: super::keys::now_ms(),
+        received: crate::now_ms(),
         reported: false,
     };
     let mut state = State::new(

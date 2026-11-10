@@ -17,7 +17,7 @@ domain! {
     metrics,
     peer_start,
     peer_find,
-    peer_exchange,
+    peer_reset,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,15 +44,14 @@ impl Handler for PeerFindParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct PeerExchangeParams {
-    pub session_id: String,
-    pub data: Option<String>,
-}
+pub struct PeerResetParams {}
 
-impl Handler for PeerExchangeParams {
-    type Ok = Option<String>;
-    async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
-        core.exchange_search_peer(&self.session_id, self.data).await
+impl Handler for PeerResetParams {
+    type Ok = ();
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        let client = core.client().await?;
+        core.forget_search_sharing(&client).await;
+        Ok(())
     }
 }
 

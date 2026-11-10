@@ -800,6 +800,26 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_address_keeps_its_underscores_and_asterisks() {
+        for typed in [
+            "https://en.wikipedia.org/wiki/Dr._Who_(Dalek_films)",
+            "see https://example.org/a_b_c and http://example.org/*x*",
+            "HTTPS://example.org/a_b_c",
+            "été https://example.org/a_b_c",
+        ] {
+            let content = markdown_to_content(typed, &[]);
+            assert_eq!(content.body, typed);
+            let html = content.formatted_body.unwrap_or_default();
+            assert!(!html.contains("<em>"), "{html}");
+            assert!(!html.contains('\\'), "{html}");
+        }
+        assert_eq!(
+            markdown_to_content("`https://example.org/a_b_c`", &[]).formatted_body,
+            Some("<code>https://example.org/a_b_c</code>".to_owned())
+        );
+    }
+
+    #[test]
     fn receivers_format_emphasis_only() {
         assert!(receiver_formats("*a*"));
         assert!(!receiver_formats("a * b"));

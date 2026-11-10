@@ -21,16 +21,17 @@
     rememberSpaceIds,
     removeFromFolder,
     renameFolder,
+    setFolderIcon,
     ungroupFolder,
     withoutSpace,
     type DropInstruction,
     type LayoutRef,
     type SidebarFolder,
   } from '#lib/spaces/sidebar-layout.js';
-  import { readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
   import { useSpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
   import ResizeHandle from '#lib/ui/primitives/ResizeHandle.svelte';
   import FolderRenameDialog from './FolderRenameDialog.svelte';
+  import SidebarIconDialog, { type IconTarget } from './SidebarIconDialog.svelte';
   import NavigationRail from './NavigationRail.svelte';
   import RoomNav from './RoomNav.svelte';
   import UserQuickTools from './UserQuickTools.svelte';
@@ -71,6 +72,7 @@
 
   const spaceSidebar = useSpaceSidebar();
   let renamingFolder = $state<SidebarFolder | null>(null);
+  let iconTarget = $state.raw<IconTarget | null>(null);
   let knownSpaceIds = $state.raw<string[]>([]);
   let collapsed = $derived(roomNavWidth < COLLAPSED_ROOM_NAV_WIDTH);
   let joinedSpaces = $derived(roomList.rooms.filter(isActiveSpace));
@@ -136,11 +138,7 @@
   function markSectionRead(key: 'home' | 'unspaced' | 'direct'): void {
     const section = roomList.section(key);
     if (!section) return;
-    markRoomsRead(
-      sectionRooms([...section.favourites, ...section.rooms]),
-      core.rpc.timeline,
-      readReceiptIsPrivate()
-    );
+    markRoomsRead(sectionRooms([...section.favourites, ...section.rooms]), core.rpc.timeline);
   }
 
   function markFolderRead(folder: SidebarFolder): void {
@@ -148,8 +146,7 @@
       sectionRooms(
         folder.content.flatMap((spaceId) => roomList.section(spaceId)?.descendants ?? [])
       ),
-      core.rpc.timeline,
-      readReceiptIsPrivate()
+      core.rpc.timeline
     );
   }
 
@@ -196,8 +193,37 @@
     onToggleFolder: (folderId: string) => {
       spaceSidebar.toggleFolder(folderId);
     },
+    onCollapseFolders: () => {
+      spaceSidebar.collapseAllFolders();
+    },
     onRenameFolder: (folder: SidebarFolder) => {
       renamingFolder = folder;
+    },
+    onChangeFolderIcon: (folder: SidebarFolder) => {
+      iconTarget = {
+        id: folder.id,
+        name: folderLabel(folder),
+        icon: folder.icon,
+        fallback: null,
+        description: i18n.t('nav.folderIconDescription'),
+        save: (icon) => {
+          spaceSidebar.write(setFolderIcon(entries, folder.id, icon));
+        },
+      };
+    },
+    onChangeSpaceIcon: (roomId: string) => {
+      const space = roomList.byId(roomId);
+      if (space === undefined) return;
+      iconTarget = {
+        id: roomId,
+        name: space.display_name,
+        icon: space.display_avatar_url === space.avatar_url ? null : space.display_avatar_url,
+        fallback: space.avatar_url,
+        description: i18n.t('nav.spaceIconDescription'),
+        save: async (icon) => {
+          await core.rpc.spaces.setAvatarOverride({ room_id: roomId, url: icon });
+        },
+      };
     },
     onUngroupFolder: (folderId: string) => {
       spaceSidebar.write(ungroupFolder(entries, folderId));
@@ -315,6 +341,12 @@
     }}
     onRename={(folderId: string, name: string) => {
       spaceSidebar.write(renameFolder(entries, folderId, name));
+    }}
+  />
+  <SidebarIconDialog
+    target={iconTarget}
+    onOpenChange={(open: boolean) => {
+      if (!open) iconTarget = null;
     }}
   />
 </aside>

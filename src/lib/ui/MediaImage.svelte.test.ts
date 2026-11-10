@@ -14,6 +14,7 @@ import MediaImage from './MediaImage.svelte';
 import MediaOutroHarness from './MediaOutroHarness.test.svelte';
 import { cachedMediaUrl, loadMediaUrl } from './media-url.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { mockStillFrames, STILL } from '#lib/test-support/still-frame.js';
 
 afterEach(() => {
   core.fetchMedia.mockReset();
@@ -28,6 +29,18 @@ afterEach(() => {
 
 const user = userEvent.setup({ delay: null });
 const retryButton = () => screen.getByRole('button', { name: /Retry/ });
+const shownImage = () => document.querySelector('img.media-image-content');
+
+async function breakShownImage(): Promise<void> {
+  await vi.waitFor(() => {
+    expect(shownImage()).not.toBeNull();
+  });
+  const broken = shownImage()?.getAttribute('src');
+  void fireEvent.error(find('img.media-image-content'));
+  await vi.waitFor(() => {
+    expect(shownImage()?.getAttribute('src')).not.toBe(broken);
+  });
+}
 
 test('refreshes the account image after a long background session', async () => {
   const now = vi.spyOn(Date, 'now');
@@ -89,9 +102,11 @@ test('recovers an undecodable account avatar when the app resumes', async () => 
     refreshOnResume: true,
   });
   await settle();
-  await fireEvent.error(screen.getByAltText('Account'));
-  await settle();
-  expect(core.fetchMedia).toHaveBeenCalledTimes(1);
+  for (let step = 0; step < 3; step += 1) {
+    await fireEvent.error(screen.getByAltText('Account'));
+    await settle();
+  }
+  expect(core.fetchMedia).toHaveBeenCalledTimes(3);
 
   window.dispatchEvent(new Event('pagehide'));
   await settle();
@@ -99,7 +114,7 @@ test('recovers an undecodable account avatar when the app resumes', async () => 
   window.dispatchEvent(new Event('pageshow'));
   await settle();
 
-  expect(core.fetchMedia).toHaveBeenCalledTimes(2);
+  expect(core.fetchMedia).toHaveBeenCalledTimes(4);
   expect(screen.getByAltText('Account')).toHaveAttribute('src', expect.stringMatching(/^blob:/));
 });
 
@@ -961,13 +976,7 @@ test('an undecodable file falls back instead of spinning forever', async () => {
     },
   });
 
-  for (const request of ['thumbnail', 'original']) {
-    await vi.waitFor(() => {
-      expect(document.querySelector('img.media-image-content'), request).not.toBeNull();
-    });
-    void fireEvent.error(find('img.media-image-content'));
-    await flushed();
-  }
+  for (let step = 0; step < 6; step += 1) await breakShownImage();
 
   expect(onfailed).toHaveBeenCalledOnce();
   expect(document.querySelector('.media-image-unavailable')).not.toBeNull();
@@ -985,17 +994,23 @@ test('an undecodable thumbnail falls back to the original, then stops', async ()
   const image = (): HTMLImageElement | null =>
     document.querySelector<HTMLImageElement>('img.media-image-content');
 
-  await vi.advanceTimersByTimeAsync(0);
-  void fireEvent.error(image() ?? find('img.media-image-content'));
+  for (let step = 0; step < 3; step += 1) {
+    await vi.advanceTimersByTimeAsync(0);
+    void fireEvent.error(image() ?? find('img.media-image-content'));
+  }
   await vi.advanceTimersByTimeAsync(0);
 
   expect(core.fetchMedia).toHaveBeenLastCalledWith(source, 0, 0);
   expect(onfailed).not.toHaveBeenCalled();
 
-  void fireEvent.error(image() ?? find('img.media-image-content'));
+  for (let step = 0; step < 3; step += 1) {
+    void fireEvent.error(image() ?? find('img.media-image-content'));
+    await vi.advanceTimersByTimeAsync(0);
+  }
   await vi.advanceTimersByTimeAsync(120_000);
 
-  expect(core.fetchMedia).toHaveBeenCalledTimes(2);
+  expect(core.fetchMedia).toHaveBeenCalledTimes(6);
+  expect(core.forgetMedia).toHaveBeenCalledTimes(2);
   expect(onfailed).toHaveBeenCalledOnce();
   expect(image()).toBeNull();
   expect(document.querySelector('.media-image-unavailable')).not.toBeNull();
@@ -1017,14 +1032,14 @@ test('an effect re-run after an undecodable original does not bring the retries 
   const image = (): HTMLImageElement | null =>
     document.querySelector<HTMLImageElement>('img.media-image-content');
 
-  for (let step = 0; step < 2; step += 1) {
+  for (let step = 0; step < 6; step += 1) {
     await vi.advanceTimersByTimeAsync(0);
     void fireEvent.error(image() ?? find('img.media-image-content'));
   }
   props.mime = 'image/jpeg';
   await vi.advanceTimersByTimeAsync(120_000);
 
-  expect(core.fetchMedia).toHaveBeenCalledTimes(2);
+  expect(core.fetchMedia).toHaveBeenCalledTimes(6);
   expect(document.querySelector('.media-image-unavailable')).not.toBeNull();
   instance.unmount();
   vi.useRealTimers();
@@ -1036,20 +1051,12 @@ test('a manual retry of an undecodable image drops the stored copy first', async
   render(MediaImage, {
     props: { source, alt: 'photo', width: 800, height: 600, retryable: true },
   });
-  const breakImage = async (): Promise<void> => {
-    await vi.waitFor(() => {
-      expect(document.querySelector('img.media-image-content')).not.toBeNull();
-    });
-    void fireEvent.error(find('img.media-image-content'));
-    await flushed();
-  };
-
-  await breakImage();
-  await breakImage();
+  for (let step = 0; step < 6; step += 1) await breakShownImage();
+  core.forgetMedia.mockClear();
   await user.click(retryButton());
 
   await vi.waitFor(() => {
-    expect(core.fetchMedia).toHaveBeenCalledTimes(3);
+    expect(core.fetchMedia).toHaveBeenCalledTimes(7);
   });
   expect(core.forgetMedia).toHaveBeenCalledWith(source);
   expect(core.fetchMedia).toHaveBeenLastCalledWith(source, 800, 600);
@@ -1301,18 +1308,20 @@ test('retries a failed load on its own, without a retry button', async () => {
   vi.useRealTimers();
 });
 
+const GIF_HEADER = new TextEncoder().encode('GIF89a');
+
 async function mountLoadedEmote(
   source: string,
-  extra: Partial<ComponentProps<typeof MediaImage>> = {}
+  extra: Partial<ComponentProps<typeof MediaImage>> = {},
+  bytes: Uint8Array = GIF_HEADER
 ): Promise<{
   image: () => HTMLImageElement | null;
 }> {
-  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(4)));
-  vi.spyOn(URL, 'createObjectURL').mockReturnValue(`blob:${source}`);
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-    drawImage: vi.fn(),
-  } as unknown as CanvasRenderingContext2D);
-  vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;still');
+  core.fetchMedia.mockResolvedValue(bytes);
+  mockStillFrames(() => `blob:${source}`);
+  vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(32);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalHeight', 'get').mockReturnValue(32);
   render(MediaImage, {
     props: { source, alt: 'party', width: 32, height: 32, original: true, ...extra },
   });
@@ -1322,9 +1331,6 @@ async function mountLoadedEmote(
   });
   const loaded = image();
   if (!loaded) throw new Error('emote was not rendered');
-  Object.defineProperty(loaded, 'complete', { value: true });
-  Object.defineProperty(loaded, 'naturalWidth', { value: 32 });
-  Object.defineProperty(loaded, 'naturalHeight', { value: 32 });
   void fireEvent.load(loaded);
   await flushed();
   return { image };
@@ -1340,9 +1346,10 @@ test('holds an animated emote on a still frame while the window is inactive', as
 
   focused = false;
   window.dispatchEvent(new Event('blur'));
-  await flushed();
+  await vi.waitFor(() => {
+    expect(element?.getAttribute('src')).toBe(STILL);
+  });
   expect(image()).toBe(element);
-  expect(element?.getAttribute('src')).toBe('data:image/png;still');
 
   focused = true;
   window.dispatchEvent(new Event('focus'));
@@ -1474,7 +1481,21 @@ test('an emoticon holds a still frame when stickers and emoji do not autoplay', 
   preferences.autoplayStickers = false;
   const { image } = await mountLoadedEmote('mxc://example.org/held-emoji', { emoticon: true });
 
-  expect(image()?.getAttribute('src')).toBe('data:image/png;still');
+  await vi.waitFor(() => {
+    expect(image()?.getAttribute('src')).toBe(STILL);
+  });
+});
+
+test('a frozen image that is not animated keeps its source', async () => {
+  const { image } = await mountLoadedEmote(
+    'mxc://example.org/static-avatar',
+    { freeze: true },
+    new Uint8Array(new ArrayBuffer(4))
+  );
+  await settle();
+
+  expect(image()?.getAttribute('src')).toBe('blob:mxc://example.org/static-avatar');
+  expect(vi.spyOn(HTMLCanvasElement.prototype, 'toBlob')).not.toHaveBeenCalled();
 });
 
 test('an emoticon keeps animating when stickers and emoji autoplay', async () => {
@@ -1597,4 +1618,47 @@ test('an image that finishes loading after its component is gone is ignored', as
   image.dispatchEvent(new Event('error'));
 
   expect(warn.mock.calls.flat().join(' ')).not.toContain('derived_inert');
+});
+
+test('an image that stops loading after the app was suspended is rebuilt from the core', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  const source = 'mxc://example.org/suspended';
+  render(MediaImage, { props: { source, alt: 'photo', width: 96, height: 96 } });
+
+  await breakShownImage();
+
+  expect(core.fetchMedia).toHaveBeenCalledTimes(2);
+  expect(core.fetchMedia).toHaveBeenLastCalledWith(source, 96, 96);
+  expect(core.forgetMedia).not.toHaveBeenCalled();
+});
+
+test('a stored copy that still cannot be shown is dropped before asking the server', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  const source = 'mxc://example.org/bad-stored-copy';
+  render(MediaImage, { props: { source, alt: 'photo', width: 96, height: 96 } });
+
+  await breakShownImage();
+  await breakShownImage();
+
+  expect(core.forgetMedia).toHaveBeenCalledWith(source);
+  expect(core.fetchMedia).toHaveBeenCalledTimes(3);
+  expect(core.fetchMedia).toHaveBeenLastCalledWith(source, 96, 96);
+});
+
+test('a source that displays again gets every recovery step after its next failure', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  const source = 'mxc://example.org/recovered-twice';
+  render(MediaImage, { props: { source, alt: 'photo', width: 96, height: 96 } });
+
+  await breakShownImage();
+  await breakShownImage();
+  void fireEvent.load(find('img.media-image-content'));
+  await flushed();
+  core.forgetMedia.mockClear();
+  await breakShownImage();
+  await breakShownImage();
+
+  expect(core.forgetMedia).toHaveBeenCalledOnce();
+  expect(core.fetchMedia).toHaveBeenCalledTimes(5);
+  expect(shownImage()).not.toBeNull();
 });

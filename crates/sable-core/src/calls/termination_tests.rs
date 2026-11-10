@@ -1002,7 +1002,7 @@ async fn production_rpc_own_echo_and_response_are_one_normal_end_in_either_order
                 .unwrap();
             let transaction = request.url.path_segments().unwrap().last().unwrap();
             let sender = f.room.client().user_id().unwrap().to_string();
-            let mut echo = event(&sender, crate::calls::keys::now_ms());
+            let mut echo = event(&sender, crate::now_ms());
             echo["event_id"] = json!("$accepted");
             echo["unsigned"] = json!({"transaction_id":transaction});
             receive_termination(&f.core, 1, session, &f.room, &f.state, echo).await;

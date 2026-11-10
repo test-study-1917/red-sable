@@ -14,7 +14,6 @@ use crate::link_previews::BUNDLED_LINK_PREVIEWS;
 use crate::link_previews::LEGACY_BUNDLED_LINK_PREVIEWS;
 use crate::link_previews::bundled_link_previews;
 use crate::link_previews::preview_refused;
-use crate::link_previews::soliditas_preview;
 use crate::link_previews::url_preview;
 use crate::outgoing::IMAGE_SOURCE_PACKS;
 use crate::outgoing::REACTION_SHORTCODE;
@@ -66,6 +65,7 @@ domain! {
     url_preview,
     reaction_shortcodes,
     frequent_reactions,
+    remember_emoji,
     set_typing,
     media_config,
 }
@@ -1088,7 +1088,11 @@ impl Handler for SendGestureParams {
 pub struct UrlPreviewParams {
     pub url: String,
     #[serde(default)]
+    pub client: bool,
+    #[serde(default)]
     pub service: Option<String>,
+    #[serde(default)]
+    pub klipy_api_key: Option<String>,
 }
 
 impl Handler for UrlPreviewParams {
@@ -1096,9 +1100,23 @@ impl Handler for UrlPreviewParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<UrlPreviewView>, RpcError> {
         let url = self.url;
-        if let Some(base) = self.service {
-            let data = soliditas_preview(&base, &url).await?;
-            return Ok(data.and_then(|data| url_preview(url, &data)));
+        if self.client {
+            #[cfg(not(target_family = "wasm"))]
+            return crate::link_previews::scrape_locally(
+                &url,
+                &sable_link_preview::ScrapeOptions {
+                    klipy_api_key: self.klipy_api_key,
+                },
+            )
+            .await;
+            #[cfg(target_family = "wasm")]
+            {
+                let Some(base) = self.service else {
+                    return Ok(None);
+                };
+                let data = crate::link_previews::soliditas_preview(&base, &url).await?;
+                return Ok(data.and_then(|data| url_preview(url, &data)));
+            }
         }
 
         let sent = core
@@ -1129,13 +1147,29 @@ pub struct FrequentReactionsParams {
     #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Unknown>))]
     pub legacy: Option<serde_json::Value>,
+    #[serde(default)]
+    pub recent: Vec<String>,
 }
 
 impl Handler for FrequentReactionsParams {
     type Ok = Vec<String>;
 
     async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
-        core.frequent_reactions(self.legacy).await
+        core.frequent_reactions(self.legacy, &self.recent).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct RememberEmojiParams {
+    pub key: String,
+}
+
+impl Handler for RememberEmojiParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
+        core.remember_reaction(&self.key).await
     }
 }
 

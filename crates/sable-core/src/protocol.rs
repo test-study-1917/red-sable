@@ -312,6 +312,10 @@ pub enum CoreEvent {
         coverage: SearchCoverageView,
     },
 
+    SearchSharing {
+        sharing: SearchSharingView,
+    },
+
     Notification {
         notification: NotificationView,
     },
@@ -483,6 +487,77 @@ pub enum PresenceView {
     Unavailable,
 }
 
+/// A missing or unknown value is `forbid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceHintView {
+    Suggest,
+    Forbid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceUserSharingView {
+    Allow,
+    Deny,
+}
+
+/// Without `m.presence.sharing` a supporting server shares with nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct PresenceSharingView {
+    pub hint_event_type: String,
+    pub configured: bool,
+    pub share_locally: bool,
+    pub allowed_users: Vec<String>,
+    pub denied_users: Vec<String>,
+    pub allowed_rooms: Vec<String>,
+    pub denied_servers: Vec<String>,
+    pub prompted_users: Vec<String>,
+    pub prompted_rooms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresenceSharingEdit {
+    ShareLocally {
+        enabled: bool,
+    },
+    /// `None` drops the user from the map.
+    User {
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        user_id: OwnedUserId,
+        sharing: Option<PresenceUserSharingView>,
+    },
+    Room {
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        room_id: OwnedRoomId,
+        allowed: bool,
+    },
+    Server {
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        server: OwnedServerName,
+        denied: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresencePromptView {
+    User {
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        user_id: OwnedUserId,
+    },
+    Room {
+        #[cfg_attr(feature = "typegen", specta(type = String))]
+        room_id: OwnedRoomId,
+    },
+}
+
 /// Mirrors `eyeball_im::VectorDiff`, which is not `Type` and whose `Vector<T>`
 /// has to flatten to a plain array on the wire.
 #[derive(Debug, Serialize)]
@@ -645,16 +720,13 @@ pub struct SearchSharingView {
     pub pause: Option<SearchPeerPause>,
     pub outcome: Option<SearchPeerOutcome>,
     pub peer: Option<SearchPeerDeviceView>,
+    /// Rooms copied by the current or last receiving attempt.
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub rooms_copied: usize,
-    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
-    pub rooms_received: usize,
     pub last_copy: Option<SearchPeerCopyView>,
     pub automatic: bool,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub asked: usize,
-    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
-    pub serving: usize,
     pub candidates: Vec<SearchPeerCandidateView>,
 }
 
@@ -666,8 +738,11 @@ pub enum SearchPeerState {
     Off,
     Idle,
     Discovering,
+    /// The device with the most history is busy with another copy.
+    Waiting,
     Connecting,
-    Transferring,
+    Receiving,
+    Sending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -726,6 +801,7 @@ pub struct SearchPeerCandidateView {
 #[serde(rename_all = "snake_case")]
 pub enum SearchPeerCandidateStatus {
     Waiting,
+    Busy,
     Trying,
     Failed,
     Done,
@@ -864,6 +940,8 @@ pub struct RoomListItemView {
     pub supports_knock_restricted: bool,
     /// Already sorted by `order`, then the child event's age.
     pub space_children: Vec<SpaceChildEdge>,
+    /// The network a bridge relays this room from, per its `m.bridge` state.
+    pub bridge: Option<BridgeView>,
     pub unread: u32,
     pub notifying: u32,
     pub highlight: u32,
@@ -872,6 +950,14 @@ pub struct RoomListItemView {
     /// The counts above under the room's mode.
     pub counts: RoomUnreadView,
     pub latest_event: Option<LatestEventView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct BridgeView {
+    /// `protocol.displayname`, or `protocol.id` when the bridge gives no name.
+    pub network: String,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -1555,6 +1641,74 @@ pub struct UrlPreviewView {
     pub theme_color: Option<String>,
     pub card: Option<String>,
     pub author_name: Option<String>,
+    #[serde(default)]
+    pub post: Option<PostView>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct PostView {
+    pub url: Option<String>,
+    pub author: PostAuthorView,
+    pub text: Option<String>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub created_at: Option<u64>,
+    pub media: Vec<PostMediaView>,
+    pub stats: Option<PostStatsView>,
+    pub sensitivity: Option<PostSensitivityView>,
+    pub sensitivity_reason: Option<String>,
+    pub quote: Option<Box<PostView>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum PostSensitivityView {
+    Graphic,
+    Inappropriate,
+    Spoiler,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct PostAuthorView {
+    pub name: Option<String>,
+    pub handle: Option<String>,
+    pub avatar: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum PostMediaKindView {
+    Image,
+    Video,
+    Gif,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct PostMediaView {
+    pub kind: PostMediaKindView,
+    pub source: String,
+    pub mime: Option<String>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub width: Option<u64>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub height: Option<u64>,
+    pub alt: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct PostStatsView {
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub replies: Option<u64>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub reposts: Option<u64>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub likes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1566,6 +1720,8 @@ pub struct UrlPreviewVideoView {
     pub width: Option<u64>,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub height: Option<u64>,
+    #[serde(default)]
+    pub gif: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

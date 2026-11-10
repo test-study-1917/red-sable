@@ -55,7 +55,6 @@ class MockAudioContext {
     return node as unknown as GainNode;
   });
 }
-// vi.stubGlobal('AudioContext', MockAudioContext);
 
 import { CallSession, TALK_RELEASE_DELAY_MS, voiceStates } from './call-session.svelte.js';
 import { MatrixKeyProvider } from './key-provider';

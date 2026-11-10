@@ -64,6 +64,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-gcm"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f2b8006a0c83f52b62ba44a97b58bf76fe2f70a329e588f67f89691d93d498f"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ctutils",
+ "ghash",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -214,7 +228,7 @@ checksum = "fb5dfbc6d8d2675589ccbe4d0fd61df2419075625f8c1a62325e718e2b0049f9"
 
 [[package]]
 name = "app"
-version = "2.3.7"
+version = "2.3.8"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -223,6 +237,7 @@ dependencies = [
  "libc",
  "log",
  "objc2",
+ "objc2-av-foundation",
  "objc2-foundation",
  "objc2-photos",
  "paranoid-android",
@@ -295,7 +310,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot 0.12.5",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1506,6 +1521,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1664,11 +1685,24 @@ dependencies = [
 
 [[package]]
 name = "cssparser"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2"
+dependencies = [
+ "cssparser-macros 0.6.1",
+ "dtoa-short",
+ "itoa",
+ "phf 0.13.1",
+ "smallvec",
+]
+
+[[package]]
+name = "cssparser"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c9cdaae01d5ed7882b04d795e7f752f46ff52d2fa3b50a20d28c464510bba98"
 dependencies = [
- "cssparser-macros",
+ "cssparser-macros 0.7.1",
  "dtoa-short",
  "itoa",
  "phf 0.13.1",
@@ -1684,6 +1718,16 @@ dependencies = [
  "dtoa-short",
  "itoa",
  "smallvec",
+]
+
+[[package]]
+name = "cssparser-macros"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2086,7 +2130,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2155,7 +2199,7 @@ dependencies = [
  "foldhash 0.2.0",
  "html5ever 0.39.0",
  "precomputed-hash",
- "selectors",
+ "selectors 0.38.0",
  "tendril",
 ]
 
@@ -2272,6 +2316,7 @@ dependencies = [
  "digest 0.11.3",
  "ff",
  "group",
+ "hkdf",
  "hybrid-array",
  "pem-rfc7468 1.0.0",
  "pkcs8 0.11.0",
@@ -2315,6 +2360,20 @@ name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
 
 [[package]]
 name = "endi"
@@ -2367,7 +2426,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2953,6 +3012,15 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "ghash"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
+dependencies = [
+ "polyval",
 ]
 
 [[package]]
@@ -3623,7 +3691,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -4457,6 +4525,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "lol_html"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "691b898297b684292c8808d0285769fc05fb721a36ee5b62c75c8da83e60d350"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cssparser 0.36.0",
+ "encoding_rs",
+ "foldhash 0.2.0",
+ "hashbrown 0.17.1",
+ "memchr",
+ "mime",
+ "precomputed-hash",
+ "selectors 0.37.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "loom"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4662,7 +4749,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "anymap3",
  "as_variant",
@@ -4718,7 +4805,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-base"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "as_variant",
  "assert_matches",
@@ -4750,7 +4837,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-common"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "eyeball-im",
  "futures-core",
@@ -4773,7 +4860,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-crypto"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "aes",
  "as_variant",
@@ -4813,7 +4900,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-indexeddb"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4846,7 +4933,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-qrcode"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "byteorder",
  "qrcode",
@@ -4858,7 +4945,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-sqlite"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "as_variant",
  "async-trait",
@@ -4886,7 +4973,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-store-encryption"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -4908,7 +4995,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-test"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "as_variant",
  "ctor",
@@ -4932,7 +5019,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-test-macros"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "quote",
  "syn 3.0.9",
@@ -4941,7 +5028,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-test-utils"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "ctor",
  "tracing-subscriber",
@@ -4950,7 +5037,7 @@ dependencies = [
 [[package]]
 name = "matrix-sdk-ui"
 version = "0.19.1"
-source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=c1f7808bc8f4f31ff8160564913de14129b3b413#c1f7808bc8f4f31ff8160564913de14129b3b413"
+source = "git+https://git.sable.moe/SableClient/matrix-rust-sdk?rev=f609388c27bd03ad0234c266bde8f778faacc600#f609388c27bd03ad0234c266bde8f778faacc600"
 dependencies = [
  "as_variant",
  "async-rx",
@@ -5223,6 +5310,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
 name = "napi"
 version = "3.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5450,7 +5543,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5585,7 +5678,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5597,7 +5690,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -5665,6 +5758,18 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-security",
+]
+
+[[package]]
+name = "objc2-av-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478ae33fcac9df0a18db8302387c666b8ef08a3e2d62b510ca4fc278a384b6c0"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2",
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]
@@ -6607,6 +6712,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyval"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
+dependencies = [
+ "cpubits",
+ "cpufeatures 0.3.1",
+ "universal-hash",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6803,7 +6919,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6935,7 +7051,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7607,7 +7723,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7666,7 +7782,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7714,6 +7830,7 @@ name = "sable-core"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "aes-gcm",
  "ammonia",
  "apple-native-keyring-store",
  "async-trait",
@@ -7746,6 +7863,7 @@ dependencies = [
  "matrix_indexed_db_futures",
  "mime",
  "miniz_oxide 0.9.1",
+ "p256",
  "parking_lot 0.13.0",
  "pastey",
  "percent-encoding",
@@ -7758,9 +7876,11 @@ dependencies = [
  "rust-stemmers",
  "rustls",
  "sable-frostbite",
+ "sable-link-preview",
  "sable-model",
  "secret-service",
  "serde",
+ "serde_bytes",
  "serde_json",
  "serde_with",
  "sha2 0.11.1",
@@ -7794,6 +7914,21 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
+]
+
+[[package]]
+name = "sable-link-preview"
+version = "0.1.0"
+source = "git+https://git.sable.moe/SableClient/link-preview.git?rev=6e3d8d5bc168384d6d09be8b1c4bd10c2eff6873#6e3d8d5bc168384d6d09be8b1c4bd10c2eff6873"
+dependencies = [
+ "futures-util",
+ "lol_html",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -7833,12 +7968,10 @@ dependencies = [
 name = "sable-model-wasm"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "js-sys",
  "sable-model",
  "serde",
  "serde_json",
- "tokio-util",
  "wasm-bindgen",
 ]
 
@@ -8116,6 +8249,25 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "selectors"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cfaaa6035167f0e604e42723c7650d59ee269ef220d7bbe0565602c8a0173b9"
+dependencies = [
+ "bitflags 2.13.2",
+ "cssparser 0.36.0",
+ "derive_more 2.1.1",
+ "log",
+ "new_debug_unreachable",
+ "phf 0.13.1",
+ "phf_codegen 0.13.1",
+ "precomputed-hash",
+ "rustc-hash",
+ "servo_arc",
+ "smallvec",
 ]
 
 [[package]]
@@ -9462,7 +9614,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-notifications"
 version = "0.5.0"
-source = "git+https://github.com/SableClient/tauri-plugin-notifications.git?rev=e08810f534863509aa998c7d11e95c567c271c49#e08810f534863509aa998c7d11e95c567c271c49"
+source = "git+https://github.com/SableClient/tauri-plugin-notifications.git?rev=8573c30823b4f3c4393b37e188b59c35960aa65c#8573c30823b4f3c4393b37e188b59c35960aa65c"
 dependencies = [
  "log",
  "notify-rust",
@@ -9691,10 +9843,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11069,7 +11221,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11631,7 +11783,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
