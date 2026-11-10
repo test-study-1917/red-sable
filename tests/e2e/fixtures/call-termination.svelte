@@ -5,8 +5,13 @@
   import type { CoreClient } from '#lib/core/client.svelte.js';
   import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
   import ActiveCallBar from '#lib/features/call/ActiveCallBar.svelte';
+  import CallDualRoom from './call-dual-room.svelte';
   import CallView from '#lib/features/call/CallView.svelte';
-  import { CallSession, type CallTermination } from '#lib/features/call/call-session.svelte.js';
+  import {
+    CallSession,
+    provideCallSession,
+    type CallTermination,
+  } from '#lib/features/call/call-session.svelte.js';
   import {
     idleTransportState,
     type CallTransport,
@@ -14,6 +19,8 @@
   } from '#lib/features/call/call-transport.js';
 
   type Probe = {
+    joins: number;
+    connects: number;
     sends: number;
     leaves: number;
     disconnects: number;
@@ -22,6 +29,8 @@
     remoteEnd: () => void;
   };
   const probe: Probe = {
+    joins: 0,
+    connects: 0,
     sends: 0,
     leaves: 0,
     disconnects: 0,
@@ -43,8 +52,9 @@
   const client = {
     rpc: {
       calls: {
-        join: () =>
-          Promise.resolve({
+        join: () => {
+          probe.joins += 1;
+          return Promise.resolve({
             session: 7,
             url: 'wss://unused.example.org',
             jwt: 'unused',
@@ -57,7 +67,8 @@
             can_publish: true,
             publisher_id: 'legacy',
             backends: [],
-          }),
+          });
+        },
         leave: () => {
           probe.leaves += 1;
           return Promise.resolve();
@@ -82,6 +93,7 @@
   const publish = () => transportListeners.forEach((listener) => listener(transportState));
   const transport: CallTransport = {
     connect: async () => {
+      probe.connects += 1;
       transportState = {
         ...idleTransportState(),
         connection: 'connected',
@@ -95,8 +107,14 @@
       transportState = idleTransportState();
       publish();
     },
-    setMicrophoneEnabled: async () => {},
-    setCameraEnabled: async () => {},
+    setMicrophoneEnabled: async (enabled) => {
+      transportState = { ...transportState, microphoneEnabled: enabled };
+      publish();
+    },
+    setCameraEnabled: async (enabled) => {
+      transportState = { ...transportState, cameraEnabled: enabled };
+      publish();
+    },
     setEncryptionKey: async () => {},
     subscribe: (listener) => {
       transportListeners.add(listener);
@@ -112,9 +130,39 @@
       probe.ended.push(event);
     },
   });
+  provideCallSession(session);
+  let { dual = false, voice = false }: { dual?: boolean; voice?: boolean } = $props();
+  let callNode: Element | null = null;
+  let chatOriginal: Element | null = null;
   let compact = $state(false);
   let collapsed = $state(false);
   onMount(() => {
+    if (dual)
+      Object.assign(window, {
+        dualPhase: (phase: 'connecting' | 'failed') => {
+          session.lifecycle = phase;
+          session.failure = phase === 'failed' ? 'setup-failed' : null;
+        },
+        dualWatch: () => session.toggleWatchScreenShare('fixture-screen'),
+        dualProbe: () => ({
+          joins: probe.joins,
+          connects: probe.connects,
+          microphone: session.transport.microphoneEnabled,
+          camera: session.transport.cameraEnabled,
+          deafened: session.deafened,
+          views: session.views,
+          callStable:
+            (callNode ??= document.querySelector('.call-stage')) ===
+            document.querySelector('.call-stage'),
+          chatStable:
+            (chatOriginal ??= document.querySelector('.chat-host')) ===
+            document.querySelector('.chat-host'),
+          layout: session.layout,
+          watched: session.watchedScreenShareIds,
+          leaves: probe.leaves,
+          disconnects: probe.disconnects,
+        }),
+      });
     window.callTerminationProbe = probe;
     void session.join('!room:example.org', { microphone: false, camera: false }).then(() => {
       emit({
@@ -144,25 +192,29 @@
 </script>
 
 <TooltipProvider>
-  <button type="button" onclick={() => (compact = !compact)}>Switch view</button>
-  {#if compact}
-    <button type="button" onclick={() => (collapsed = !collapsed)}>Collapse sidebar</button>
-  {/if}
-  {#if session.active}
-    {#if compact}
-      <div class={['bar', { collapsed }]}>
-        <ActiveCallBar
-          {session}
-          roomName="Test call"
-          {collapsed}
-          onReturn={() => (compact = false)}
-        />
-      </div>
-    {:else}
-      <div class="stage"><CallView {session} members={[]} /></div>
-    {/if}
+  {#if dual}
+    <CallDualRoom callClient={client} {voice} />
   {:else}
-    <p role="status">Call idle</p>
+    <button type="button" onclick={() => (compact = !compact)}>Switch view</button>
+    {#if compact}
+      <button type="button" onclick={() => (collapsed = !collapsed)}>Collapse sidebar</button>
+    {/if}
+    {#if session.active}
+      {#if compact}
+        <div class={['bar', { collapsed }]}>
+          <ActiveCallBar
+            {session}
+            roomName="Test call"
+            {collapsed}
+            onReturn={() => (compact = false)}
+          />
+        </div>
+      {:else}
+        <div class="stage"><CallView {session} members={[]} /></div>
+      {/if}
+    {:else}
+      <p role="status">Call idle</p>
+    {/if}
   {/if}
 </TooltipProvider>
 
