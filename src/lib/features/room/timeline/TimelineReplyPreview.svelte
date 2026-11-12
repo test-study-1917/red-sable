@@ -1,6 +1,6 @@
 <script lang="ts">
   import { validQuote } from '../messages/selected-quote.js';
-  import { quoteFocus } from '../messages/quote-focus.svelte.js';
+  import { setQuoteFocus } from '../messages/quote-focus.svelte.js';
   import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
   import CaretDownIcon from 'phosphor-svelte/lib/CaretDownIcon';
 
@@ -52,7 +52,7 @@
   let headerHeight = $state(0);
   let quote = $derived(validQuote(reply.selected_quote) ? reply.selected_quote : null);
   function jumpToQuote(): void {
-    if (quote) quoteFocus.target = { roomId, eventId: reply.event_id, quote };
+    if (quote) setQuoteFocus({ roomId, eventId: reply.event_id, quote });
     onJumpToEvent?.(reply.event_id);
   }
 

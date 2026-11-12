@@ -771,7 +771,7 @@ test.each(['connected', 'compact', 'expanded'] as const)(
   'partial reply expands and highlights its source in the %s style',
   async (replyPreviewStyle) => {
     setPreference('replyPreviewStyle', replyPreviewStyle);
-    const { quoteFocus } = await import('../messages/quote-focus.svelte.js');
+    const { quoteFocus, setQuoteFocus } = await import('../messages/quote-focus.svelte.js');
     const message = replyItem();
     const quote = {
       body: 'Before the selected words after.',
@@ -799,13 +799,18 @@ test.each(['connected', 'compact', 'expanded'] as const)(
     if (!summary) throw new Error('missing quote summary');
     await user.click(summary);
     expect(onJumpToEvent).toHaveBeenCalledWith('$original');
-    expect(quoteFocus.target).toEqual({ roomId: '!room:example.org', eventId: '$original', quote });
-    quoteFocus.target = null;
+    expect(quoteFocus.target?.startedAt).toBeTypeOf('number');
+    expect(quoteFocus.target).toMatchObject({
+      roomId: '!room:example.org',
+      eventId: '$original',
+      quote,
+    });
+    setQuoteFocus(null);
   }
 );
 
 test('updating a highlighted source does not scroll the reader back to the quote', async () => {
-  const { quoteFocus } = await import('../messages/quote-focus.svelte.js');
+  const { setQuoteFocus } = await import('../messages/quote-focus.svelte.js');
   const scroll = vi.spyOn(Element.prototype, 'scrollIntoView');
   const message = item(false);
   if (message.content.kind !== 'message') throw new Error('missing message content');
@@ -816,11 +821,11 @@ test('updating a highlighted source does not scroll the reader back to the quote
   });
   render(TimelineItemHarness, { props });
   await tick();
-  quoteFocus.target = {
+  setQuoteFocus({
     roomId: '!room:example.org',
     eventId: message.event_id as string,
     quote: { body: text, text, start: 0, end: text.length },
-  };
+  });
   await tick();
   expect(document.querySelector('mark.quoted-passage-highlight')).not.toBeNull();
   const count = scroll.mock.calls.length;
@@ -828,8 +833,41 @@ test('updating a highlighted source does not scroll the reader back to the quote
   props.item.item = { ...message, reactions: [{ key: '👍', senders: ['@bob:example.org'] }] };
   await tick();
   expect(scroll).toHaveBeenCalledTimes(count);
-  quoteFocus.target = null;
+  setQuoteFocus(null);
   scroll.mockRestore();
+});
+
+test('expired passage highlights are removed and do not return when the source remounts', async () => {
+  const { quoteFocus, setQuoteFocus } = await import('../messages/quote-focus.svelte.js');
+  vi.useFakeTimers();
+  try {
+    const message = item(false);
+    const props = { core, item: { item: message, collapsed: false, roomId: '!room:example.org' } };
+    const mounted = render(TimelineItemHarness, { props });
+    await tick();
+    setQuoteFocus({
+      roomId: '!room:example.org',
+      eventId: message.event_id as string,
+      quote: { body: 'waves', text: 'waves', start: 0, end: 5 },
+    });
+    await tick();
+    expect(document.querySelector('mark.quoted-passage-highlight')).not.toBeNull();
+    vi.advanceTimersByTime(59_999);
+    await tick();
+    expect(document.querySelector('mark.quoted-passage-highlight')).not.toBeNull();
+    vi.advanceTimersByTime(1);
+    await tick();
+    expect(quoteFocus.target).toBeNull();
+    expect(document.querySelector('mark.quoted-passage-highlight')).toBeNull();
+    expect(document.querySelector('.formatted-body')).toHaveTextContent('waves');
+    mounted.unmount();
+    render(TimelineItemHarness, { props });
+    await tick();
+    expect(document.querySelector('mark.quoted-passage-highlight')).toBeNull();
+  } finally {
+    setQuoteFocus(null);
+    vi.useRealTimers();
+  }
 });
 
 for (const layout of ['modern', 'compact', 'bubble'] as const) {

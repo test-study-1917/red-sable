@@ -5,6 +5,8 @@ Select text inside a message to open its selection menu. The same actions are av
 - **Quote as Markdown** inserts a blockquote into the composer. In Markdown/source mode it inserts `>` lines. Write your response after the quote and send it as a normal message.
 - **Reply to selection** creates a reply linked to the source message. After sending, use the chevron beside the quote to expand or collapse the source text, with the selected passage highlighted. Click the quoted sender or passage to jump to the original message and highlight the same passage.
 
+The passage highlight in the original message lasts **one minute**, fading out during the final **five seconds**. Clicking another selected reply moves the highlight and restarts the minute; clicking the same quote again also restarts it. Scrolling away and back does not restart the timer. Highlights inside expanded reply previews remain visible while the preview is open.
+
 Selected replies follow the **Connected line**, **Compact card**, or **Expanded card** style chosen in your timeline settings. Expanded source text uses compact line spacing and scrolls when it is long.
 
 The normal **Reply** action still replies to the whole message. A selected reply is also retained in the room's reply draft. Sending an attachment, image gallery, sticker, GIF or location as the reply keeps the same selected passage.

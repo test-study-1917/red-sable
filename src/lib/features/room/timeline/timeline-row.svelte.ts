@@ -31,7 +31,11 @@ import { usePinnedEvents } from './pinned-events.svelte.js';
 import type { TimelineEventIndex } from './timeline-event-index';
 import { TimelineItemProfiles } from './timeline-item-profiles.svelte';
 import { TimelineItemEngagement } from './timeline-item-engagement.svelte';
-import { quoteFocus, revealQuote } from '../messages/quote-focus.svelte.js';
+import {
+  QUOTE_HIGHLIGHT_DURATION,
+  quoteFocus,
+  revealQuote,
+} from '../messages/quote-focus.svelte.js';
 import { markQuote } from '../messages/selected-quote.js';
 import { selectedQuote, selectedText, withSelectedText } from './timeline-item-selection';
 
@@ -190,7 +194,8 @@ export class TimelineRow {
         !target ||
         !node ||
         target.roomId !== roomId ||
-        target.eventId !== item.event_id
+        target.eventId !== item.event_id ||
+        Date.now() - target.startedAt >= QUOTE_HIGHLIGHT_DURATION
       )
         return;
       const body = node.querySelector<HTMLElement>('.message-main .formatted-body');
@@ -200,9 +205,14 @@ export class TimelineRow {
         toasts.info(i18n.t('timeline.quoteChanged'));
         return;
       }
-      const mark = body.querySelector('.quoted-passage-highlight');
-      if (mark) revealQuote(target, mark);
-      return clear;
+      const stopAnimation = revealQuote(
+        target,
+        body.querySelectorAll<HTMLElement>('.quoted-passage-highlight')
+      );
+      return () => {
+        stopAnimation();
+        clear();
+      };
     });
 
     $effect(() => {

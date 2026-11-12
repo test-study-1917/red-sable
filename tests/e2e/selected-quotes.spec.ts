@@ -202,6 +202,98 @@ test('quote jump highlights a source row after virtualisation mounts it', async 
   );
 });
 
+test('touch: quote highlights fade in the last five seconds and refresh on every jump', async ({
+  page,
+  app,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await app.openRoom('!room:example.test');
+  const body = 'Read the first passage, then the second passage.';
+  const source = timelineItem('timed-source', body);
+  const replies = ['first passage', 'second passage'].map((text, index) => ({
+    ...timelineItem(`timed-reply-${String(index)}`, `A reply about the ${text}.`),
+    in_reply_to: {
+      event_id: source.event_id as string,
+      sender: source.sender,
+      sender_name: 'Alice',
+      sender_mentioned: false,
+      body,
+      fallback: null,
+      selected_quote: {
+        body,
+        text,
+        start: body.indexOf(text),
+        end: body.indexOf(text) + text.length,
+      },
+    },
+  }));
+  await core.emitTimelineDiff(await core.subscription(), [
+    { op: 'reset', values: [source, ...replies] },
+  ]);
+  const first = page.locator('[data-item-id="timed-reply-0"] .quote-summary');
+  const second = page.locator('[data-item-id="timed-reply-1"] .quote-summary');
+  const mark = page.locator('[data-item-id="timed-source"] mark.quoted-passage-highlight');
+  await expect(first).toBeVisible();
+  await page.clock.install();
+  await first.click();
+  await expect(mark).toHaveText('first passage');
+  const timing = await mark.evaluate((node) => {
+    const animation = node.getAnimations()[0];
+    return animation.effect?.getTiming();
+  });
+  expect(timing).toMatchObject({
+    duration: 5_000,
+    delay: 55_000,
+    easing: 'linear',
+    fill: 'forwards',
+  });
+
+  // Seek the actual browser animation to inspect its interpolation independently of fake JS time.
+  const seekFade = async (time: number): Promise<string> =>
+    mark.evaluate((node, time) => {
+      const animation = node.getAnimations()[0];
+      animation.pause();
+      animation.currentTime = time;
+      return getComputedStyle(node).backgroundColor;
+    }, time);
+  const fullColor = await seekFade(55_000);
+  await page.screenshot({
+    path: `test-results/quote-highlight-full-${page.viewportSize()?.width}.png`,
+  });
+  const fadingColor = await seekFade(57_500);
+  expect(fadingColor).not.toBe(fullColor);
+  // Halfway through the fade the highlight is half-transparent, not the message text.
+  expect(fadingColor).toMatch(/(?:,|\/)\s*0\.5\s*\)$/);
+  await page.screenshot({
+    path: `test-results/quote-highlight-fading-${page.viewportSize()?.width}.png`,
+  });
+  const transparentColor = await seekFade(60_000);
+  expect(transparentColor).toMatch(/(?:,|\/)\s*0\s*\)$/);
+
+  await page.clock.fastForward(58_000);
+  await second.click();
+  await expect(mark).toHaveText('second passage');
+  await expect(mark).toHaveCount(1);
+  expect(await mark.evaluate((node) => Number(node.getAnimations()[0].currentTime))).toBeLessThan(
+    1_000
+  );
+  await page.clock.fastForward(2_000);
+  await expect(mark).toHaveText('second passage');
+  await page.clock.fastForward(56_000);
+  await second.click();
+  await page.locator('[data-item-id="timed-reply-1"] .quote-toggle').click();
+  await page.clock.fastForward(59_000);
+  await expect(mark).toHaveText('second passage');
+  await page.clock.fastForward(1_000);
+  await expect(mark).toHaveCount(0);
+  await expect(page.locator('[data-item-id="timed-source"] .formatted-body')).toHaveText(body);
+  await expect(page.locator('[data-item-id="timed-reply-1"] .quoted-source mark')).toHaveText(
+    'second passage'
+  );
+});
+
 test('touch: message text is selectable and both quote actions fit the selection menu', async ({
   page,
   app,

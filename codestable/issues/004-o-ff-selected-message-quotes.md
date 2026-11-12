@@ -44,7 +44,6 @@ created: 2026-11-12
 
 本轮日志（临时目录，重启可能清空）：`/tmp/red-sable-media-tests.log`、`/tmp/red-sable-core-tests.log`、`/tmp/red-sable-typegen.log`、`/tmp/red-sable-check.log`、`/tmp/red-sable-wasm-build.log`。
 
-
 ## 引用样式反馈：融入三种原生回复样式
 
 用户反馈独立引用卡片外观突兀、展开原文显得疏松；改为沿用时间线「连接线／紧凑卡片／展开卡片」设置。
@@ -71,3 +70,13 @@ created: 2026-11-12
 - 本轮改动前半段的发送、折叠／展开、重复文本定位、虚拟化跳转及长原文首尾片段检查继续通过；修正了长原文测试中末尾场景误用开头位置的问题。
 - `pnpm check` 无错误、无警告；相关 ESLint、Stylelint 和格式检查通过。本次只改前端与说明，不重新构建 Rust／WASM。
 - 截图：`test-results/quote-style-{connected|compact|expanded}-{modern|compact|bubble}-{desktop|mobile}-{collapsed|expanded}.png`。日志：`/tmp/red-sable-reply-style-final-e2e.log`、`/tmp/red-sable-reply-style-alignment.log`、`/tmp/red-sable-reply-style-final-unit.log`、`/tmp/red-sable-reply-style-check.log`。
+
+## 原消息片段高亮限时与淡出（2026-11-13）
+
+- 点击片段引用后，从本次点击起计时 60 秒：前 55 秒保持高亮，最后 5 秒逐渐淡出背景、文字强调色与下划线，满一分钟移除标记并清空引用目标。
+- 点击另一处片段引用立即转移高亮并重新计时；再次点击同一引用也重新计时。普通消息更新、滚动卸载／重新挂载不会刷新时限，重新挂载时续接原来的淡出进度，到期后不会再次出现。
+- 计时与动画统一放在 `messages/quote-focus.svelte.ts`，引用摘要使用同一入口，时间线行负责挂载与清理。展开引用预览中的片段标记和原有整条消息跳转动画保持原行为。用法已同步 `docs/message-quotes.md`；不涉及已毕业 Project Spec 变化。
+- 验证：相关 3 个文件的 62 项单元／组件测试通过；新增桌面 Chromium 与 Android 模拟浏览器场景均通过（加 warmup 共 3 项），检查了淡出动画实际插值、转移与重复点击刷新、旧定时器不误清除新目标、到期清除及展开预览仍保留标记。已查看桌面完整高亮／半淡出和移动端半淡出截图。
+- `NODE_OPTIONS=--max-old-space-size=4096 pnpm check` 通过，Svelte 无错误、无警告；相关 ESLint 与格式检查通过，新增计时模块及其测试的 type-aware Oxlint 通过。对既有时间线／浏览器测试文件扩展 type-aware 检查时，仍有未改动行的既有诊断，本次未扩展处理范围。
+- 本机浏览器缺少的 `libnspr4`、`libnss3`、`libasound2t64` 仅下载并解压至 `/tmp/red-sable-browser-deps/root`；浏览器测试需设置 `LD_LIBRARY_PATH=/tmp/red-sable-browser-deps/root/usr/lib/x86_64-linux-gnu`。未修改系统安装。
+- 截图：`test-results/quote-highlight-{full|fading}-{1280|412}.png`；日志：`/tmp/red-sable-quote-highlight-{tests|focus-tests|browser|check}.log`。
