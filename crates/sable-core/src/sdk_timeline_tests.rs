@@ -1671,6 +1671,7 @@ async fn a_sticker_reaches_the_server_as_an_m_sticker_event() {
 
     let result = core
         .run(crate::api::messages::SendStickerParams {
+            selected_quote: None,
             room_id: room_id.to_owned(),
             url: "mxc://example.org/blob".to_owned(),
             body: "blobwave".to_owned(),
@@ -1764,6 +1765,7 @@ async fn send_media_reply(
         }
         "gif" => {
             core.run(crate::api::messages::SendGifParams {
+                selected_quote: None,
                 room_id: room_id.to_owned(),
                 url: "mxc://example.org/gif".to_owned(),
                 body: "cat.gif".to_owned(),
@@ -1780,6 +1782,7 @@ async fn send_media_reply(
         }
         "location" => {
             core.run(crate::api::messages::SendLocationParams {
+                selected_quote: None,
                 persona: outgoing.persona,
                 room_id: room_id.to_owned(),
                 body: "here".to_owned(),
@@ -1870,6 +1873,7 @@ async fn media_replies_preserve_silent_mentions_on_the_wire() {
             .unwrap();
 
             let outgoing = Outgoing {
+                selected_quote: None,
                 in_reply_to: Some(target.to_owned()),
                 silent_reply,
                 thread_root: None,
@@ -2062,6 +2066,7 @@ async fn a_gallery_mixing_a_picture_and_a_pdf_sends_each_as_its_own_itemtype() {
             caption: None,
             formatted_caption: None,
             outgoing: crate::protocol::Outgoing {
+                selected_quote: None,
                 mentions: Vec::new(),
                 mentions_room: false,
                 in_reply_to: None,
@@ -3091,6 +3096,57 @@ async fn a_reply_quotes_formatted_text() {
         .and_then(|view| view.in_reply_to.as_ref())
         .unwrap();
     assert_eq!(reply.body.as_deref(), Some("bold and code"));
+}
+
+#[tokio::test]
+async fn selected_quote_survives_sync_and_timeline_projection() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!selected-reply:example.org");
+    let factory = EventFactory::new().room(room_id).sender(User::Alice);
+    let quote = json!({
+        "body": "First passage; second passage. 中文 😀",
+        "text": "passage", "start": 22, "end": 29,
+    });
+    server.mock_room_state_encryption().plain().mount().await;
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(
+                    factory
+                        .text_msg("First passage; second passage. 中文 😀")
+                        .event_id(event_id!("$original")),
+                )
+                .add_timeline_event(
+                    serde_json::from_value::<
+                        matrix_sdk::ruma::serde::Raw<
+                            matrix_sdk::ruma::events::AnySyncTimelineEvent,
+                        >,
+                    >(json!({
+                        "type": "m.room.message", "event_id": "$selected-reply",
+                        "sender": User::Alice, "origin_server_ts": 2,
+                        "content": {
+                            "msgtype": "m.text", "body": "About the second passage",
+                            "m.relates_to": { "m.in_reply_to": { "event_id": "$original" } },
+                            "moe.sable.selected_quote": quote,
+                        },
+                    }))
+                    .unwrap(),
+                ),
+        )
+        .await;
+    let views = timeline_views(&client, &room, false).await.unwrap();
+    let reply = views
+        .iter()
+        .find(|view| view.event_id.as_deref() == Some(event_id!("$selected-reply")))
+        .and_then(|view| view.in_reply_to.as_ref())
+        .unwrap();
+    assert_eq!(reply.event_id, event_id!("$original"));
+    assert_eq!(
+        serde_json::to_value(reply.selected_quote.as_ref().unwrap()).unwrap(),
+        quote
+    );
 }
 
 #[tokio::test]

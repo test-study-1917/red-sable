@@ -42,6 +42,20 @@ use super::thread::{
     bundled_thread_summary, in_reply_to, merge_thread_summary, msg_like, thread_summary,
 };
 
+fn selected_quote(content: Option<&serde_json::Value>) -> Option<crate::protocol::SelectedQuote> {
+    serde_json::from_value(content?.get(crate::outgoing::SELECTED_QUOTE)?.clone()).ok()
+}
+
+fn quoted_reply(
+    mut reply: Option<crate::protocol::ReplyView>,
+    quote: Option<crate::protocol::SelectedQuote>,
+) -> Option<crate::protocol::ReplyView> {
+    if let Some(reply) = reply.as_mut() {
+        reply.selected_quote = quote;
+    }
+    reply
+}
+
 #[derive(Default)]
 pub struct Highlights(HashMap<String, bool>);
 
@@ -92,6 +106,7 @@ impl Highlights {
 
 #[derive(Clone)]
 struct LocalFields {
+    selected_quote: Option<crate::protocol::SelectedQuote>,
     profile: Option<PerMessageProfileView>,
     formatted_body: Option<String>,
     spoiler: Option<String>,
@@ -193,6 +208,7 @@ impl LocalContent {
         }
         let fields = content
             .map(|content| LocalFields {
+                selected_quote: selected_quote(Some(&content)),
                 profile: per_message_profile(Some(&content)),
                 formatted_body: raw_formatted_body(Some(&content)).map(ToOwned::to_owned),
                 spoiler: spoiler_reason(Some(&content)),
@@ -208,7 +224,8 @@ impl LocalContent {
                     .unwrap_or_default(),
             })
             .filter(|fields| {
-                fields.profile.is_some()
+                fields.selected_quote.is_some()
+                    || fields.profile.is_some()
                     || fields.formatted_body.is_some()
                     || fields.spoiler.is_some()
                     || fields.gallery_spoilers.iter().any(Option::is_some)
@@ -515,7 +532,10 @@ pub async fn standalone_item(
         sender_name,
         sender_avatar,
         mention: content_mention(&item_content, is_own, own_user_id.as_deref(), highlighted),
-        in_reply_to: in_reply_to(&item_content),
+        in_reply_to: quoted_reply(
+            in_reply_to(&item_content),
+            selected_quote(original.content.as_ref()),
+        ),
         thread_root: msg_like(&item_content).and_then(|msg| msg.thread_root.clone()),
         thread_summary,
         sender: Some(sender),
@@ -615,7 +635,11 @@ pub fn timeline_item(
                     .map(ToString::to_string),
                 timestamp: event.timestamp().0.into(),
                 content,
-                in_reply_to: in_reply_to(event.content()),
+                in_reply_to: quoted_reply(
+                    in_reply_to(event.content()),
+                    selected_quote(raw.original_content.as_ref().or(raw.content.as_ref()))
+                        .or_else(|| local.and_then(|fields| fields.selected_quote.clone())),
+                ),
                 thread_root: msg_like(event.content()).and_then(|msg| msg.thread_root.clone()),
                 thread_summary: merge_thread_summary(
                     thread_summary(event.content()),
@@ -770,6 +794,44 @@ mod tests {
     };
     use matrix_sdk::ruma::serde::Raw;
     use matrix_sdk::ruma::{OwnedEventId, OwnedTransactionId};
+
+    #[test]
+    fn selected_quote_is_kept_in_the_send_queue_snapshot() {
+        let transaction_id = OwnedTransactionId::from("quoted");
+        let quote =
+            json!({ "body": "first word, second word", "text": "word", "start": 19, "end": 23 });
+        let content = SerializableEventContent::from_raw(
+            Raw::from_json_string(
+                json!({
+                    "msgtype": "m.text", "body": "My reply",
+                    "m.relates_to": { "m.in_reply_to": { "event_id": "$original" } },
+                    "moe.sable.selected_quote": quote,
+                })
+                .to_string(),
+            )
+            .expect("raw content"),
+            "m.room.message".to_owned(),
+        );
+        let mut local = LocalContent::default();
+        local.apply(&RoomSendQueueUpdate::ReplacedLocalEvent {
+            transaction_id: transaction_id.clone(),
+            new_content: content,
+        });
+        let selected = local
+            .fields
+            .get(&transaction_id)
+            .unwrap()
+            .selected_quote
+            .as_ref()
+            .unwrap();
+        assert_eq!(serde_json::to_value(selected).unwrap(), quote);
+        assert!(
+            selected_quote(Some(
+                &json!({"moe.sable.selected_quote": {"text": "broken"}})
+            ))
+            .is_none()
+        );
+    }
 
     #[test]
     fn a_send_blocked_by_a_changed_identity_names_the_users() {

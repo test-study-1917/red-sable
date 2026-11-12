@@ -922,6 +922,12 @@
     "unlistedNotifications_other": "{{count, number}} 条未读通知"
   },
   "timeline": {
+    "quoteMarkdown": "Markdown 引用",
+    "quoteReply": "引用选中内容回复",
+    "expandQuote": "展开引用消息",
+    "collapseQuote": "收起引用消息",
+    "jumpToQuote": "跳转到原消息",
+    "quoteChanged": "原消息已更改，找不到引用的片段。",
     "profileNameRemoved": "{{user}} 的显示名称已被移除",
     "attachmentsFiles": "文件",
     "memberFilterInvited": "已邀请",

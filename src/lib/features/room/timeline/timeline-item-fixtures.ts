@@ -148,6 +148,7 @@ export function replyItem(
     ...item(false),
     mention,
     in_reply_to: {
+      selected_quote: null,
       event_id: '$original',
       sender: '@bob:example.org',
       sender_mentioned: isMentioned,

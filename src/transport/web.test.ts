@@ -275,35 +275,39 @@ test('a superseded worker rejects pending work and is never reopened', async () 
   expect(FakeSharedWorker.created).toBe(1);
 });
 
-test('preserves rich attachment captions and mentions across the worker transport', async () => {
-  const transport = await load();
-  const attachment = {
-    roomId: '!room:example.org',
-    thumbnail: { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 },
-    filename: 'photo.png',
-    mime: 'image/png',
-    bytes: new Uint8Array([1]),
-    caption: 'One',
-    formattedCaption: '<a href="https://matrix.to/#/@one:example.org">One</a>',
-    mentions: ['@one:example.org'],
-    mentionsRoom: true,
-    inReplyTo: '$reply',
-    silentReply: false,
-    info: null,
-    threadRoot: '$thread',
-    persona: null,
-    spoiler: true,
-  };
-  const pending = transport.sendAttachment(attachment);
-  expect(FakeSharedWorker.last?.port.posted).toContainEqual({ id: 1, attachment });
-  expect(FakeSharedWorker.last?.port.transfers).toContainEqual([
-    attachment.bytes.buffer,
-    attachment.thumbnail.bytes.buffer,
-  ]);
-  FakeSharedWorker.last?.port.receive({ id: 1, uri: null });
-  await pending;
-  transport.close();
-});
+test.each([undefined, { body: 'Before 中文 😀 after', text: '中文 😀', start: 7, end: 12 }])(
+  'preserves rich attachment captions and mentions across the worker transport (selection: %s)',
+  async (selectedQuote) => {
+    const transport = await load();
+    const attachment = {
+      roomId: '!room:example.org',
+      thumbnail: { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 },
+      filename: 'photo.png',
+      mime: 'image/png',
+      bytes: new Uint8Array([1]),
+      caption: 'One',
+      formattedCaption: '<a href="https://matrix.to/#/@one:example.org">One</a>',
+      mentions: ['@one:example.org'],
+      mentionsRoom: true,
+      inReplyTo: '$reply',
+      ...(selectedQuote ? { selectedQuote } : {}),
+      silentReply: false,
+      info: null,
+      threadRoot: '$thread',
+      persona: null,
+      spoiler: true,
+    };
+    const pending = transport.sendAttachment(attachment);
+    expect(FakeSharedWorker.last?.port.posted).toContainEqual({ id: 1, attachment });
+    expect(FakeSharedWorker.last?.port.transfers).toContainEqual([
+      attachment.bytes.buffer,
+      attachment.thumbnail.bytes.buffer,
+    ]);
+    FakeSharedWorker.last?.port.receive({ id: 1, uri: null });
+    await pending;
+    transport.close();
+  }
+);
 
 test.each([undefined, false, true])(
   'passes background=%s for media downloads',
@@ -325,72 +329,77 @@ test.each([undefined, false, true])(
   }
 );
 
-test('sends a gallery as one worker request', async () => {
-  const persona = {
-    id: 'kris',
-    display_name: 'Kris',
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    has_fallback: false,
-    biography: null,
-    banner_url: null,
-    is_animal: null,
-    has_animal: null,
-    animal_need: null,
-  };
-  const transport = await load();
-  const first = new Uint8Array([1]);
-  const thumbnail = { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 };
-  const second = new Uint8Array([2]);
-  const pending = transport.sendGallery({
-    roomId: '!room:example.org',
-    attachments: [
-      { filename: 'one.png', mime: 'image/png', bytes: first, thumbnail },
-      {
-        filename: 'two.pdf',
-        mime: 'application/pdf',
-        bytes: second,
-      },
-    ],
-    caption: 'Weekend',
-    formattedCaption: '<strong>Weekend</strong>',
-    mentions: ['@one:example.org'],
-    mentionsRoom: true,
-    inReplyTo: '$reply',
-    silentReply: false,
-    threadRoot: '$thread',
-    persona,
-  });
-
-  expect(FakeSharedWorker.last?.port.posted).toContainEqual({
-    id: 1,
-    gallery: {
+test.each([undefined, { body: 'Before 中文 😀 after', text: '中文 😀', start: 7, end: 12 }])(
+  'sends a gallery as one worker request (selection: %s)',
+  async (selectedQuote) => {
+    const persona = {
+      id: 'kris',
+      display_name: 'Kris',
+      avatar_url: null,
+      pronouns: [],
+      color_on_light: null,
+      color_on_dark: null,
+      has_fallback: false,
+      biography: null,
+      banner_url: null,
+      is_animal: null,
+      has_animal: null,
+      animal_need: null,
+    };
+    const transport = await load();
+    const first = new Uint8Array([1]);
+    const thumbnail = { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 };
+    const second = new Uint8Array([2]);
+    const pending = transport.sendGallery({
       roomId: '!room:example.org',
       attachments: [
         { filename: 'one.png', mime: 'image/png', bytes: first, thumbnail },
-        { filename: 'two.pdf', mime: 'application/pdf', bytes: second },
+        {
+          filename: 'two.pdf',
+          mime: 'application/pdf',
+          bytes: second,
+        },
       ],
       caption: 'Weekend',
       formattedCaption: '<strong>Weekend</strong>',
       mentions: ['@one:example.org'],
       mentionsRoom: true,
       inReplyTo: '$reply',
+      ...(selectedQuote ? { selectedQuote } : {}),
       silentReply: false,
       threadRoot: '$thread',
       persona,
-    },
-  });
-  expect(FakeSharedWorker.last?.port.transfers).toContainEqual([
-    first.buffer,
-    thumbnail.bytes.buffer,
-    second.buffer,
-  ]);
-  FakeSharedWorker.last?.port.receive({ id: 1, uri: null });
-  await pending;
-  transport.close();
-});
+    });
+
+    expect(FakeSharedWorker.last?.port.posted).toContainEqual({
+      id: 1,
+      gallery: {
+        roomId: '!room:example.org',
+        attachments: [
+          { filename: 'one.png', mime: 'image/png', bytes: first, thumbnail },
+          { filename: 'two.pdf', mime: 'application/pdf', bytes: second },
+        ],
+        caption: 'Weekend',
+        formattedCaption: '<strong>Weekend</strong>',
+        mentions: ['@one:example.org'],
+        mentionsRoom: true,
+        inReplyTo: '$reply',
+        ...(selectedQuote ? { selectedQuote } : {}),
+        silentReply: false,
+        threadRoot: '$thread',
+        persona,
+      },
+    });
+    expect(FakeSharedWorker.last?.port.transfers).toContainEqual([
+      first.buffer,
+      thumbnail.bytes.buffer,
+      second.buffer,
+    ]);
+    FakeSharedWorker.last?.port.receive({ id: 1, uri: null });
+    await pending;
+    transport.close();
+  }
+);
 
 test('a slow command reports an unresponsive worker', async () => {
   expect(

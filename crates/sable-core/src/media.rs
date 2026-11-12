@@ -512,10 +512,13 @@ impl Core {
             reply,
             info: Some(attachment_info(&mime, &info, bytes.len())),
             thumbnail,
-            extra_content: attachment_extra_content(
-                persona.as_ref(),
-                request.spoiler,
-                audio_metadata.as_ref(),
+            extra_content: crate::outgoing::with_selected_quote(
+                attachment_extra_content(
+                    persona.as_ref(),
+                    request.spoiler,
+                    audio_metadata.as_ref(),
+                ),
+                request.outgoing.selected_quote,
             ),
             ..AttachmentConfig::default()
         };
@@ -565,6 +568,7 @@ impl Core {
             .persona
             .as_ref()
             .map(|profile| attachment_profile(&crate::personas::without_fallback(profile)));
+        let extra = crate::outgoing::with_selected_quote(extra, request.outgoing.selected_quote);
         let mut gallery = GalleryConfig::new()
             .extra_content(extra)
             .caption(attachment_caption(

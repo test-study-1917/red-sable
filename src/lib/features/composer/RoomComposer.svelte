@@ -986,6 +986,12 @@
     }
   }
 
+  export function insertQuote(text: string): void {
+    editor.insertQuote(text);
+    typing.update(empty);
+    requestAnimationFrame(() => editor.focus());
+  }
+
   export function insertMention(userId: string, name: string): void {
     editor.insert(
       composerSchema.nodes.mention.create({

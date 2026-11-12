@@ -797,6 +797,9 @@
         : conversation.toggleReaction}
       onDelete={conversation.redact}
       onReply={roomSession.permissions?.can_post === false ? undefined : conversation.reply}
+      onQuoteMarkdown={roomSession.permissions?.can_post === false
+        ? undefined
+        : (text) => composer?.insertQuote(text)}
       onSwipeMembers={toggleMembers}
       onCancelContext={conversation.clearContext}
       onOpenThread={openThread}

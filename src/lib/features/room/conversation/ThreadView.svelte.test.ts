@@ -75,6 +75,7 @@ function image(eventId: string, filename: string): TimelineItemView {
 test.each([false, true])('thread quotes jump to messages (loaded=%s)', async (loaded) => {
   const reply = image('$reply', 'reply.png');
   reply.in_reply_to = {
+    selected_quote: null,
     event_id: '$quoted',
     sender: '@alice:example.org',
     sender_name: 'Alice',

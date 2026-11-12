@@ -54,6 +54,7 @@
     currentUserId = null,
     onToggleReaction,
     onReply,
+    onQuoteMarkdown,
     onCancelContext,
     onOpenThread,
     onEdit,
@@ -106,6 +107,7 @@
     onToggleReaction,
     onMarkUnread,
     onReply,
+    onQuoteMarkdown,
     onCancelContext,
     onEdit,
     onDelete,
@@ -126,6 +128,7 @@
     onSenderProfile,
     onMentionUser,
   }));
+  let replyPreviewHeight = $state(0);
   let replyTarget = $derived(
     item.in_reply_to ? (events?.get(item.in_reply_to.event_id) ?? null) : null
   );
@@ -259,7 +262,9 @@
 
 {#snippet replyPreview(reply: ReplyView)}
   <TimelineReplyPreview
+    {roomId}
     {reply}
+    bind:previewHeight={replyPreviewHeight}
     target={replyTarget}
     sender={replySender}
     persona={replyPersona}
@@ -373,6 +378,9 @@
     data-selected={selected ? 'true' : undefined}
     aria-labelledby={named ? `${labelId}-head` : undefined}
     aria-describedby={`${labelId}-body`}
+    style:--reply-preview-height={replyPreviewHeight > 0
+      ? `${String(replyPreviewHeight)}px`
+      : undefined}
     style:--pmp-on-light={nameColorOnLight(sender.tint?.color_on_light) ?? undefined}
     style:--pmp-on-dark={nameColorOnDark(sender.tint?.color_on_dark) ?? undefined}
     style:--sender-name-color={row.senderColors.nameColor}
@@ -638,6 +646,12 @@
 {/if}
 
 <style>
+  :global(mark.quoted-passage-highlight) {
+    background: var(--warn-container);
+    color: var(--warn-on-container);
+    text-decoration: underline;
+  }
+
   .placeholder-message {
     pointer-events: none;
   }
@@ -690,7 +704,8 @@
     .message :global(.formatted-body),
     .message :global(pre),
     .message :global(code) {
-      user-select: none;
+      -webkit-touch-callout: default;
+      user-select: text;
     }
   }
 
@@ -1134,7 +1149,7 @@
 
   .message.has-connected-reply:not(.layout-compact) > :global(.avatar-button),
   .message.has-connected-reply:not(.layout-compact) > :global(.avatar-root.message-avatar) {
-    margin-top: var(--space-600);
+    margin-top: calc(var(--reply-preview-height, var(--space-500)) + var(--space-100));
   }
 
   @media (prefers-reduced-motion: no-preference) {
@@ -1176,6 +1191,11 @@
 
   .message.layout-compact :global(.message-actions) {
     inset-inline-end: 0;
+  }
+
+  .message.layout-compact:has(.message-content > :global(.selected-reply))
+    :global(.message-actions) {
+    bottom: calc(100% + var(--reply-preview-height, var(--space-500)) + var(--space-100));
   }
 
   .message.layout-compact.collapsed {

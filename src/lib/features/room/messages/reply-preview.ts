@@ -1,8 +1,13 @@
-import type { TimelineItemContentView } from '#src/generated/protocol';
+import type { SelectedQuote, TimelineItemContentView } from '#src/generated/protocol';
 
 const SPOILER = 'data-mx-spoiler';
 
-export type ReplyVersion = { of: string; body: string; html: string | null };
+export type ReplyVersion = {
+  of: string;
+  body: string;
+  html: string | null;
+  selectedQuote?: SelectedQuote;
+};
 
 function previewText(body: string, html: string | null): string {
   if (html === null) return body;

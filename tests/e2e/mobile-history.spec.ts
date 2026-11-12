@@ -52,6 +52,7 @@ for (const source of ['reply', 'link']) {
                 edited: false,
               },
               in_reply_to: {
+                selected_quote: null,
                 event_id: `$target-${id}:example.test`,
                 sender: '@alice:example.test',
                 sender_mentioned: false,

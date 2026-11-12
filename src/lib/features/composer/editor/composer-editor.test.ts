@@ -2719,3 +2719,24 @@ test('an existing bio over the limit can still be loaded and shortened', () => {
   view(editor).dispatch(view(editor).state.tr.delete(1, 10));
   expect(editor.text()).toBe('biography');
 });
+
+test('inserting a Markdown quote keeps the draft and leaves a paragraph for replying', () => {
+  const editor = open();
+  editor.setText('Existing draft');
+  editor.insertQuote('selected line\nsecond line');
+  const doc = editor.doc();
+  if (!doc) throw new Error('no doc');
+  expect(doc.textContent).toContain('Existing draft');
+  expect(serializeComposer(doc).formatted).toContain('<blockquote>');
+  expect(serializeComposer(doc).body).toContain('selected line');
+  expect(doc.lastChild?.type.name).toBe('paragraph');
+  expect(doc.lastChild?.textContent).toBe('');
+});
+
+test('inserting a quote in Markdown source mode writes quote markers', () => {
+  const editor = openWith({ richText: false });
+  editor.insertQuote('line one\nline two');
+  const doc = editor.doc();
+  if (!doc) throw new Error('no doc');
+  expect(serializePlain(doc).body).toContain('> line one\n> line two');
+});

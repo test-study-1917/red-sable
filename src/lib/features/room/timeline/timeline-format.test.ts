@@ -435,6 +435,7 @@ test('only a connected reply preview starts a new message group', () => {
     sender: '@a:b',
     timestamp: 1000,
     in_reply_to: {
+      selected_quote: null,
       event_id: '$original',
       sender: '@b:b',
       sender_mentioned: false,

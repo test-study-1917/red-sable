@@ -166,6 +166,7 @@
     currentUserId,
     onToggleReaction,
     onReply,
+    onQuoteMarkdown,
     onSwipeMembers,
     onCancelContext,
     onOpenThread,
@@ -1159,6 +1160,7 @@
     {currentUserId}
     {onToggleReaction}
     {onReply}
+    {onQuoteMarkdown}
     {onSwipeMembers}
     {onCancelContext}
     {onOpenThread}

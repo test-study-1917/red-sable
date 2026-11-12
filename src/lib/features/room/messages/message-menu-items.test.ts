@@ -65,3 +65,16 @@ test('the gif row reads back whether the gif is already saved', () => {
   expect(saved[0]?.label).toBe('composer.gifUnfavorite');
   expect(unsaved[0]?.label).toBe('composer.gifFavorite');
 });
+
+test('both selection quote actions appear alongside the ordinary reply', () => {
+  const markdown = () => {};
+  const reply = () => {};
+  const rows = messageMenuRows({
+    onQuoteMarkdown: markdown,
+    onQuoteReply: reply,
+    onReply: () => {},
+  });
+  expect(rows.map(({ key }) => key)).toEqual(['quote-markdown', 'quote-reply', 'reply']);
+  expect(rows[0].run).toBe(markdown);
+  expect(rows[1].run).toBe(reply);
+});

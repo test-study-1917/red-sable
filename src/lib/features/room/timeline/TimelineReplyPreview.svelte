@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { validQuote } from '../messages/selected-quote.js';
+  import { quoteFocus } from '../messages/quote-focus.svelte.js';
   import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
+  import CaretDownIcon from 'phosphor-svelte/lib/CaretDownIcon';
 
   import type {
     MemberView,
@@ -20,6 +23,8 @@
 
   interface Props {
     reply: ReplyView;
+    roomId?: string;
+    previewHeight?: number;
     target: TimelineItemView | null;
     sender: string | null;
     persona: PerMessageProfileView | null;
@@ -29,8 +34,40 @@
     onJumpToEvent?: (eventId: string) => void;
   }
 
-  let { reply, target, sender, persona, profile, currentUserId, members, onJumpToEvent }: Props =
-    $props();
+  let {
+    reply,
+    roomId = '',
+    previewHeight = $bindable(0),
+    target,
+    sender,
+    persona,
+    profile,
+    currentUserId,
+    members,
+    onJumpToEvent,
+  }: Props = $props();
+
+  const sourceId = $props.id();
+  let expanded = $state(false);
+  let headerHeight = $state(0);
+  let quote = $derived(validQuote(reply.selected_quote) ? reply.selected_quote : null);
+  function jumpToQuote(): void {
+    if (quote) quoteFocus.target = { roomId, eventId: reply.event_id, quote };
+    onJumpToEvent?.(reply.event_id);
+  }
+
+  function centerQuotedPassage(node: HTMLElement): () => void {
+    const frame = requestAnimationFrame(() => {
+      const mark = node.querySelector('mark');
+      if (!mark) return;
+      node.scrollTop +=
+        mark.getBoundingClientRect().top -
+        node.getBoundingClientRect().top -
+        node.clientHeight / 2 +
+        mark.getBoundingClientRect().height / 2;
+    });
+    return () => cancelAnimationFrame(frame);
+  }
 
   const roomCosmetics = useRoomCosmetics();
   const senderRoles = hasSenderRoles() ? useSenderRoles() : null;
@@ -74,13 +111,51 @@
 {#snippet copy()}
   <span class="reply-copy"
     ><SenderName displayName={name} {colors} nameClass="reply-name" compact />
-    <span class="reply-body">{body}</span></span
+    <span class="reply-body">{quote?.text ?? body}</span></span
   >
 {/snippet}
 
-{#if preferences.replyPreviewStyle === 'connected'}
+{#if quote}
+  <div
+    class={['reply-preview', `reply-${preferences.replyPreviewStyle}`, 'selected-reply']}
+    class:quote-open={expanded}
+    style:--reply-connector-y={headerHeight > 0 ? `${String(headerHeight / 2)}px` : undefined}
+    bind:clientHeight={previewHeight}
+  >
+    <div class="quote-header" bind:clientHeight={headerHeight}>
+      <button
+        class="quote-summary"
+        type="button"
+        onclick={jumpToQuote}
+        title={i18n.t('timeline.jumpToQuote')}
+      >
+        {#if preferences.replyPreviewStyle !== 'connected'}
+          <ReplyIcon class="reply-icon" />
+        {/if}
+        {@render copy()}
+      </button>
+      <button
+        class="quote-toggle"
+        type="button"
+        aria-label={i18n.t(expanded ? 'timeline.collapseQuote' : 'timeline.expandQuote')}
+        title={i18n.t(expanded ? 'timeline.collapseQuote' : 'timeline.expandQuote')}
+        aria-expanded={expanded}
+        aria-controls={sourceId}
+        onclick={() => (expanded = !expanded)}
+      >
+        <CaretDownIcon aria-hidden="true" />
+      </button>
+    </div>
+    {#if expanded}
+      <div class="quoted-source" id={sourceId} {@attach centerQuotedPassage}>
+        {quote.body.slice(0, quote.start)}<mark>{quote.text}</mark>{quote.body.slice(quote.end)}
+      </div>
+    {/if}
+  </div>
+{:else if preferences.replyPreviewStyle === 'connected'}
   <button
     class={['reply-preview', 'reply-connected']}
+    bind:clientHeight={previewHeight}
     type="button"
     onclick={() => {
       onJumpToEvent?.(reply.event_id);
@@ -91,6 +166,7 @@
 {:else}
   <button
     class={['reply-preview', `reply-${preferences.replyPreviewStyle}`]}
+    bind:clientHeight={previewHeight}
     type="button"
     onclick={() => {
       onJumpToEvent?.(reply.event_id);
@@ -151,6 +227,11 @@
     width: var(--size-x50);
   }
 
+  .reply-compact :global(.reply-name),
+  .reply-connected :global(.reply-name) {
+    margin-inline-end: var(--space-100);
+  }
+
   .reply-compact .reply-body,
   .reply-connected .reply-body {
     filter: brightness(var(--opacity-p300));
@@ -179,7 +260,7 @@
     opacity: var(--opacity-placeholder);
     pointer-events: none;
     position: absolute;
-    top: calc(50% - var(--border-width-300));
+    top: calc(var(--reply-connector-y, 50%) - var(--border-width-300));
     width: calc(var(--timeline-row-gap) / 2 + var(--avatar-size-small) / 2);
   }
 
@@ -264,5 +345,141 @@
     border-right: var(--reply-connector-width) solid var(--surface-on-container);
     left: auto;
     right: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+  }
+
+  .reply-preview.selected-reply {
+    cursor: default;
+    display: block;
+  }
+
+  .quote-header {
+    align-items: start;
+    display: grid;
+    gap: var(--space-100);
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-width: 0;
+  }
+
+  .quote-summary,
+  .quote-toggle {
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-inner);
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    min-height: var(--space-500);
+    padding: 0;
+  }
+
+  .quote-summary {
+    align-items: center;
+    display: grid;
+    gap: var(--space-200);
+    grid-template-columns: auto minmax(0, 1fr);
+    min-width: 0;
+    text-align: inherit;
+  }
+
+  .reply-expanded .quote-summary {
+    align-items: start;
+  }
+
+  .selected-reply.reply-connected::before {
+    height: calc(100% - var(--reply-connector-y, var(--space-250)) + var(--space-100));
+  }
+
+  .reply-compact .quote-summary {
+    gap: var(--space-100);
+  }
+
+  .reply-connected .quote-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .quote-toggle {
+    align-items: center;
+    color: var(--surface-on-container);
+    display: flex;
+    justify-content: center;
+    width: var(--space-600);
+  }
+
+  .quote-toggle :global(svg) {
+    height: var(--size-x50);
+    width: var(--size-x50);
+  }
+
+  .quote-open .quote-toggle :global(svg) {
+    rotate: 180deg;
+  }
+
+  .quote-toggle:is(:hover, :focus-visible) {
+    background: var(--surface-container-hover);
+    color: var(--primary-main);
+  }
+
+  .quote-summary:focus-visible,
+  .quote-toggle:focus-visible {
+    outline: var(--border-width-500) solid var(--primary-main);
+    outline-offset: var(--space-050);
+  }
+
+  .quote-summary:is(:hover, :focus-visible) .reply-body {
+    filter: brightness(var(--opacity-p500));
+  }
+
+  .quoted-source {
+    line-height: 1.35;
+    margin-top: var(--space-100);
+    max-height: 12rem;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    padding-inline-end: var(--space-100);
+    scrollbar-width: thin;
+    text-align: start;
+    user-select: text;
+    white-space: pre-wrap;
+  }
+
+  .reply-expanded .quoted-source {
+    margin-inline-start: calc(var(--icon-size-small) + var(--space-200));
+  }
+
+  .reply-compact .quoted-source {
+    margin-inline-start: calc(var(--size-x50) + var(--space-100));
+  }
+
+  .quoted-source mark {
+    background: var(--warn-container);
+    border-radius: var(--radii-200);
+    color: var(--warn-on-container);
+  }
+
+  :global(.message.layout-bubble.own.align-own) .selected-reply .quote-summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  :global(.message.layout-bubble.own.align-own) .reply-connected .quote-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  :global(.message.layout-bubble.own.align-own) .reply-expanded :global(.reply-name) {
+    justify-self: end;
+  }
+
+  :global(.message.layout-bubble.own.align-own) .selected-reply .quoted-source {
+    margin-inline: 0;
+  }
+
+  @media (any-pointer: coarse) {
+    .quote-summary,
+    .quote-toggle {
+      min-height: var(--space-700);
+    }
+
+    .quote-toggle {
+      width: var(--space-700);
+    }
   }
 </style>

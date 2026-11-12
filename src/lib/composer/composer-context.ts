@@ -1,4 +1,4 @@
-import type { PerMessageProfileView } from '#src/generated/protocol';
+import type { PerMessageProfileView, SelectedQuote } from '#src/generated/protocol';
 
 export interface ScheduledTarget {
   source: 'server' | 'queue';
@@ -11,6 +11,7 @@ export interface ComposerContext {
   timelineItemId?: string;
   sender?: string | null;
   silentReply?: boolean;
+  selectedQuote?: SelectedQuote;
   body: string;
   html?: string | null;
   mediaCaption?: boolean;

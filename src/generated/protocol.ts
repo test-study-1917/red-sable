@@ -754,6 +754,7 @@ export type OpenIdTokenView = {
 };
 
 export type Outgoing = {
+	selected_quote: SelectedQuote | null,
 	thread_root: string | null,
 	in_reply_to: string | null,
 	silent_reply: boolean,
@@ -1254,6 +1255,7 @@ export type ReplyFallbackView = { kind: "redacted" } | { kind: "reaction"; key: 
  *  seen until `FetchEventDetails` fills it.
  */
 export type ReplyView = {
+	selected_quote: SelectedQuote | null,
 	event_id: string,
 	sender: string | null,
 	sender_mentioned: boolean,
@@ -1776,6 +1778,14 @@ export type SectionInputs = {
 	keep_empty: string[],
 	joined: string[],
 	invited: string[],
+};
+
+/**  A snapshot of the rendered source and UTF-16 offsets, matching browser ranges. */
+export type SelectedQuote = {
+	body: string,
+	text: string,
+	start: number,
+	end: number,
 };
 
 export type SendAttachmentRequest = {
@@ -2728,6 +2738,7 @@ export type Rpc = {
 	pills?: ComposerPill[],
 }) => Promise<ComposerContent>;
     send: (params: {
+	selected_quote?: SelectedQuote | null,
 	room_id: string,
 	body: string,
 	formatted?: string | null,
@@ -2760,6 +2771,7 @@ export type Rpc = {
 	reason?: string | null,
 }) => Promise<string>;
     sendSticker: (params: {
+	selected_quote?: SelectedQuote | null,
 	room_id: string,
 	url: string,
 	body: string,
@@ -2770,6 +2782,7 @@ export type Rpc = {
 	persona?: PerMessageProfileView | null,
 }) => Promise<null>;
     sendGif: (params: {
+	selected_quote?: SelectedQuote | null,
 	room_id: string,
 	/**  `mxc://` only; the core rejects anything else. */
 	url: string,
@@ -2837,6 +2850,7 @@ export type Rpc = {
 	persona?: PerMessageProfileView | null,
 }) => Promise<null>;
     sendLocation: (params: {
+	selected_quote?: SelectedQuote | null,
 	room_id: string,
 	body: string,
 	geo_uri: string,

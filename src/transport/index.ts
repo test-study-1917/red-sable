@@ -1,5 +1,6 @@
 import type {
   AttachmentInfoView,
+  SelectedQuote,
   RpcError,
   CoreEvent,
   PerMessageProfileView,
@@ -22,6 +23,7 @@ export type Attachment = {
   mentions?: string[];
   mentionsRoom?: boolean;
   inReplyTo?: string | null;
+  selectedQuote?: SelectedQuote;
   silentReply?: boolean;
   info?: AttachmentInfoView | null;
   threadRoot?: string | null;
@@ -37,6 +39,7 @@ export type Gallery = {
   mentions?: string[];
   mentionsRoom?: boolean;
   inReplyTo?: string | null;
+  selectedQuote?: SelectedQuote;
   silentReply?: boolean;
   threadRoot?: string | null;
   persona?: PerMessageProfileView | null;

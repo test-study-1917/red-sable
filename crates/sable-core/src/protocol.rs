@@ -24,6 +24,8 @@ use crate::api::rooms::RoomKind;
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 pub struct Outgoing {
     #[serde(default)]
+    pub selected_quote: Option<SelectedQuote>,
+    #[serde(default)]
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub thread_root: Option<OwnedEventId>,
     #[serde(default)]
@@ -1978,11 +1980,22 @@ pub struct PersonaCatalogView {
     pub disabled_rooms: Vec<String>,
 }
 
+/// A snapshot of the rendered source and UTF-16 offsets, matching browser ranges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct SelectedQuote {
+    pub body: String,
+    pub text: String,
+    pub start: u32,
+    pub end: u32,
+}
+
 /// The SDK loads the body lazily, so it is absent for an event we have never
 /// seen until `FetchEventDetails` fills it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 pub struct ReplyView {
+    pub selected_quote: Option<SelectedQuote>,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub event_id: OwnedEventId,
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]

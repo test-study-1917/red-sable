@@ -94,6 +94,8 @@ impl Handler for MarkdownToContentParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SendParams {
+    #[serde(default)]
+    pub selected_quote: Option<crate::protocol::SelectedQuote>,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub room_id: OwnedRoomId,
     pub body: String,
@@ -193,6 +195,12 @@ impl Handler for SendParams {
                     image_source_pack_references(&self.image_source_packs),
                 ),
                 (crate::bot_commands::COMMAND_FIELD, self.bot_command),
+                (
+                    crate::outgoing::SELECTED_QUOTE,
+                    self.selected_quote
+                        .filter(|_| content.relates_to.is_some())
+                        .and_then(|quote| serde_json::to_value(quote).ok()),
+                ),
                 (view::FORUM_TITLE, forum_title_value(self.forum_title)),
             ],
         );
@@ -268,6 +276,8 @@ impl Handler for SendRedactionParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SendStickerParams {
+    #[serde(default)]
+    pub selected_quote: Option<crate::protocol::SelectedQuote>,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub room_id: OwnedRoomId,
     pub url: String,
@@ -317,6 +327,10 @@ impl Handler for SendStickerParams {
             [
                 (IMAGE_SOURCE_PACKS, source),
                 ("m.mentions", Some(empty_mentions())),
+                (
+                    crate::outgoing::SELECTED_QUOTE,
+                    self.selected_quote.map(|quote| serde_json::json!(quote)),
+                ),
             ],
         );
         timeline
@@ -331,6 +345,8 @@ impl Handler for SendStickerParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SendGifParams {
+    #[serde(default)]
+    pub selected_quote: Option<crate::protocol::SelectedQuote>,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub room_id: OwnedRoomId,
     /// `mxc://` only; the core rejects anything else.
@@ -384,11 +400,14 @@ impl Handler for SendGifParams {
         timeline
             .send_with_extra_content(
                 content.into(),
-                self.persona.as_ref().map(|persona| {
-                    crate::personas::profile_extra_content(&crate::personas::without_fallback(
-                        persona,
-                    ))
-                }),
+                crate::outgoing::with_selected_quote(
+                    self.persona.as_ref().map(|persona| {
+                        crate::personas::profile_extra_content(&crate::personas::without_fallback(
+                            persona,
+                        ))
+                    }),
+                    self.selected_quote,
+                ),
             )
             .await
             .or_failed(core, "send_gif")?;
@@ -670,6 +689,8 @@ impl Handler for ReactParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct SendLocationParams {
+    #[serde(default)]
+    pub selected_quote: Option<crate::protocol::SelectedQuote>,
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub room_id: OwnedRoomId,
     pub body: String,
@@ -708,11 +729,14 @@ impl Handler for SendLocationParams {
         timeline
             .send_with_extra_content(
                 content.into(),
-                self.persona.as_ref().map(|profile| {
-                    crate::personas::profile_extra_content(&crate::personas::without_fallback(
-                        profile,
-                    ))
-                }),
+                crate::outgoing::with_selected_quote(
+                    self.persona.as_ref().map(|profile| {
+                        crate::personas::profile_extra_content(&crate::personas::without_fallback(
+                            profile,
+                        ))
+                    }),
+                    self.selected_quote,
+                ),
             )
             .await
             .or_failed(core, "send_location")?;

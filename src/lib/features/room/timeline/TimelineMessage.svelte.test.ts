@@ -766,3 +766,101 @@ test('quotes a reply to a membership event as its timeline text', async () => {
 
   expect(document.querySelector('.reply-body')?.textContent).toBe('nex left the room');
 });
+
+test.each(['connected', 'compact', 'expanded'] as const)(
+  'partial reply expands and highlights its source in the %s style',
+  async (replyPreviewStyle) => {
+    setPreference('replyPreviewStyle', replyPreviewStyle);
+    const { quoteFocus } = await import('../messages/quote-focus.svelte.js');
+    const message = replyItem();
+    const quote = {
+      body: 'Before the selected words after.',
+      text: 'selected words',
+      start: 11,
+      end: 25,
+    };
+    if (!message.in_reply_to) throw new Error('missing reply fixture');
+    message.in_reply_to.selected_quote = quote;
+    const onJumpToEvent = vi.fn();
+    render(TimelineItemHarness, {
+      props: {
+        core,
+        item: { item: message, collapsed: false, roomId: '!room:example.org', onJumpToEvent },
+      },
+    });
+    await tick();
+    expect(document.querySelector('.quoted-source')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Expand quoted message' }));
+    expect(document.querySelector('.quoted-source')?.textContent).toBe(quote.body);
+    expect(document.querySelector('.quoted-source mark')?.textContent).toBe(quote.text);
+    await user.click(screen.getByRole('button', { name: 'Collapse quoted message' }));
+    expect(document.querySelector('.quoted-source')).toBeNull();
+    const summary = document.querySelector<HTMLButtonElement>('.quote-summary');
+    if (!summary) throw new Error('missing quote summary');
+    await user.click(summary);
+    expect(onJumpToEvent).toHaveBeenCalledWith('$original');
+    expect(quoteFocus.target).toEqual({ roomId: '!room:example.org', eventId: '$original', quote });
+    quoteFocus.target = null;
+  }
+);
+
+test('updating a highlighted source does not scroll the reader back to the quote', async () => {
+  const { quoteFocus } = await import('../messages/quote-focus.svelte.js');
+  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView');
+  const message = item(false);
+  if (message.content.kind !== 'message') throw new Error('missing message content');
+  const text = message.content.body;
+  const props = $state({
+    core,
+    item: { item: message, collapsed: false, roomId: '!room:example.org' },
+  });
+  render(TimelineItemHarness, { props });
+  await tick();
+  quoteFocus.target = {
+    roomId: '!room:example.org',
+    eventId: message.event_id as string,
+    quote: { body: text, text, start: 0, end: text.length },
+  };
+  await tick();
+  expect(document.querySelector('mark.quoted-passage-highlight')).not.toBeNull();
+  const count = scroll.mock.calls.length;
+  expect(count).toBeGreaterThan(0);
+  props.item.item = { ...message, reactions: [{ key: '👍', senders: ['@bob:example.org'] }] };
+  await tick();
+  expect(scroll).toHaveBeenCalledTimes(count);
+  quoteFocus.target = null;
+  scroll.mockRestore();
+});
+
+for (const layout of ['modern', 'compact', 'bubble'] as const) {
+  test.each(['connected', 'compact', 'expanded'] as const)(
+    `partial replies use the native %s presentation in ${layout} messages`,
+    async (replyPreviewStyle) => {
+      setPreference('replyPreviewStyle', replyPreviewStyle);
+      const message = replyItem();
+      if (!message.in_reply_to) throw new Error('missing reply fixture');
+      message.in_reply_to.selected_quote = {
+        body: 'Before selected after',
+        text: 'selected',
+        start: 7,
+        end: 15,
+      };
+      render(TimelineItemHarness, {
+        props: { core, item: { item: message, collapsed: false, layout } },
+      });
+      await tick();
+      const preview = document.querySelector('.selected-reply');
+      expect(preview).toHaveClass(`reply-${replyPreviewStyle}`);
+      expect(preview?.querySelector('.reply-body')).toHaveTextContent('selected');
+      expect(preview?.querySelector('.reply-icon') !== null).toBe(
+        replyPreviewStyle !== 'connected'
+      );
+      expect(document.querySelector('.message')?.classList.contains('has-connected-reply')).toBe(
+        replyPreviewStyle === 'connected'
+      );
+      const aboveHeader = replyPreviewStyle === 'connected' || layout === 'compact';
+      expect(preview?.parentElement).toHaveClass(aboveHeader ? 'message-content' : 'message-main');
+      expect(preview?.querySelector('.quote-toggle')?.textContent?.trim()).toBe('');
+    }
+  );
+}

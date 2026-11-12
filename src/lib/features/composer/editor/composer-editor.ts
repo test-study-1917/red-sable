@@ -11,7 +11,7 @@ import { gapCursor } from 'prosemirror-gapcursor';
 import { history, redo, undo } from 'prosemirror-history';
 import { inputRules, undoInputRule } from 'prosemirror-inputrules';
 import { keydownHandler, keymap } from 'prosemirror-keymap';
-import { Slice, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
+import { Fragment, Slice, type Node as ProseMirrorNode, type ResolvedPos } from 'prosemirror-model';
 import {
   Plugin,
   EditorState,
@@ -1275,6 +1275,26 @@ export class ComposerEditor {
 
   setText(text: string): void {
     this.setDoc(textDoc(text));
+  }
+
+  insertQuote(text: string): void {
+    const view = this.view;
+    if (!view) return;
+    const paragraph = composerSchema.nodes.paragraph;
+    const lines = text.replaceAll(/\r\n?/g, '\n').split('\n');
+    const blocks = this.markdownMode()
+      ? textDoc(lines.map((line) => `> ${line}`).join('\n') + '\n\n').content
+      : Fragment.from([
+          composerSchema.nodes.blockquote.create(
+            null,
+            lines.map((line) =>
+              paragraph.create(null, line ? composerSchema.text(line) : undefined)
+            )
+          ),
+          paragraph.create(),
+        ]);
+    view.dispatch(view.state.tr.replaceSelection(new Slice(blocks, 0, 0)).scrollIntoView());
+    view.focus();
   }
 
   insert(node: ProseMirrorNode): void {

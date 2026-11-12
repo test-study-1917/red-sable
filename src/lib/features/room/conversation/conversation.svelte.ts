@@ -274,6 +274,7 @@ export class Conversation {
     );
     await sendMessage(this.#core.rpc, targetRoomId, outgoing.body, {
       in_reply_to: pending?.eventId ?? null,
+      selected_quote: pending?.selectedQuote ?? null,
       thread_root: this.#threadRoot,
       formatted: outgoing.formatted,
       mentions: [...(untouched || outcome.verbatim === true ? mentions.user_ids : [])],
@@ -302,6 +303,7 @@ export class Conversation {
     const profile = this.#personaFor(targetRoomId, '', null).persona;
     await sendMessage(this.#core.rpc, targetRoomId, body, {
       in_reply_to: pending?.eventId ?? null,
+      selected_quote: pending?.selectedQuote ?? null,
       thread_root: this.#threadRoot,
       mentions: [bot],
       mentions_room: false,
@@ -329,6 +331,7 @@ export class Conversation {
       caption: options.caption == null ? options.caption : outgoing.body,
       formattedCaption: outgoing.formatted,
       inReplyTo: reply?.eventId ?? null,
+      ...(reply?.selectedQuote ? { selectedQuote: reply.selectedQuote } : {}),
       silentReply: reply?.silentReply ?? options.silentReply ?? false,
       threadRoot: this.#threadRoot,
       persona: outgoing.persona,
@@ -354,6 +357,7 @@ export class Conversation {
       formattedCaption: outgoing.formatted,
       persona: outgoing.persona,
       inReplyTo: reply?.eventId ?? null,
+      ...(reply?.selectedQuote ? { selectedQuote: reply.selectedQuote } : {}),
       silentReply: reply?.silentReply ?? options.silentReply ?? false,
       threadRoot: this.#threadRoot,
     });
@@ -368,13 +372,15 @@ export class Conversation {
     sourcePack: ImageSourcePackView | null = null
   ): Promise<void> => {
     await this.#beforeSend();
+    const reply = this.#consumeReply();
     await this.#core.rpc.messages.sendSticker({
       room_id: targetRoomId,
       url,
       body,
       info,
       source_pack: $state.snapshot(sourcePack),
-      in_reply_to: this.#consumeReply()?.eventId ?? null,
+      in_reply_to: reply?.eventId ?? null,
+      ...(reply?.selectedQuote ? { selected_quote: $state.snapshot(reply.selectedQuote) } : {}),
       thread_root: this.#threadRoot,
       persona: $state.snapshot(this.#personaFor(targetRoomId, '', null).persona),
     });
@@ -396,6 +402,7 @@ export class Conversation {
       mimetype: proxied.mimetype,
       size: gif.size > 0 ? gif.size : null,
       in_reply_to: reply?.eventId ?? null,
+      ...(reply?.selectedQuote ? { selected_quote: $state.snapshot(reply.selectedQuote) } : {}),
       silent_reply: reply?.silentReply ?? false,
       thread_root: this.#threadRoot,
       persona: $state.snapshot(this.#personaFor(targetRoomId, '', null).persona),
@@ -434,6 +441,7 @@ export class Conversation {
       body,
       geo_uri: geoUri,
       in_reply_to: reply?.eventId ?? null,
+      ...(reply?.selectedQuote ? { selected_quote: $state.snapshot(reply.selectedQuote) } : {}),
       silent_reply: reply?.silentReply ?? false,
       thread_root: this.#threadRoot,
     });
@@ -634,7 +642,11 @@ export class Conversation {
       eventId,
       sender: item.per_message_profile?.display_name ?? item.sender_name ?? item.sender,
       silentReply: item.sender === this.#core.session?.user_id || !preferences.mentionInReplies,
-      body: version?.body ?? (replyPreviewBody(item.content) || stateEventText(item, t)),
+      body:
+        version?.selectedQuote?.text ??
+        version?.body ??
+        (replyPreviewBody(item.content) || stateEventText(item, t)),
+      selectedQuote: version?.selectedQuote,
       html: version?.html ?? (item.content.kind === 'message' ? item.content.html : null),
     };
   };

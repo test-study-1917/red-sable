@@ -986,11 +986,18 @@ test('saving an edited queued message replaces its queue entry', async () => {
 test('a reply the SDK has not filled asks the core for its details once', async () => {
   const reply = withRowFields({
     ...item('$reply:example.org', '@kris:example.org'),
-    in_reply_to: { event_id: '$reaction:example.org', sender: null, body: null, fallback: null },
+    in_reply_to: {
+      selected_quote: null,
+      event_id: '$reaction:example.org',
+      sender: null,
+      body: null,
+      fallback: null,
+    },
   } as unknown as TimelineItemView);
   const filled = withRowFields({
     ...item('$filled:example.org', '@kris:example.org'),
     in_reply_to: {
+      selected_quote: null,
       event_id: '$gone:example.org',
       sender: null,
       body: null,
@@ -1171,3 +1178,81 @@ test.each([false, true])(
     expect(h.schedule).toHaveBeenCalledWith(expect.objectContaining({ persona: profile }));
   }
 );
+
+test('partial replies retain the selected passage across draft restore and sending', async () => {
+  const items = [item('$one:example.org', '@ana:example.org')];
+  const selectedQuote = { body: 'Hello', text: 'ell', start: 1, end: 4 };
+  const first = setup(items, '@kris:example.org');
+  first.conversation.reply('$one:example.org', {
+    of: '$one:example.org',
+    body: 'Hello',
+    html: null,
+    selectedQuote,
+  });
+  expect(first.conversation.context?.body).toBe('ell');
+  const returned = setup(items, '@kris:example.org');
+  expect(returned.conversation.context?.selectedQuote).toEqual(selectedQuote);
+  await returned.conversation.sendMessage(ROOM, 'About this passage');
+  expect(returned.sendMessage).toHaveBeenCalledWith(
+    ROOM,
+    'About this passage',
+    expect.objectContaining({
+      in_reply_to: '$one:example.org',
+      selected_quote: selectedQuote,
+    })
+  );
+});
+
+test('media replies retain the same selected passage as text replies', async () => {
+  vi.spyOn(runtime, 'runtimeConfig').mockResolvedValue(
+    runtime.parseRuntimeConfig({ gifs: { proxyUrl: 'gifs.example' } })
+  );
+  const h = setup([item('$one:example.org', '@ana:example.org')], '@kris:example.org');
+  const selectedQuote = { body: 'Hello', text: 'ell', start: 1, end: 4 };
+  const select = () =>
+    h.conversation.reply('$one:example.org', {
+      of: '$one:example.org',
+      body: 'Hello',
+      html: null,
+      selectedQuote,
+    });
+  const file = new File(['image'], 'image.png', { type: 'image/png' });
+  select();
+  await h.conversation.sendAttachment(ROOM, file);
+  expect(h.sendAttachment.mock.lastCall).toMatchObject([
+    ROOM,
+    file,
+    { inReplyTo: '$one:example.org', selectedQuote },
+  ]);
+  select();
+  await h.conversation.sendGallery(ROOM, [file]);
+  expect(h.sendGallery.mock.lastCall).toMatchObject([
+    ROOM,
+    [file],
+    { inReplyTo: '$one:example.org', selectedQuote },
+  ]);
+  select();
+  await h.conversation.sendSticker(ROOM, 'mxc://example.org/sticker', 'Sticker');
+  expect(h.sendSticker).toHaveBeenLastCalledWith(
+    expect.objectContaining({ in_reply_to: '$one:example.org', selected_quote: selectedQuote })
+  );
+  select();
+  await h.conversation.sendLocation(ROOM, 'Here', 'geo:48,2');
+  expect(h.sendLocation).toHaveBeenLastCalledWith(
+    expect.objectContaining({ in_reply_to: '$one:example.org', selected_quote: selectedQuote })
+  );
+  select();
+  await h.conversation.sendGif(ROOM, {
+    id: 'cat',
+    title: 'cat',
+    mediaUrl: 'https://media.tenor.com/abc123/cat.gif',
+    previewUrl: '',
+    width: 320,
+    height: 240,
+    size: 1000,
+    mimetype: 'image/gif',
+  });
+  expect(h.sendGif).toHaveBeenLastCalledWith(
+    expect.objectContaining({ in_reply_to: '$one:example.org', selected_quote: selectedQuote })
+  );
+});

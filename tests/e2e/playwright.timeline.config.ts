@@ -37,6 +37,7 @@ export default defineConfig({
     'thread-panel.spec.ts',
     'thread-actions.spec.ts',
     'thread-quotes.spec.ts',
+    'selected-quotes.spec.ts',
     'settings-backdrop.spec.ts',
     'sheet-swipe.spec.ts',
     'voice-room-chat.spec.ts',

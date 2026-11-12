@@ -104,6 +104,7 @@ function replyToAlice(id: string, sender: string, senderName: string): TimelineI
   return {
     ...message(id, sender, senderName),
     in_reply_to: {
+      selected_quote: null,
       event_id: '$general-1:example.test',
       sender: '@alice:example.test',
       sender_mentioned: false,

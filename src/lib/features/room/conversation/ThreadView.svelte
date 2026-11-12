@@ -295,6 +295,7 @@
     onRequestFuture={requestFuture}
     onRead={markRead}
     onReply={readOnly ? undefined : conversation.reply}
+    onQuoteMarkdown={readOnly ? undefined : (text) => composer?.insertQuote(text)}
     onCancelContext={conversation.clearContext}
     onEdit={readOnly ? undefined : conversation.edit}
     onDelete={conversation.redact}

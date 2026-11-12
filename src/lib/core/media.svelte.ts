@@ -1,4 +1,4 @@
-import { type PerMessageProfileView, createRpc } from '#src/generated/protocol';
+import { type SelectedQuote, type PerMessageProfileView, createRpc } from '#src/generated/protocol';
 import { measureAttachment } from './attachment-info';
 import { withResolvedMime } from '#lib/platform/files.js';
 import { formatByteSize } from '#lib/ui/byte-size.js';
@@ -10,6 +10,7 @@ export type SendAttachmentOptions = {
   formattedCaption?: string | null;
   mentions?: OutgoingMentions;
   inReplyTo?: string | null;
+  selectedQuote?: SelectedQuote;
   silentReply?: boolean;
   threadRoot?: string | null;
   persona?: PerMessageProfileView | null;
@@ -80,6 +81,7 @@ export function createMedia(transport: () => Transport) {
         mentions: [...(options.mentions?.user_ids ?? [])],
         mentionsRoom: options.mentions?.room ?? false,
         inReplyTo: options.inReplyTo ?? null,
+        ...(options.selectedQuote ? { selectedQuote: $state.snapshot(options.selectedQuote) } : {}),
         silentReply: options.silentReply ?? false,
         info: measured.info,
         thumbnail: measured.thumbnail,
@@ -117,6 +119,7 @@ export function createMedia(transport: () => Transport) {
         mentions: [...(options.mentions?.user_ids ?? [])],
         mentionsRoom: options.mentions?.room ?? false,
         inReplyTo: options.inReplyTo ?? null,
+        ...(options.selectedQuote ? { selectedQuote: $state.snapshot(options.selectedQuote) } : {}),
         silentReply: options.silentReply ?? false,
         threadRoot: options.threadRoot ?? null,
         persona: $state.snapshot(options.persona ?? null),

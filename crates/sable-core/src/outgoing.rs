@@ -17,6 +17,18 @@ use crate::messages::outgoing_mentions;
 use crate::protocol::MessageKind;
 use sable_model::truncate::truncate_graphemes;
 
+pub(crate) const SELECTED_QUOTE: &str = "moe.sable.selected_quote";
+
+pub(crate) fn with_selected_quote(
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
+    quote: Option<crate::protocol::SelectedQuote>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    extra_content(
+        extra,
+        [(SELECTED_QUOTE, quote.map(|quote| serde_json::json!(quote)))],
+    )
+}
+
 pub(crate) fn thread_reply(
     in_reply_to: Option<OwnedEventId>,
     thread_root: Option<OwnedEventId>,
@@ -231,6 +243,24 @@ mod tests {
     use matrix_sdk::ruma::events::relation::Reply;
     use matrix_sdk::ruma::events::room::message::{AddMentions, Relation};
     use matrix_sdk::ruma::owned_user_id;
+
+    #[test]
+    fn selected_quote_extra_keeps_existing_media_fields() {
+        let quote = crate::protocol::SelectedQuote {
+            body: "hello world".into(),
+            text: "world".into(),
+            start: 6,
+            end: 11,
+        };
+        let base = Some(serde_json::Map::from_iter([(
+            "custom".to_owned(),
+            serde_json::json!(true),
+        )]));
+        assert_eq!(super::with_selected_quote(base.clone(), None), base);
+        let extra = super::with_selected_quote(base, Some(quote)).unwrap();
+        assert_eq!(extra["custom"], true);
+        assert_eq!(extra[super::SELECTED_QUOTE]["text"], "world");
+    }
 
     #[test]
     fn test_a_custom_reaction_carries_its_shortcode_wrapped_in_colons() {

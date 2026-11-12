@@ -153,3 +153,23 @@ test.each(['attachment', 'gallery'])('carries %s thumbnails as binary', async (k
   expect(decodeURIComponent(headersOf(call).request)).not.toContain('bytes');
   if (kind === 'gallery') expect(bytes.slice(29)).toEqual(bytes.slice(0, 29));
 });
+
+test.each(['attachment', 'gallery'] as const)(
+  'retains a selected reply in the native %s header',
+  async (kind) => {
+    invoke.mockResolvedValue(undefined);
+    const transport = createTauriTransport();
+    const selectedQuote = { body: 'Before 中文 😀 after', text: '中文 😀', start: 7, end: 12 };
+    const outgoing = { roomId: '!room:example.org', inReplyTo: '$original', selectedQuote };
+    const attachment = { filename: 'a.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) };
+    if (kind === 'attachment') await transport.sendAttachment({ ...outgoing, ...attachment });
+    else await transport.sendGallery({ ...outgoing, attachments: [attachment, attachment] });
+    const headers = headersOf(invoke.mock.calls.at(-1) ?? []);
+    expect(JSON.parse(decodeURIComponent(headers.request))).toMatchObject({
+      in_reply_to: '$original',
+      selected_quote: selectedQuote,
+    });
+    expect(headers.request).toMatch(/^[ -~]*$/);
+    transport.close();
+  }
+);

@@ -23,6 +23,7 @@ export async function sendMessage(
     kind: options.kind ?? 'text',
     thread_root: options.thread_root ?? null,
     in_reply_to: options.in_reply_to ?? null,
+    selected_quote: $state.snapshot(options.selected_quote ?? null),
     mentions: [...(options.mentions ?? [])],
     mentions_room: options.mentions_room ?? false,
     silent_reply: options.silent_reply ?? false,

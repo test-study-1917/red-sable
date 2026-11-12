@@ -48,6 +48,7 @@ for (const [surface, mode, path] of [
         ...timelineItem('reply', 'Answer to the quoted message'),
         thread_root: root.event_id,
         in_reply_to: {
+          selected_quote: null,
           event_id: target.event_id,
           sender: '@alice:example.test',
           sender_name: 'Alice',
@@ -85,7 +86,10 @@ for (const [surface, mode, path] of [
           op: 'reset',
           values: [
             root,
-            { ...reply, in_reply_to: { ...reply.in_reply_to, event_id: older.event_id } },
+            {
+              ...reply,
+              in_reply_to: { ...reply.in_reply_to, event_id: older.event_id },
+            },
           ],
         },
       ]);

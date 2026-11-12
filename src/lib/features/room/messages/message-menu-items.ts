@@ -31,6 +31,8 @@ export type MessageActions = {
   onEditHistory?: () => void;
   onMarkUnread?: () => void;
   onReply?: () => void;
+  onQuoteMarkdown?: () => void;
+  onQuoteReply?: () => void;
   onOpenThread?: () => void;
   onEdit?: () => void;
   onReproxy?: () => void;
@@ -75,6 +77,22 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       label: 'timeline.addReaction',
       icon: EmojiIcon,
       run: actions.onAddReaction,
+    });
+  }
+  if (actions.onQuoteMarkdown) {
+    rows.push({
+      key: 'quote-markdown',
+      label: 'timeline.quoteMarkdown',
+      icon: CodeIcon,
+      run: actions.onQuoteMarkdown,
+    });
+  }
+  if (actions.onQuoteReply) {
+    rows.push({
+      key: 'quote-reply',
+      label: 'timeline.quoteReply',
+      icon: ReplyIcon,
+      run: actions.onQuoteReply,
     });
   }
   if (actions.onReply) {

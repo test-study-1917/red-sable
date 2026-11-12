@@ -55,3 +55,54 @@ test('only offers copying the selection when there is one', () => {
   actions.onCopyText?.();
   expect(copyText).toHaveBeenCalledWith('hello');
 });
+
+test('captures only message body text and keeps the exact repeated occurrence', async () => {
+  const { selectedQuote } = await import('./timeline-item-selection');
+  const message = document.createElement('article');
+  message.innerHTML =
+    '<header>Alice</header><div class="formatted-body">hello <b>hello</b> world</div>';
+  document.body.append(message);
+  select(message.querySelector('b')?.firstChild as Node, 0, 5);
+  expect(selectedQuote(message)).toEqual({
+    body: 'hello hello world',
+    text: 'hello',
+    start: 6,
+    end: 11,
+  });
+  select(message.querySelector('header')?.firstChild as Node, 0, 5);
+  expect(selectedQuote(message)).toBeNull();
+});
+
+test('captures selections across formatting and line breaks', async () => {
+  const { selectedQuote } = await import('./timeline-item-selection');
+  const message = document.createElement('article');
+  message.innerHTML = '<div class="formatted-body"><p>你好 <b>world</b></p><p>next 😀</p></div>';
+  document.body.append(message);
+  const range = document.createRange();
+  range.setStart(message.querySelector('b')?.firstChild as Node, 0);
+  range.setEnd(message.querySelectorAll('p')[1].firstChild as Node, 7);
+  getSelection()?.addRange(range);
+  expect(selectedQuote(message)).toEqual({
+    body: '你好 world\nnext 😀',
+    text: 'world\nnext 😀',
+    start: 3,
+    end: 16,
+  });
+});
+
+test('does not expose hidden spoilers in a reply snapshot', async () => {
+  const { selectedQuote } = await import('./timeline-item-selection');
+  const message = document.createElement('article');
+  message.innerHTML =
+    '<div class="formatted-body"><span data-mx-spoiler>secret</span> public</div>';
+  document.body.append(message);
+  select(message.querySelector('.formatted-body')?.lastChild as Node, 1, 7);
+  expect(selectedQuote(message)).toEqual({
+    body: '[Spoiler] public',
+    text: 'public',
+    start: 10,
+    end: 16,
+  });
+  select(message.querySelector('[data-mx-spoiler]')?.firstChild as Node, 0, 6);
+  expect(selectedQuote(message)).toBeNull();
+});

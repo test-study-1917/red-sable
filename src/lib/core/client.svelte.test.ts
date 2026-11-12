@@ -663,68 +663,73 @@ test('sending a voice recording forwards its MIME type, duration, waveform and v
   });
 });
 
-test('sending an attachment forwards its rich caption, mentions, reply, and thread', async () => {
-  const fake = fakeTransport();
-  const sendAttachment = vi.fn<Transport['sendAttachment']>();
-  fake.transport.sendAttachment = sendAttachment;
-  const core = createCoreClient(() => fake.transport);
-  const file = new File(['pdf'], 'report.pdf', { type: 'application/pdf' });
+test.each([undefined, { body: 'Before 中文 😀 after', text: '中文 😀', start: 7, end: 12 }])(
+  'sending an attachment forwards its rich caption, mentions, reply, and thread (selection: %s)',
+  async (selectedQuote) => {
+    const fake = fakeTransport();
+    const sendAttachment = vi.fn<Transport['sendAttachment']>();
+    fake.transport.sendAttachment = sendAttachment;
+    const core = createCoreClient(() => fake.transport);
+    const file = new File(['pdf'], 'report.pdf', { type: 'application/pdf' });
 
-  await core.media.sendAttachment('!room:example.org', file, {
-    caption: 'hey Member One :wave:',
-    formattedCaption:
-      'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon>',
-    mentions: { user_ids: ['@one:example.org'], room: true },
-    inReplyTo: '$reply:example.org',
-    threadRoot: '$thread:example.org',
-    persona: {
-      id: 'hatchy',
-      display_name: 'Hatchy',
-      avatar_url: null,
-      pronouns: [],
-      color_on_light: null,
-      color_on_dark: null,
-      has_fallback: false,
-      biography: null,
-      banner_url: null,
-      is_animal: null,
-      has_animal: null,
-      animal_need: null,
-    },
-  });
+    await core.media.sendAttachment('!room:example.org', file, {
+      caption: 'hey Member One :wave:',
+      formattedCaption:
+        'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon>',
+      mentions: { user_ids: ['@one:example.org'], room: true },
+      inReplyTo: '$reply:example.org',
+      ...(selectedQuote ? { selectedQuote } : {}),
+      threadRoot: '$thread:example.org',
+      persona: {
+        id: 'hatchy',
+        display_name: 'Hatchy',
+        avatar_url: null,
+        pronouns: [],
+        color_on_light: null,
+        color_on_dark: null,
+        has_fallback: false,
+        biography: null,
+        banner_url: null,
+        is_animal: null,
+        has_animal: null,
+        animal_need: null,
+      },
+    });
 
-  expect(sendAttachment).toHaveBeenCalledWith({
-    roomId: '!room:example.org',
-    filename: 'report.pdf',
-    mime: 'application/pdf',
-    bytes: new TextEncoder().encode('pdf'),
-    caption: 'hey Member One :wave:',
-    formattedCaption:
-      'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon>',
-    mentions: ['@one:example.org'],
-    mentionsRoom: true,
-    inReplyTo: '$reply:example.org',
-    silentReply: false,
-    info: null,
-    thumbnail: null,
-    threadRoot: '$thread:example.org',
-    persona: {
-      id: 'hatchy',
-      display_name: 'Hatchy',
-      avatar_url: null,
-      pronouns: [],
-      color_on_light: null,
-      color_on_dark: null,
-      has_fallback: false,
-      biography: null,
-      banner_url: null,
-      is_animal: null,
-      has_animal: null,
-      animal_need: null,
-    },
-    spoiler: false,
-  });
-});
+    expect(sendAttachment).toHaveBeenCalledWith({
+      roomId: '!room:example.org',
+      filename: 'report.pdf',
+      mime: 'application/pdf',
+      bytes: new TextEncoder().encode('pdf'),
+      caption: 'hey Member One :wave:',
+      formattedCaption:
+        'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon>',
+      mentions: ['@one:example.org'],
+      mentionsRoom: true,
+      inReplyTo: '$reply:example.org',
+      ...(selectedQuote ? { selectedQuote } : {}),
+      silentReply: false,
+      info: null,
+      thumbnail: null,
+      threadRoot: '$thread:example.org',
+      persona: {
+        id: 'hatchy',
+        display_name: 'Hatchy',
+        avatar_url: null,
+        pronouns: [],
+        color_on_light: null,
+        color_on_dark: null,
+        has_fallback: false,
+        biography: null,
+        banner_url: null,
+        is_animal: null,
+        has_animal: null,
+        animal_need: null,
+      },
+      spoiler: false,
+    });
+  }
+);
 
 test.each(['attachment', 'gallery'] as const)(
   'sending a video %s separates its thumbnail from metadata',
@@ -822,54 +827,59 @@ test('an attachment is not uploaded when the homeserver cannot schedule it', asy
   expect(fake.called.map((call) => call.method)).not.toContain('messages.schedule_attachment');
 });
 
-test('sending a gallery forwards shared metadata and every attachment', async () => {
-  const persona = {
-    id: 'kris',
-    display_name: 'Kris',
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    has_fallback: false,
-    biography: null,
-    banner_url: null,
-    is_animal: null,
-    has_animal: null,
-    animal_need: null,
-  };
-  const fake = fakeTransport();
-  const sendGallery = vi.fn<Transport['sendGallery']>();
-  fake.transport.sendGallery = sendGallery;
-  const core = createCoreClient(() => fake.transport);
-  const first = new File(['one'], 'one.png', { type: 'image/png' });
-  const second = new File(['two'], 'two.pdf', { type: 'application/pdf' });
+test.each([undefined, { body: 'Before 中文 😀 after', text: '中文 😀', start: 7, end: 12 }])(
+  'sending a gallery forwards shared metadata and every attachment (selection: %s)',
+  async (selectedQuote) => {
+    const persona = {
+      id: 'kris',
+      display_name: 'Kris',
+      avatar_url: null,
+      pronouns: [],
+      color_on_light: null,
+      color_on_dark: null,
+      has_fallback: false,
+      biography: null,
+      banner_url: null,
+      is_animal: null,
+      has_animal: null,
+      animal_need: null,
+    };
+    const fake = fakeTransport();
+    const sendGallery = vi.fn<Transport['sendGallery']>();
+    fake.transport.sendGallery = sendGallery;
+    const core = createCoreClient(() => fake.transport);
+    const first = new File(['one'], 'one.png', { type: 'image/png' });
+    const second = new File(['two'], 'two.pdf', { type: 'application/pdf' });
 
-  await core.media.sendGallery('!room:example.org', [first, second], {
-    caption: 'Weekend',
-    formattedCaption: '<strong>Weekend</strong>',
-    mentions: { user_ids: ['@one:example.org'], room: true },
-    inReplyTo: '$reply',
-    threadRoot: '$thread',
-    persona,
-    spoilers: [true],
-  });
+    await core.media.sendGallery('!room:example.org', [first, second], {
+      caption: 'Weekend',
+      formattedCaption: '<strong>Weekend</strong>',
+      mentions: { user_ids: ['@one:example.org'], room: true },
+      inReplyTo: '$reply',
+      ...(selectedQuote ? { selectedQuote } : {}),
+      threadRoot: '$thread',
+      persona,
+      spoilers: [true],
+    });
 
-  expect(sendGallery).toHaveBeenCalledWith({
-    roomId: '!room:example.org',
-    attachments: [
-      expect.objectContaining({ filename: 'one.png', mime: 'image/png', spoiler: true }),
-      expect.objectContaining({ filename: 'two.pdf', mime: 'application/pdf', spoiler: false }),
-    ],
-    caption: 'Weekend',
-    formattedCaption: '<strong>Weekend</strong>',
-    mentions: ['@one:example.org'],
-    mentionsRoom: true,
-    inReplyTo: '$reply',
-    silentReply: false,
-    threadRoot: '$thread',
-    persona,
-  });
-});
+    expect(sendGallery).toHaveBeenCalledWith({
+      roomId: '!room:example.org',
+      attachments: [
+        expect.objectContaining({ filename: 'one.png', mime: 'image/png', spoiler: true }),
+        expect.objectContaining({ filename: 'two.pdf', mime: 'application/pdf', spoiler: false }),
+      ],
+      caption: 'Weekend',
+      formattedCaption: '<strong>Weekend</strong>',
+      mentions: ['@one:example.org'],
+      mentionsRoom: true,
+      inReplyTo: '$reply',
+      ...(selectedQuote ? { selectedQuote } : {}),
+      silentReply: false,
+      threadRoot: '$thread',
+      persona,
+    });
+  }
+);
 
 test('stopping clears the session and closes the transport', async () => {
   const fake = fakeTransport({ 'session.restore': session, 'session.list_accounts': [session] });

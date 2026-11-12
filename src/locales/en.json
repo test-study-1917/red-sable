@@ -919,6 +919,12 @@
     "flag": "Flags"
   },
   "timeline": {
+    "quoteMarkdown": "Quote as Markdown",
+    "quoteReply": "Reply to selection",
+    "expandQuote": "Expand quoted message",
+    "collapseQuote": "Collapse quoted message",
+    "jumpToQuote": "Jump to original",
+    "quoteChanged": "The quoted text is no longer in this message.",
     "backToConversation": "Back to conversation",
     "jumpToOriginal": "Jump to original message",
     "originalMessage": "Original message",

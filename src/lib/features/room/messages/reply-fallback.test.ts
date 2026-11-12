@@ -9,6 +9,7 @@ const t = (key: string, values?: Record<string, unknown>) =>
 
 function reply(body: string | null, fallback: ReplyView['fallback']): ReplyView {
   return {
+    selected_quote: null,
     event_id: '$x',
     sender: null,
     sender_mentioned: false,

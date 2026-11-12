@@ -1,3 +1,4 @@
+import { on } from 'svelte/events';
 import { onDestroy, type Snippet } from 'svelte';
 
 import type { MemberView, PerMessageProfileView, TimelineItemView } from '#src/generated/protocol';
@@ -30,7 +31,9 @@ import { usePinnedEvents } from './pinned-events.svelte.js';
 import type { TimelineEventIndex } from './timeline-event-index';
 import { TimelineItemProfiles } from './timeline-item-profiles.svelte';
 import { TimelineItemEngagement } from './timeline-item-engagement.svelte';
-import { selectedText, withSelectedText } from './timeline-item-selection';
+import { quoteFocus, revealQuote } from '../messages/quote-focus.svelte.js';
+import { markQuote } from '../messages/selected-quote.js';
+import { selectedQuote, selectedText, withSelectedText } from './timeline-item-selection';
 
 export interface TimelineItemProps extends MessageCallbacks {
   item: TimelineItemView;
@@ -97,6 +100,7 @@ export interface TimelineRowOptions extends MessageCallbacks {
 
 export class TimelineRow {
   element = $state<HTMLElement | null>(null);
+  #pointerHeld = false;
   #anchor = $state.raw<CursorAnchor | null>(null);
   actionsPinned = $state(false);
 
@@ -135,7 +139,9 @@ export class TimelineRow {
     );
     this.swipe = new MessageSwipe({
       enabled: () =>
-        this.actionable && (this.swipeOpensMembers || this.actions.onReply !== undefined),
+        this.actionable &&
+        !selectedText(this.element) &&
+        (this.swipeOpensMembers || this.actions.onReply !== undefined),
       canEdit: () =>
         this.actionable && !this.swipeOpensMembers && this.actions.onEdit !== undefined,
       onReply: () => {
@@ -156,16 +162,47 @@ export class TimelineRow {
         const { item } = this.#options();
         this.menu.set(item.id, false);
         const selected = selectedText(this.element);
+        const actions = this.selectionActions(selected);
         this.dialogs.open(item, {
           kind: 'sheet',
-          actions: () => withSelectedText(this.actions, selected),
+          actions: () => actions,
         });
       },
     });
     this.#doubleTap = new DoubleTap(() => {
-      if (!this.actionable || !preferences.doubleTapReact || !this.actions.onReact) return;
+      if (
+        !this.actionable ||
+        selectedText(this.element) ||
+        !preferences.doubleTapReact ||
+        !this.actions.onReact
+      )
+        return;
       hapticFeedback();
       this.actions.onReact(preferences.doubleTapReaction);
+    });
+
+    $effect(() => {
+      const target = quoteFocus.target;
+      const node = this.element;
+      const { roomId, item, preview } = this.#options();
+      if (
+        preview ||
+        !target ||
+        !node ||
+        target.roomId !== roomId ||
+        target.eventId !== item.event_id
+      )
+        return;
+      const body = node.querySelector<HTMLElement>('.message-main .formatted-body');
+      if (!body) return;
+      const clear = markQuote(body, target.quote);
+      if (!clear) {
+        toasts.info(i18n.t('timeline.quoteChanged'));
+        return;
+      }
+      const mark = body.querySelector('.quoted-passage-highlight');
+      if (mark) revealQuote(target, mark);
+      return clear;
     });
 
     $effect(() => {
@@ -231,10 +268,68 @@ export class TimelineRow {
     (this.actionable || this.canCancelSend) && (this.engagement.engaged || this.actionsPinned)
   );
 
+  selectionActions(text: string, quote = selectedQuote(this.element)): MessageActions {
+    const { item, onReply, onQuoteMarkdown } = this.#options();
+    const eventId = item.event_id;
+    return {
+      ...withSelectedText(this.actions, text),
+      onQuoteMarkdown:
+        quote && this.actions.onReply && onQuoteMarkdown
+          ? () => onQuoteMarkdown(quote.text)
+          : undefined,
+      onQuoteReply:
+        quote && this.actions.onReply && onReply && eventId
+          ? () =>
+              onReply(eventId, {
+                of: eventId,
+                body: quote.body,
+                html: null,
+                selectedQuote: quote,
+              })
+          : undefined,
+    };
+  }
+
   attach = (node: HTMLElement): (() => void) => {
     this.element = node;
     const detachSwipe = this.swipe.attach(node);
+    let timer: ReturnType<typeof setTimeout>;
+    const scheduleSelection = () => {
+      clearTimeout(timer);
+      if (!selectedQuote(node)) return;
+      // Touch selection handles settle before the shared selection menu opens.
+      timer = setTimeout(() => {
+        if (this.#pointerHeld) {
+          scheduleSelection();
+          return;
+        }
+        if (
+          !this.actionable ||
+          this.menu.id !== null ||
+          this.dialogs.isOpen(this.#options().item, 'sheet')
+        )
+          return;
+        const quote = selectedQuote(node);
+        const selection = getSelection();
+        if (!quote || !selection) return;
+        const rect = selection.getRangeAt(0).getBoundingClientRect();
+        this.menu.open(this.#options().item.id, { x: rect.left, y: rect.bottom }, () =>
+          this.selectionActions(quote.text, quote)
+        );
+      }, 450);
+    };
+    const detachSelection = on(document, 'selectionchange', scheduleSelection);
+    const release = () => {
+      this.#pointerHeld = false;
+      scheduleSelection();
+    };
+    const detachRelease = on(window, 'pointerup', release);
+    const detachCancel = on(window, 'pointercancel', release);
     return () => {
+      clearTimeout(timer);
+      detachSelection();
+      detachRelease();
+      detachCancel();
       detachSwipe();
       this.element = null;
     };
@@ -247,22 +342,38 @@ export class TimelineRow {
   };
 
   pointerDown = (event: PointerEvent): void => {
-    this.press.start(event);
+    this.#pointerHeld = true;
+    if (
+      event.pointerType !== 'mouse' &&
+      event.target instanceof Element &&
+      event.target.closest('.formatted-body')
+    )
+      this.press.cancel();
+    else this.press.start(event);
     this.#doubleTap.down(event);
     if (event.pointerType === 'mouse') this.engagement.hold();
   };
 
   pointerUp = (event: PointerEvent): void => {
+    this.#pointerHeld = false;
     this.press.end(event);
     this.#doubleTap.up(event);
   };
 
   pointerCancel = (event: PointerEvent): void => {
+    this.#pointerHeld = false;
     this.press.end(event);
     this.#doubleTap.cancel();
   };
 
   openContextMenu = (event: MouseEvent): void => {
+    // On touch, let the platform establish a text selection before offering quote actions.
+    if (
+      touchContextMenu(event) &&
+      event.target instanceof Element &&
+      event.target.closest('.formatted-body')
+    )
+      return;
     const { item } = this.#options();
     if (this.press.touch || touchContextMenu(event)) {
       event.preventDefault();
@@ -285,8 +396,9 @@ export class TimelineRow {
         ? event.target.closest<HTMLAnchorElement>('a[href]')?.href
         : null;
     const selected = selectedText(this.element);
+    const quote = selectedQuote(this.element);
     this.menu.open(item.id, { x: event.clientX, y: event.clientY }, () => ({
-      ...withSelectedText(this.actions, selected),
+      ...this.selectionActions(selected, quote),
       onCopyHref:
         link && this.actionable
           ? () => {

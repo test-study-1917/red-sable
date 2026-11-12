@@ -57,6 +57,7 @@
     sender_name: 'You',
     timestamp: baseTs + 45_000,
     in_reply_to: {
+      selected_quote: null,
       event_id: '$timeline-preview-incoming',
       sender: previewAlexId,
       sender_mentioned: false,

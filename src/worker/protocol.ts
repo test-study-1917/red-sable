@@ -8,11 +8,12 @@ export interface WasmDebugImage {
   debug_id: string;
 }
 
-export type AttachmentRequest = Required<Omit<Attachment, 'thumbnail'>> &
-  Pick<Attachment, 'thumbnail'>;
-export type GalleryRequest = Required<Omit<Gallery, 'attachments'>> & {
-  attachments: GalleryAttachment[];
-};
+export type AttachmentRequest = Required<Omit<Attachment, 'thumbnail' | 'selectedQuote'>> &
+  Pick<Attachment, 'thumbnail' | 'selectedQuote'>;
+export type GalleryRequest = Required<Omit<Gallery, 'attachments' | 'selectedQuote'>> &
+  Pick<Gallery, 'selectedQuote'> & {
+    attachments: GalleryAttachment[];
+  };
 
 export type WorkerRequest =
   | { id: number; call: { method: string; params: unknown } }

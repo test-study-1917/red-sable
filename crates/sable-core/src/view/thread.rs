@@ -56,6 +56,7 @@ pub(super) fn in_reply_to(content: &TimelineItemContent) -> Option<ReplyView> {
     let (body, fallback) = embedded.map_or((None, None), |event| embedded_reply_preview(event));
 
     Some(ReplyView {
+        selected_quote: None,
         event_id: reply.event_id.clone(),
         sender,
         sender_mentioned,

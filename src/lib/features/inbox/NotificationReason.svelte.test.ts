@@ -46,7 +46,9 @@ test('a plain notification gets no reason line', () => {
 });
 
 test('a reply recorded before replies were tracked is read from the loaded message', () => {
-  loaded.set('$old', { in_reply_to: { event_id: '$p' } as TimelineItemView['in_reply_to'] });
+  loaded.set('$old', {
+    in_reply_to: { selected_quote: null, event_id: '$p' } as TimelineItemView['in_reply_to'],
+  });
   const { container } = render(NotificationReason, {
     item: item({ event_id: '$old', highlight: true }),
   });

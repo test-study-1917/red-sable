@@ -25,6 +25,7 @@ export interface MessageCallbacks {
   ) => void;
   onMarkUnread?: (eventId: string) => void;
   onReply?: (eventId: string, version?: ReplyVersion) => void;
+  onQuoteMarkdown?: (text: string) => void;
   onCancelContext?: () => void;
   onEdit?: (eventId: string, body: string, html: string | null, mediaCaption?: boolean) => void;
   onDelete?: (eventId: string, reason: string | null) => void;

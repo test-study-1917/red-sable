@@ -808,3 +808,35 @@ describe('sync activity', () => {
     expect(setActive).toHaveBeenCalledExactlyOnceWith(true);
   });
 });
+
+test('carries selected reply metadata through the attachment boundary', async () => {
+  const core = fakeCore();
+  const sendAttachment = vi.fn<WorkerCore['sendAttachment']>(() => Promise.resolve());
+  core.sendAttachment = sendAttachment;
+  const boundary = createCoreWorkerBoundary(Promise.resolve(core));
+  const port = new FakePort();
+  boundary.connect(port);
+  const selectedQuote = { body: 'Hello world', text: 'world', start: 6, end: 11 };
+  await port.send({
+    id: 1,
+    attachment: {
+      roomId: '!room:example.org',
+      filename: 'photo.png',
+      mime: 'image/png',
+      bytes: new Uint8Array([1]),
+      caption: null,
+      formattedCaption: null,
+      mentions: [],
+      mentionsRoom: false,
+      silentReply: false,
+      info: null,
+      threadRoot: null,
+      persona: null,
+      spoiler: false,
+      inReplyTo: '$source',
+      selectedQuote,
+    },
+  });
+  const request = JSON.parse(sendAttachment.mock.calls[0]?.[0] ?? '{}');
+  expect(request).toMatchObject({ in_reply_to: '$source', selected_quote: selectedQuote });
+});

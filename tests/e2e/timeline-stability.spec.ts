@@ -1692,6 +1692,7 @@ test('a reply target can be jumped to again after scrolling away', async ({
       value: {
         ...timelineItem('mobile-answer', 'Answering something older'),
         in_reply_to: {
+          selected_quote: null,
           event_id: target,
           sender: '@bob:example.test',
           sender_mentioned: false,

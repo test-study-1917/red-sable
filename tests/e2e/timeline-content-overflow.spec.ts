@@ -79,6 +79,7 @@ const cases: Record<string, TimelineItemView> = {
   reply: {
     ...message('Reply'),
     in_reply_to: {
+      selected_quote: null,
       event_id: '$general-1:example.test',
       sender: '@alice:example.test',
       sender_name: long,

@@ -2847,6 +2847,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_quote_travels_with_the_standard_reply_relation() {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        client.send_queue().set_enabled(false).await;
+        let room_id = room_id!("!quoted:example.org");
+        let room = server.sync_joined_room(&client, room_id).await;
+        server.mock_room_state_encryption().plain().mount().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{room_id}/event/$original"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "m.room.message", "event_id": "$original", "sender": "@bob:example.org",
+                "origin_server_ts": 1, "room_id": room_id,
+                "content": {"msgtype": "m.text", "body": "Before selected passage after"},
+            })))
+            .mount(server.server())
+            .await;
+        let core = core(&server, client).await;
+        let quote = json!({ "body": "Before selected passage after", "text": "selected passage", "start": 7, "end": 23 });
+        let params = serde_json::from_value::<crate::api::messages::SendParams>(json!({
+            "room_id": room_id, "body": "My reply", "in_reply_to": "$original", "selected_quote": quote,
+        })).unwrap();
+        core.run(params).await.unwrap();
+        let (echoes, _updates) = room.send_queue().subscribe().await.unwrap();
+        let matrix_sdk::send_queue::LocalEchoContent::Event {
+            serialized_event, ..
+        } = &echoes[0].content
+        else {
+            panic!("expected a queued reply");
+        };
+        let content: Value = serialized_event.raw().0.deserialize_as_unchecked().unwrap();
+        assert_eq!(content["moe.sable.selected_quote"], quote);
+        assert_eq!(
+            content["m.relates_to"]["m.in_reply_to"]["event_id"],
+            "$original"
+        );
+    }
+
+    #[tokio::test]
     async fn sending_previews_validates_the_whitelist_and_honors_optout() {
         for opt_out in [false, true] {
             let server = MatrixMockServer::new().await;

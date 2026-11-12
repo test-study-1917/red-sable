@@ -374,6 +374,7 @@ mod tests {
 
     fn reply_to(event_id: &EventId, sender: Option<&str>, body: Option<&str>) -> ReplyView {
         ReplyView {
+            selected_quote: None,
             event_id: event_id.to_owned(),
             sender: sender.and_then(|sender| OwnedUserId::try_from(sender).ok()),
             sender_mentioned: false,

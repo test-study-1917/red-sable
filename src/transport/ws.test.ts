@@ -303,3 +303,25 @@ test('refreshes the server session during active RPC use and returns to login on
   });
   transport.close();
 });
+
+test.each(['attachment', 'gallery'] as const)(
+  'retains a selected reply in the server %s header',
+  async (kind) => {
+    const { transport } = await openTransport();
+    const selectedQuote = { body: 'Before 中文 😀 after', text: '中文 😀', start: 7, end: 12 };
+    const outgoing = { roomId: '!room:example.org', inReplyTo: '$original', selectedQuote };
+    const attachment = { filename: 'a.pdf', mime: 'application/pdf', bytes: new Uint8Array([1]) };
+    if (kind === 'attachment') await transport.sendAttachment({ ...outgoing, ...attachment });
+    else await transport.sendGallery({ ...outgoing, attachments: [attachment, attachment] });
+    expect(fetch).toHaveBeenLastCalledWith(
+      expect.stringContaining(kind === 'attachment' ? '/send-attachment' : '/send-gallery'),
+      expect.objectContaining({ method: 'POST' })
+    );
+    const options = vi.mocked(fetch).mock.lastCall?.[1];
+    const encoded = new Headers(options?.headers).get('x-sable-request');
+    if (!encoded) throw new Error('Missing attachment metadata');
+    const request = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    expect(request).toMatchObject({ in_reply_to: '$original', selected_quote: selectedQuote });
+    transport.close();
+  }
+);

@@ -35,6 +35,10 @@
 
   let composer = $state<RoomComposer>();
 
+  export function insertQuote(text: string): void {
+    composer?.insertQuote(text);
+  }
+
   export function insertMention(userId: string, name: string): void {
     composer?.insertMention(userId, name);
   }

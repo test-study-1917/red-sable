@@ -59,6 +59,7 @@
     sender_name: 'Sam',
     timestamp: message.timestamp,
     in_reply_to: {
+      selected_quote: null,
       event_id: '$setup-preview',
       sender: '@alex:preview.invalid',
       sender_mentioned: false,

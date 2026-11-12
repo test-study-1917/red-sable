@@ -99,6 +99,7 @@ test('ignores a thread reply, a plain reply and a state change', () => {
   const quoted = item({
     id: 'quoted',
     in_reply_to: {
+      selected_quote: null,
       event_id: '$root',
       sender: null,
       sender_mentioned: false,
