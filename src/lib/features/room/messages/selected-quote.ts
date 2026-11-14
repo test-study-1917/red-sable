@@ -26,6 +26,9 @@ export function quoteDocument(root: Node): { body: string; parts: TextPart[] } {
       return;
     }
     if (node instanceof Element) {
+      // Code headers are client controls, not source text. Their labels change
+      // with locale, copying and expansion, including after virtualised remounts.
+      if (node.matches('.code-head')) return;
       if (node.matches('[data-mx-spoiler]:not([aria-pressed="false"])')) {
         append('[Spoiler]');
         return;
@@ -47,6 +50,8 @@ export function quoteDocument(root: Node): { body: string; parts: TextPart[] } {
     node.childNodes.forEach(visit);
   };
   root.childNodes.forEach(visit);
+  // The recursive visitor mutates this flag through append() and lineBreak().
+  // oxlint-disable-next-line typescript/no-unnecessary-condition
   return { body: trailingBlockBreak ? body.slice(0, -1) : body, parts };
 }
 

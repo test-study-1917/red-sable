@@ -41,11 +41,9 @@ for (const richTextComposer of [true, false]) {
     core,
     installRoomCore,
   }) => {
-    await page.addInitScript(
-      (richTextComposer) =>
-        localStorage.setItem('sable-preferences', JSON.stringify({ richTextComposer })),
-      richTextComposer
-    );
+    await page.addInitScript((richTextComposer) => {
+      localStorage.setItem('sable-preferences', JSON.stringify({ richTextComposer }));
+    }, richTextComposer);
     await installRoomCore('ready');
     await app.openRoom('!room:example.test');
     await core.emitTimelineDiff(await core.subscription(), [
@@ -318,6 +316,62 @@ test('touch: message text is selectable and both quote actions fit the selection
   await page.screenshot({ path: 'test-results/selected-quote-mobile-menu.png' });
 });
 
+test('touch: repeated code quotes exclude controls and survive a collapsed remount', async ({
+  page,
+  app,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await app.openRoom('!room:example.test');
+  const code = Array.from({ length: 16 }, (_, index) => `line ${index}`).join('\n');
+  const body = `${code}\n${code}`;
+  const source = timelineItem('code-source', body);
+  if (source.content.kind !== 'message') throw new Error('expected a text message');
+  source.content.html = `<pre><code>${code}</code></pre><pre><code>${code}</code></pre>`;
+  await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [source] }]);
+  const sourceRow = page.locator('[data-item-id="code-source"]');
+  await sourceRow.locator('[data-code-toggle]').nth(1).click();
+  await selectPassage(sourceRow.locator('pre code').nth(1), 'line 0');
+  await page.getByRole('menuitem', { name: en.timeline.quoteReply, exact: true }).click();
+  await app.composer.fill('Reply to the second code block');
+  await app.sendMessage.click();
+  const selected_quote = { body, text: 'line 0', start: code.length + 1, end: code.length + 7 };
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.__e2eCalls.findLast((call) => call.method === 'messages.send')?.params
+      )
+    )
+    .toMatchObject({ in_reply_to: source.event_id, selected_quote });
+
+  await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [] }]);
+  await expect(sourceRow).toHaveCount(0);
+  const reply = {
+    ...timelineItem('code-reply', 'Reply to the second code block'),
+    in_reply_to: {
+      event_id: source.event_id as string,
+      sender: source.sender,
+      sender_name: 'Alice',
+      sender_mentioned: false,
+      body,
+      fallback: null,
+      selected_quote,
+    },
+  };
+  await core.emitTimelineDiff(await core.subscription(), [
+    { op: 'reset', values: [source, reply] },
+  ]);
+  await expect(sourceRow.locator('.code-block[data-collapsed]')).toHaveCount(2);
+  const preview = page.locator('[data-item-id="code-reply"] .selected-reply');
+  await preview.getByRole('button', { name: en.timeline.expandQuote, exact: true }).click();
+  await expect(preview.locator('.quoted-source')).toHaveText(body);
+  await preview.locator('.quote-summary').click();
+  await expect(sourceRow.locator('pre code').nth(0).locator('mark')).toHaveCount(0);
+  await expect(sourceRow.locator('pre code').nth(1).locator('mark')).toHaveText('line 0');
+  await expect(sourceRow.locator('.code-head mark')).toHaveCount(0);
+});
+
 for (const quoteIndex of [10, 112]) {
   test(`a long source message reveals its quoted passage in the preview and timeline (${quoteIndex})`, async ({
     page,
@@ -377,7 +431,9 @@ for (const replyPreviewStyle of ['connected', 'compact', 'expanded'] as const) {
     }) => {
       await page.setViewportSize({ width: isMobile ? 390 : 1280, height: 900 });
       await page.addInitScript(
-        (settings) => localStorage.setItem('sable-preferences', JSON.stringify(settings)),
+        (settings) => {
+          localStorage.setItem('sable-preferences', JSON.stringify(settings));
+        },
         {
           replyPreviewStyle,
           layout,

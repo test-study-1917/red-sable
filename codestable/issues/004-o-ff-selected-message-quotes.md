@@ -80,3 +80,11 @@ created: 2026-11-12
 - `NODE_OPTIONS=--max-old-space-size=4096 pnpm check` 通过，Svelte 无错误、无警告；相关 ESLint 与格式检查通过，新增计时模块及其测试的 type-aware Oxlint 通过。对既有时间线／浏览器测试文件扩展 type-aware 检查时，仍有未改动行的既有诊断，本次未扩展处理范围。
 - 本机浏览器缺少的 `libnspr4`、`libnss3`、`libasound2t64` 仅下载并解压至 `/tmp/red-sable-browser-deps/root`；浏览器测试需设置 `LD_LIBRARY_PATH=/tmp/red-sable-browser-deps/root/usr/lib/x86_64-linux-gnu`。未修改系统安装。
 - 截图：`test-results/quote-highlight-{full|fading}-{1280|412}.png`；日志：`/tmp/red-sable-quote-highlight-{tests|focus-tests|browser|check}.log`。
+
+## 合并前审核修复：代码块控件不进入引用快照（2026-11-13）
+
+- `selected-quote.ts` 的共享文本投射排除 `.code-head`，不再将代码语言标签、复制和展开／收起按钮文字保存为原文；重复代码片段的定位不受控件状态或语言变化影响。
+- 增补单元回归及 `selected-quotes.spec.ts` 浏览器场景：展开第二个重复代码块后选择并发送，断言快照只含正文，重新挂载恢复折叠后仍高亮第二处，展开引用不夹带控件文字。
+- 相关 3 个文件的 65 项单元／组件测试通过；桌面 Chromium 与 Android 模拟的新增回归均通过（含 warmup 共 3 项）。浏览器测试类型检查、格式检查通过；前轮未受影响的发送与媒体传输检查继续适用。
+- 无已毕业 Project Spec 变化；保留真机原生长按选区的验收边界。
+- 提交钩子同时修正同文件两处既有 void 回调写法；对递归闭包更新换行标记的 type-aware 误报作单行说明与抑制，保留真实尾随换行的既有测试和行为。

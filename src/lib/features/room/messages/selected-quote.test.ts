@@ -74,3 +74,23 @@ test('preserves literal trailing newlines in selected code', () => {
   expect(root.querySelector('mark')?.textContent).toBe(body);
   clear?.();
 });
+
+test('keeps repeated code quotes stable when code controls change or remount', () => {
+  const root = document.createElement('div');
+  const block = (label: string) =>
+    `<div class="code-block"><div class="code-head"><span>js</span><button>${label}</button></div><pre><code>same code</code></pre></div>`;
+  root.innerHTML = block('Copy Expand') + block('Copied Collapse');
+  const { body } = quoteDocument(root);
+  expect(body).toBe('same code\nsame code');
+  const quote = { body, text: 'same code', start: 10, end: 19 };
+
+  // A remounted row restores the collapsed controls (possibly in another locale).
+  root.innerHTML = block('复制 展开') + block('复制 展开');
+  expect(quoteDocument(root).body).toBe(body);
+  const clear = markQuote(root, quote);
+  expect(root.querySelectorAll('mark')).toHaveLength(1);
+  expect(root.querySelectorAll('code')[1].querySelector('mark')?.textContent).toBe('same code');
+  expect(root.querySelector('.code-head mark')).toBeNull();
+  clear?.();
+  expect(quoteDocument(root).body).toBe(body);
+});
