@@ -1088,6 +1088,9 @@
     {panels}
     room={resolvedRoom}
     roomId={resolvedRoomId}
+    {roomName}
+    historyItems={timeline.items}
+    onLoadHistory={requestHistory}
     {desktop}
     {memberLoader}
     {roomSession}

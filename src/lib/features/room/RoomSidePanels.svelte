@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { setContext } from 'svelte';
+  import { HISTORY_EXPORT_CONTEXT, type RoomHistoryExportContext } from './room-history-export-context.js';
   import type { MemberView, MembershipView, RoomListItemView } from '#src/generated/protocol';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
@@ -20,6 +22,9 @@
     panels: RoomPanels;
     room: RoomListItemView | undefined;
     roomId: string;
+    roomName: string;
+    historyItems: readonly unknown[];
+    onLoadHistory: (count: number) => Promise<boolean>;
     desktop: boolean;
     memberLoader: RoomMemberLoader;
     roomSession: RoomSession;
@@ -37,6 +42,9 @@
     panels,
     room,
     roomId,
+    roomName,
+    historyItems,
+    onLoadHistory,
     desktop,
     memberLoader,
     roomSession,
@@ -50,6 +58,14 @@
     onMemberProfile,
   }: Props = $props();
   const core = useCoreClient();
+  // The original RoomSearchPanel still handles all search queries.
+  setContext(HISTORY_EXPORT_CONTEXT, {
+    roomId: () => roomId,
+    roomName: () => roomName,
+    timelineItems: () => historyItems,
+    members: () => memberLoader.members,
+    loadOlder: (count: number) => onLoadHistory(count),
+  } satisfies RoomHistoryExportContext);
 
   let ownMember = $derived(
     memberLoader.members.find((member) => member.user_id === core.session?.user_id) ?? null

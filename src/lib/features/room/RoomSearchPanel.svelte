@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RoomHistoryExportTools from './RoomHistoryExportTools.svelte';
   import { onMount } from 'svelte';
   import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
@@ -58,6 +59,7 @@
       <SearchView panel initialQuery={query} />
     </div>
   </aside>
+  <RoomHistoryExportTools />
 {/snippet}
 
 {#if modal}
