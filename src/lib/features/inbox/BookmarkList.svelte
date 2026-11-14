@@ -1,18 +1,20 @@
 <script lang="ts">
   import type { BookmarkView } from '#src/generated/protocol';
   import { tick } from 'svelte';
-  import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
 
   import { i18n } from '#lib/i18n.js';
   import { formatMessageTimestamp } from '#lib/ui/date-time.js';
   import { useBookmarks } from '#lib/rooms/bookmarks.svelte.js';
-  import { roomLabel, useRoomList } from '#lib/rooms/room-list.svelte.js';
+  import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
-  import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { DisplayNames } from './display-names.svelte';
+  import { useEventItems } from '../room/messages/event-items.svelte.js';
+  import SenderName from '../room/members/SenderName.svelte';
+  import { senderDisplayColors } from '../room/members/members.js';
   import { filteredBookmarks, focusRowAt, formatCompactTimestamp } from './inbox';
   import InboxFeedRow from './InboxFeedRow.svelte';
   import InboxSectionHeader from './InboxSectionHeader.svelte';
@@ -21,7 +23,10 @@
   let { standalone = false }: { standalone?: boolean } = $props();
   const bookmarks = useBookmarks();
   const roomList = useRoomList();
-  const names = new DisplayNames(useCoreClient());
+  const core = useCoreClient();
+  const names = new DisplayNames(core);
+  const eventItems = useEventItems();
+  $effect(() => core.onProfileChanged(names.forget));
   const headingId = $props.id();
 
   let query = $state('');
@@ -36,7 +41,7 @@
 
   function roomName(roomId: string, fallback: string | null): string {
     const room = roomList.byId(roomId);
-    return room ? roomLabel(room) : (fallback ?? roomId);
+    return room ? room.display_name : (fallback ?? roomId);
   }
 
   async function toggle(bookmark: BookmarkView): Promise<boolean> {
@@ -76,20 +81,14 @@
   />
 
   {#if bookmarks.entries.length > 1}
-    <label
+    <div
       class="search"
       {@attach (node) => {
         if (standalone) node.querySelector('input')?.focus();
       }}
     >
-      <MagnifyingGlassIcon aria-hidden="true" />
-      <span class="screen-reader-only">{i18n.t('inbox.bookmarksSearchLabel')}</span>
-      <TextInput
-        type="search"
-        bind:value={query}
-        placeholder={i18n.t('inbox.bookmarksSearchLabel')}
-      />
-    </label>
+      <SearchField bind:value={query} label={i18n.t('inbox.bookmarksSearchLabel')} />
+    </div>
   {/if}
 
   {#if bookmarks.entries.length === 0}
@@ -100,14 +99,28 @@
     <ul class="feed">
       {#each visible as bookmark (bookmark.bookmark_id)}
         {@const name = roomName(bookmark.room_id, bookmark.room_name)}
-        {@const from = bookmark.sender ? names.name(bookmark.sender) : null}
+        {@const savedEvent = eventItems.get(bookmark.room_id, bookmark.event_id)}
+        {@const senderId = savedEvent?.sender ?? bookmark.sender}
+        {@const globalName = senderId ? names.name(senderId) : null}
+        {@const from = savedEvent?.sender_name ?? globalName}
+        {@const previewText =
+          savedEvent?.content.kind === 'message'
+            ? savedEvent.content.body
+            : (bookmark.body_preview ?? i18n.t('inbox.bookmarkPreviewEmpty'))}
         {@const timestampLabel = formatMessageTimestamp(bookmark.bookmarked_ts)}
         <InboxFeedRow roomId={bookmark.room_id} eventId={bookmark.event_id} {name} compact>
           <span class="head">
             <span class="name">{name}</span>
-            <span class="preview" title={bookmark.body_preview ?? ''}>
-              {#if from}<span class="sender">{from}：</span>{/if}{bookmark.body_preview ??
-                i18n.t('inbox.bookmarkPreviewEmpty')}
+            <span class="preview" title={previewText}>
+              {#if from && senderId}
+                <span class="sender">
+                  <SenderName
+                    displayName={from}
+                    colors={senderDisplayColors(senderId, names.profile(senderId))}
+                    compact
+                  />：
+                </span>
+              {/if}{previewText}
             </span>
             <Tooltip label={timestampLabel}>
               {#snippet trigger({ props })}
@@ -142,17 +155,7 @@
 
 <style>
   .search {
-    align-items: center;
-    display: flex;
-    gap: var(--space-300);
     margin-bottom: var(--space-300);
-  }
-
-  .search :global(svg) {
-    color: var(--surface-var-on-container);
-    flex: 0 0 auto;
-    height: var(--icon-size-small);
-    width: var(--icon-size-small);
   }
 
   .feed {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { copyText } from '#lib/platform/clipboard.js';
+  import { Copied } from '#lib/ui/copied.svelte.js';
   import type { ClassValue } from 'svelte/elements';
   import type { Snippet } from 'svelte';
   import type { PresenceView } from '#src/generated/protocol';
@@ -24,14 +24,14 @@
     profilePalette,
   } from './readable-color.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import Banner from './Banner.svelte';
 
   interface Props {
     displayName: string;
     userId: string;
     avatarUrl?: string | null;
-    avatarLabel?: string;
-    onAvatarClick?: (source: string, displayName: string) => void;
     onAvatarEdit?: () => void;
+    avatarEditLabel?: string;
     color: string;
     /** The owner's own choice, so only this one tints the card. `color` also
         covers the id-derived fallback. */
@@ -64,9 +64,8 @@
     displayName,
     userId,
     avatarUrl = null,
-    avatarLabel,
-    onAvatarClick,
     onAvatarEdit,
+    avatarEditLabel,
     color,
     pronouns,
     nameField,
@@ -109,24 +108,9 @@
       ink === BLACK ? (nameColorLight ?? nameColorDark) : (nameColorDark ?? nameColorLight);
     return palette && own ? nameColorOn(own, palette.ground) : null;
   });
-  let canOpenAvatar = $derived(Boolean(onAvatarEdit ?? (avatarUrl && onAvatarClick)));
-  function openAvatar(): void {
-    if (onAvatarEdit) onAvatarEdit();
-    else if (avatarUrl) onAvatarClick?.(avatarUrl, displayName);
-  }
-  function openBanner(): void {
-    if (banner) onAvatarClick?.(banner, displayName);
-  }
 
   const nameId = $props.id();
-  let copied = $state(false);
-  async function copyUserId(): Promise<void> {
-    await copyText(userId);
-    copied = true;
-    setTimeout(() => {
-      copied = false;
-    }, 2000);
-  }
+  const copied = new Copied();
   function resetStatusScroll(e: { currentTarget: HTMLElement }): void {
     const text = e.currentTarget.querySelector('.profile-card-status-text');
     if (text instanceof HTMLElement && !text.matches(':hover, :focus')) {
@@ -156,25 +140,11 @@
   data-inset-owner={variant === 'sheet' ? 'bottom' : undefined}
 >
   <div class={['profile-card-cover', { 'has-banner': banner }]} style:background={color}>
-    {#if banner && onAvatarClick}
-      <button
-        class="profile-card-banner-button"
-        type="button"
-        aria-label={i18n.t('timeline.profileBanner', { name: displayName })}
-        onclick={openBanner}
-      >
-        <MediaImage
-          class="profile-card-banner"
-          source={banner}
-          alt=""
-          width={720}
-          height={240}
-          original={preferences.autoplayGifs}
-        />
-      </button>
+    {#if banner}
+      <Banner source={banner} name={displayName} width={720} height={240} />
     {:else if cover}
       <MediaImage
-        class={banner ? 'profile-card-banner' : 'profile-card-banner profile-card-banner-fallback'}
+        class={banner ? 'banner-image' : 'banner-image banner-image-fallback'}
         source={cover}
         alt=""
         width={720}
@@ -185,35 +155,29 @@
   </div>
   <div class="profile-card-crest">
     <div class="profile-card-avatar-wrap">
-      {#if canOpenAvatar}
-        <button
-          class="profile-card-avatar-button"
-          type="button"
-          aria-label={avatarLabel ?? displayName}
-          onclick={openAvatar}
-        >
-          <Avatar
-            class="profile-card-avatar"
-            size="large"
-            src={avatarUrl}
-            name={displayName}
-            id={userId}
-            color={heroColor ? undefined : color}
-            original
-            decorative
-          />
-        </button>
-      {:else}
+      {#snippet avatar(openable: boolean)}
         <Avatar
           class="profile-card-avatar"
           size="large"
           src={avatarUrl}
+          {openable}
           name={displayName}
           id={userId}
           color={heroColor ? undefined : color}
           original
-          alt={displayName}
         />
+      {/snippet}
+      {#if onAvatarEdit}
+        <button
+          class="profile-card-avatar-edit-button"
+          type="button"
+          aria-label={avatarEditLabel}
+          onclick={onAvatarEdit}
+        >
+          {@render avatar(false)}
+        </button>
+      {:else}
+        {@render avatar(true)}
       {/if}
       {#if presence}<PresenceDot
           class="profile-card-presence"
@@ -263,16 +227,16 @@
         {#if pronouns}{@render pronouns()}{/if}
         {#if headerAction}{@render headerAction()}{/if}
       </div>
-      <Tooltip label={i18n.t(copied ? 'common.copied' : 'common.copy')}>
+      <Tooltip label={i18n.t(copied.value ? 'common.copied' : 'common.copy')}>
         {#snippet trigger({ props })}
           <button
             {...props}
             class="profile-card-user-id"
             type="button"
-            onclick={() => void copyUserId()}
+            onclick={() => void copied.copy(userId)}
           >
             {userId}
-            {#if copied}
+            {#if copied.value}
               <CheckIcon size="1em" aria-hidden="true" />
             {:else}
               <CopySimpleIcon size="1em" aria-hidden="true" />
@@ -318,6 +282,8 @@
 <style>
   @media (pointer: fine) {
     .profile-card {
+      border: var(--border-width) solid var(--profile-line);
+      border-radius: var(--radius);
       user-select: text;
     }
   }
@@ -345,9 +311,7 @@
       var(--surface-container)
     );
 
-    background: var(--profile-card-ground);
-    border: var(--border-width) solid var(--profile-line);
-    border-radius: var(--radius);
+    background: var(--profile-panel-ground);
     color: var(--profile-ink);
     overflow: hidden;
     position: relative;
@@ -407,17 +371,17 @@
   }
 
   /* Both dimensions, so the ratio MediaImage sets inline stops applying. */
-  .profile-card-cover :global(.profile-card-banner) {
+  .profile-card-cover :global(.banner-image) {
     height: 100%;
     width: 100%;
   }
 
-  .profile-card-cover :global(.profile-card-banner img) {
+  .profile-card-cover :global(.banner-image img) {
     object-fit: cover;
     object-position: center;
   }
 
-  .profile-card-cover :global(.profile-card-banner-fallback img) {
+  .profile-card-cover :global(.banner-image-fallback img) {
     filter: blur(1.5rem) saturate(1.2);
     transform: scale(1.4);
   }
@@ -455,27 +419,12 @@
     box-shadow: 0 0 0 0.25rem var(--profile-card-ground);
   }
 
-  .profile-card-banner-button {
-    background: none;
-    border: 0;
-    cursor: pointer;
-    display: block;
-    height: 100%;
-    padding: 0;
-    width: 100%;
-  }
-
-  .profile-card-banner-button:focus-visible {
-    outline: var(--focus-ring-width) solid var(--focus-ring);
-    outline-offset: calc(-1 * var(--focus-ring-width));
-  }
-
-  .profile-card-avatar-button {
+  .profile-card-avatar-edit-button {
     background: none;
     border: 0;
     border-radius: var(--radii-400);
     cursor: pointer;
-    display: inline-flex;
+    display: flex;
     flex: 0 0 var(--profile-avatar-size);
     height: var(--profile-avatar-size);
     padding: 0;
@@ -485,13 +434,13 @@
   :global(.profile-card-presence) {
     --presence-ring: var(--profile-card-ground);
 
-    bottom: var(--space-050);
+    inset-inline-end: 0;
+    bottom: 0;
     position: absolute;
-    right: 0;
     z-index: 1;
   }
 
-  .profile-card-avatar-button:focus-visible {
+  .profile-card-avatar-edit-button:focus-visible {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: var(--focus-ring-offset);
   }
@@ -503,7 +452,7 @@
     color: var(--surface-var-on-container);
     font-size: var(--font-size-label);
     line-height: var(--line-height-small);
-    margin-left: var(--space-100);
+    margin-inline-start: var(--space-100);
     margin-top: calc(-1 * var(--space-600));
     min-width: var(--space-700);
     padding: var(--space-200) var(--space-200);
@@ -518,7 +467,7 @@
     border-radius: var(--radius-pill) var(--radius-pill) 0 0;
     content: '';
     height: 0.4rem;
-    left: 0.25rem;
+    inset-inline-start: 0.25rem;
     position: absolute;
     top: calc(-1 * var(--space-150));
     width: 0.8rem;
@@ -531,7 +480,7 @@
     border-radius: var(--radius-pill);
     content: '';
     height: 8px;
-    left: -3px;
+    inset-inline-start: -3px;
     position: absolute;
     top: -12px;
     width: 8px;
@@ -567,7 +516,7 @@
 
   .profile-card-status-emoji {
     font-size: var(--font-size-heading);
-    margin-right: var(--space-150);
+    margin-inline-end: var(--space-150);
   }
 
   .profile-card-identity {
@@ -589,11 +538,10 @@
   }
 
   .profile-card.profile-card-inset-body .profile-card-body {
-    background: var(--profile-panel-ground);
-    border: var(--border-width) solid var(--profile-line);
     border-radius: var(--radius-inner);
     margin: 0 var(--space-200);
-    padding: var(--space-200) var(--space-300);
+    padding: var(--space-200);
+    padding-block: var(--space-300) var(--space-200);
   }
 
   .profile-card-heading {
@@ -601,11 +549,11 @@
     display: flex;
     flex-flow: row wrap;
     gap: var(--space-100) var(--space-200);
-    margin-bottom: var(--space-100);
+    margin-bottom: var(--space-050);
   }
 
   .profile-card-heading :global(.btn:last-child) {
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   .profile-card-name,
@@ -655,7 +603,7 @@
 
   @media (pointer: coarse) {
     .profile-card-user-id {
-      min-height: var(--control-height-large);
+      min-height: 48px;
     }
   }
 
@@ -672,9 +620,9 @@
     display: flex;
     flex-wrap: wrap;
     font-size: var(--font-size-small);
-    gap: var(--space-100) var(--space-300);
+    gap: var(--space-050) var(--space-300);
     line-height: var(--line-height-small);
-    margin-top: var(--space-150);
+    margin-top: var(--space-250);
   }
 
   .profile-card-meta :global(svg) {
@@ -685,12 +633,12 @@
   /* Same gutter as the identity text, and framed only with a bio to hold: a lone
      misc-data line in a panel reads as an empty box. */
   .profile-card-panel {
-    margin: 0 var(--space-400) var(--space-300);
+    margin: 0 var(--space-300) var(--space-100);
   }
 
   .profile-card.profile-card-inset-body .profile-card-panel {
     margin-inline: 0;
-    margin-top: var(--space-200);
+    margin-top: var(--space-300);
   }
 
   /* Padding sits on the rows so the divider between them can reach
@@ -779,7 +727,7 @@
   }
 
   .profile-card.profile-card-inset-body .profile-card-composer {
-    padding: var(--space-200) 0 0;
+    padding: var(--space-400) 0 0;
   }
 
   .profile-card-below {
@@ -787,7 +735,7 @@
   }
 
   .profile-card.profile-card-inset-body .profile-card-below {
-    padding: var(--space-200) 0 0;
+    padding: var(--space-300) 0 0;
   }
 
   .profile-card-footer.divided {
@@ -816,5 +764,22 @@
   /* A tinted card brings its own ground, so the hero picks the name colour. */
   .profile-card.tinted .profile-card-name {
     color: var(--profile-name-on-hero, var(--profile-ink));
+  }
+
+  @supports not (color: color-mix(in srgb, black, white)) {
+    .profile-card {
+      --profile-line: var(--surface-var-container-line);
+      --profile-panel-ground: var(--surface-container);
+    }
+
+    .profile-card.tinted {
+      --profile-chip-line: var(--surface-var-container-line);
+      --pill-primary-hover: var(--surface-container-hover);
+      --profile-line: var(--surface-var-container-line);
+    }
+
+    .profile-card.profile-card-inset-body .profile-card-panel.framed {
+      box-shadow: inset 0 1px 2px var(--profile-ink);
+    }
   }
 </style>

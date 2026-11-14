@@ -4,6 +4,7 @@
   import { on } from 'svelte/events';
 
   import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
+  import { Velocity } from '#lib/ui/velocity.js';
 
   import DialogFrame from './DialogFrame.svelte';
 
@@ -40,9 +41,7 @@
   }: Props = $props();
   let pointerId = $state<number | null>(null);
   let startY = 0;
-  let lastY = 0;
-  let lastTime = 0;
-  let velocityY = 0;
+  const velocityY = new Velocity();
   let dragOffset = $state(0);
   let dragDelta = 0;
   let expanded = $state(false);
@@ -92,25 +91,15 @@
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     pointerId = event.pointerId;
     startY = event.clientY;
-    lastY = event.clientY;
-    lastTime = event.timeStamp;
-    velocityY = 0;
+    velocityY.reset(event.clientY, event.timeStamp);
     dragOffset = 0;
     dragDelta = 0;
     suppressClick = false;
   }
 
-  function trackVelocity(event: PointerEvent): void {
-    const elapsed = event.timeStamp - lastTime;
-    if (elapsed <= 0) return;
-    velocityY = (event.clientY - lastY) / elapsed;
-    lastY = event.clientY;
-    lastTime = event.timeStamp;
-  }
-
   function drag(event: PointerEvent): void {
     if (pointerId !== event.pointerId) return;
-    trackVelocity(event);
+    velocityY.track(event.clientY, event.timeStamp);
     dragDelta = event.clientY - startY;
     dragOffset = Math.max(0, dragDelta);
     if (dragOffset <= 0 && !(canExpand() && dragDelta < 0)) return;
@@ -168,9 +157,7 @@
     let originX = 0;
     let originY = 0;
     let moved = 0;
-    let previousY = 0;
-    let previousTime = 0;
-    let velocity = 0;
+    const velocity = new Velocity();
 
     function start(event: TouchEvent): void {
       const touch = event.touches.item(0);
@@ -187,10 +174,8 @@
       if (!touch) return;
       originX = touch.clientX;
       originY = touch.clientY;
-      previousY = touch.clientY;
-      previousTime = event.timeStamp;
+      velocity.reset(touch.clientY, event.timeStamp);
       moved = 0;
-      velocity = 0;
     }
 
     function move(event: TouchEvent): void {
@@ -207,19 +192,16 @@
         suppressClick = true;
       }
       event.preventDefault();
-      const elapsed = event.timeStamp - previousTime;
-      if (elapsed > 0) velocity = (touch.clientY - previousY) / elapsed;
-      previousY = touch.clientY;
-      previousTime = event.timeStamp;
+      velocity.track(touch.clientY, event.timeStamp);
       moved = deltaY;
-      dragOffset = Math.max(0, deltaY);
+      dragOffset = expandable ? deltaY : Math.max(0, deltaY);
     }
 
     function end(): void {
       claimable = false;
       if (!touchDragging) return;
       touchDragging = false;
-      settle(moved, velocity);
+      settle(moved, velocity.value);
     }
 
     const offs = [
@@ -242,9 +224,9 @@
 
   function endDrag(event: PointerEvent): void {
     if (pointerId !== event.pointerId) return;
-    trackVelocity(event);
+    velocityY.track(event.clientY, event.timeStamp);
     pointerId = null;
-    settle(dragDelta, velocityY);
+    settle(dragDelta, velocityY.value);
   }
 
   function handleClick(event: MouseEvent): void {
@@ -267,7 +249,7 @@
     : dismissing
       ? 'sheet-dismissing'
       : 'sheet-settling'}
-  contentStyle={`${background ? `background: ${background};` : ''} ${fullHeight || expanded ? 'height: calc(100dvh - var(--safe-top) - var(--space-300) * 2);' : ''} transform: translateY(${dismissing ? '100%' : `${String(dragOffset)}px`})`}
+  contentStyle={`${background ? `background: ${background};` : ''} ${fullHeight || expanded ? 'height: calc(100dvh - var(--safe-top) - var(--keyboard-overlap) - var(--space-300) * 2); overflow: hidden;' : ''} transform: translateY(${dismissing ? '100%' : `${String(dragOffset)}px`})`}
   {onOpenChange}
   {onOpenAutoFocus}
 >
@@ -308,6 +290,7 @@
   :global(.bottom-sheet-grip) {
     display: grid;
     height: var(--control-height-large);
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
     left: 50%;
     place-items: center;
     position: absolute;

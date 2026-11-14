@@ -10,9 +10,9 @@
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import ThreadList from './conversation/ThreadList.svelte';
-  import type { MediaItem } from './media/media-viewer-types.js';
   import RoomAttachments from './media/RoomAttachments.svelte';
   import MembersDrawer from './members/MembersDrawer.svelte';
+  import RoomNotificationsPanel from './RoomNotificationsPanel.svelte';
   import RoomSearchPanel from './RoomSearchPanel.svelte';
   import type { RoomPanels } from './room-panels.svelte.js';
   import type { RoomSession } from './room-session.svelte.js';
@@ -33,7 +33,6 @@
     onActiveWidgetChange?: (widgetId: string | null) => void;
     onOpenThread: (rootEventId: string) => void;
     onJump: (eventId: string) => void;
-    onOpenMedia: (items: MediaItem[], eventId: string) => void;
     onMatrixLink: (link: MatrixLink, anchor: HTMLAnchorElement) => void;
     onMemberProfile: (userId: string, anchor: HTMLElement) => void;
   }
@@ -53,7 +52,6 @@
     onActiveWidgetChange,
     onOpenThread,
     onJump,
-    onOpenMedia,
     onMatrixLink,
     onMemberProfile,
   }: Props = $props();
@@ -70,13 +68,11 @@
   let ownMember = $derived(
     memberLoader.members.find((member) => member.user_id === core.session?.user_id) ?? null
   );
+  let drawerMembers = $derived(memberLoader.roomId === roomId ? memberLoader.members : []);
+  let membersLoading = $derived(memberLoader.roomId !== roomId || memberLoader.loading);
 
   function loadMembership(membership: MembershipView): Promise<MemberView[]> {
     return core.rpc.members.list({ room_id: roomId, memberships: [membership] });
-  }
-
-  function closeMembers(): void {
-    panels.closeMembers(desktop);
   }
 
   function closeWidgets(): void {
@@ -122,13 +118,24 @@
   {/key}
 {/if}
 
+{#if panels.notificationsOpen}
+  {#key roomId}
+    <RoomNotificationsPanel
+      {roomId}
+      members={memberLoader.members}
+      modal={!desktop}
+      {onJump}
+      onClose={() => (panels.notificationsOpen = false)}
+    />
+  {/key}
+{/if}
+
 {#if panels.attachmentsOpen}
   <RoomAttachments
     {roomId}
     members={memberLoader.members}
     modal={!desktop}
     {onJump}
-    {onOpenMedia}
     {onMatrixLink}
     onClose={() => (panels.attachmentsOpen = false)}
   />
@@ -137,25 +144,25 @@
 {#if desktop}
   {#if panels.desktopMembersOpen && panels.threadRootId === null}
     <MembersDrawer
-      members={memberLoader.members}
-      loading={memberLoader.loading}
+      {roomId}
+      members={drawerMembers}
+      loading={membersLoading}
       powerTags={roomSession.powerTags}
       alwaysListedFrom={roomSession.alwaysListedFrom}
       {loadMembership}
-      onClose={closeMembers}
       {onMemberProfile}
     />
   {/if}
 {:else}
   <DialogFrame bind:open={panels.membersOpen} variant="drawer">
     <MembersDrawer
-      members={memberLoader.members}
-      loading={memberLoader.loading}
+      {roomId}
+      members={drawerMembers}
+      loading={membersLoading}
       modal
       powerTags={roomSession.powerTags}
       alwaysListedFrom={roomSession.alwaysListedFrom}
       {loadMembership}
-      onClose={closeMembers}
       {onMemberProfile}
     />
   </DialogFrame>

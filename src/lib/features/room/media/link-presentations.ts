@@ -3,12 +3,14 @@ import type { Component } from 'svelte';
 import type { UrlPreviewView } from '#src/generated/protocol';
 
 import { parseYoutubeLink } from './embeds/youtube';
+import PostLinkPreview from './PostLinkPreview.svelte';
 import YoutubeLinkPreview from './YoutubeLinkPreview.svelte';
 
 export interface LinkPresentationProps {
   url: string;
   preview: UrlPreviewView;
   mediaHidden: boolean;
+  tunnel: boolean;
 }
 
 type LinkPresentation = Component<LinkPresentationProps>;
@@ -19,6 +21,10 @@ interface LinkPresentationProvider {
 }
 
 const PROVIDERS: LinkPresentationProvider[] = [
+  {
+    matches: (_url, preview) => preview.post !== null,
+    component: PostLinkPreview,
+  },
   {
     matches: (url) => parseYoutubeLink(url) !== null,
     component: YoutubeLinkPreview,

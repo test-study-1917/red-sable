@@ -28,10 +28,12 @@ const timeline = Object.assign(baseCore.rpc.timeline, {
 
 import { mediaPreviewSettings } from '#lib/settings/media-previews.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { markdownToContent } from '#lib/model/model.js';
 
 import FormattedBody from './FormattedBody.svelte';
 import FormattedBodyHarness from './FormattedBodyHarness.test.svelte';
 import FormattedBodyMediaHarness from './FormattedBodyMediaHarness.test.svelte';
+import { mockStillFrames, STILL } from '#lib/test-support/still-frame.js';
 
 const user = userEvent.setup();
 const link = () => screen.getByRole('link');
@@ -93,13 +95,13 @@ test.each([
 });
 
 test.each([
-  ['\u2190', '@ezera'],
-  ['Ana', '@ezera'],
-  ['hello', '@ezera'],
-  ['https://matrix.to/#/@ezera:example.org', '@ezera'],
+  ['\u2190', '@casey'],
+  ['Ana', '@casey'],
+  ['hello', '@casey'],
+  ['https://matrix.to/#/@casey:example.org', '@casey'],
 ])('labels a user mention %s with the member name', async (label, expected) => {
   render(FormattedBody, {
-    props: { html: `<a href="https://matrix.to/#/@ezera:example.org">${label}</a>` },
+    props: { html: `<a href="https://matrix.to/#/@casey:example.org">${label}</a>` },
   });
   await tick();
 
@@ -109,13 +111,13 @@ test.each([
 test('keeps the author text on a user mention when asked to', async () => {
   render(FormattedBody, {
     props: {
-      html: '<a href="https://matrix.to/#/@ezera:example.org">@ezera \u2192</a>',
+      html: '<a href="https://matrix.to/#/@casey:example.org">@casey \u2192</a>',
       keepMentionText: true,
     },
   });
   await tick();
 
-  expect(screen.getByRole('link', { name: '@ezera \u2192' })).toHaveAttribute(
+  expect(screen.getByRole('link', { name: '@casey \u2192' })).toHaveAttribute(
     'data-matrix-link',
     'user'
   );
@@ -155,6 +157,16 @@ test('renders an @room mention as a chip', async () => {
   await tick();
 
   expect(screen.getByText('@room')).toHaveAttribute('data-mx-room-mention');
+});
+
+test('keeps the emoji span out of the copied text', async () => {
+  const { container } = render(FormattedBody, {
+    props: { html: 'nice <span data-emoji>👍</span>' },
+  });
+  await tick();
+
+  expect(screen.getByText('👍')).toHaveAttribute('data-emoji');
+  expect(container.querySelector('.formatted-body')?.textContent).toBe('nice 👍');
 });
 
 test('resolves a room permalink name through its via server', async () => {
@@ -220,6 +232,30 @@ test('applies Matrix colours and keeps spoilers hidden until asked', async () =>
   await user.click(spoiler);
   expect(spoiler.ariaPressed).toBe('false');
 });
+
+test.each(['click', 'keyboard'] as const)(
+  'a formatted spoiler reveals together by %s and leaves the next spoiler hidden',
+  async (input) => {
+    const { formatted_body: html } = markdownToContent(
+      '||this is a *huge* spoiler|| and ||another||',
+      []
+    );
+    render(FormattedBody, { html: html ?? '' });
+    await tick();
+
+    expect(document.querySelectorAll('[data-mx-spoiler]')).toHaveLength(2);
+    const spoiler = screen.getByRole('button', { name: 'this is a huge spoiler' });
+    expect(spoiler.ariaPressed).toBe('true');
+    if (input === 'click') await user.click(screen.getByText('huge'));
+    else {
+      spoiler.focus();
+      await user.keyboard('{Enter}');
+    }
+
+    expect(spoiler.ariaPressed).toBe('false');
+    expect(screen.getByRole('button', { name: 'another' }).ariaPressed).toBe('true');
+  }
+);
 
 test('inline image hiding is local and leaves custom emotes alone', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
@@ -362,10 +398,7 @@ test('defers an mxc emoticon source until its Blob URL is ready', async () => {
 async function paintedEmote(
   source: string
 ): Promise<{ image: HTMLImageElement; instance: RenderResult<typeof FormattedBody> }> {
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-    drawImage: vi.fn(),
-  } as unknown as CanvasRenderingContext2D);
-  vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/png;still');
+  mockStillFrames(URL.createObjectURL.bind(URL));
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
   const instance = render(FormattedBody, {
     props: { html: `<img src="${source}" alt="party" data-mx-emoticon="">` },
@@ -394,8 +427,9 @@ test('holds inline emotes still while the window is inactive', async () => {
 
   focused = false;
   window.dispatchEvent(new Event('blur'));
-  await tick();
-  expect(image.src).toBe('data:image/png;still');
+  await vi.waitFor(() => {
+    expect(image.src).toBe(STILL);
+  });
 
   focused = true;
   window.dispatchEvent(new Event('focus'));
@@ -410,7 +444,9 @@ test('an emote that arrives while the window is inactive loads still', async () 
 
   image.dispatchEvent(new Event('load'));
 
-  expect(image.src).toBe('data:image/png;still');
+  await vi.waitFor(() => {
+    expect(image.src).toBe(STILL);
+  });
 });
 
 test('renders maths in place of the sender fallback', async () => {
@@ -582,7 +618,7 @@ test('shows a room abbreviation definition in a tooltip on hover', async () => {
   );
 });
 
-test('names a custom emoji by its shortcode, not its alt text, on hover', async () => {
+test('names a custom emoji by its shortcode and describes it by its alt text on hover', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
   render(FormattedBody, {
     props: {
@@ -594,7 +630,24 @@ test('names a custom emoji by its shortcode, not its alt text, on hover', async 
   await user.hover(screen.getByRole('img', { name: '😈' }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  expect(document.querySelector('.tooltip')?.textContent.trim()).toBe(':pulexFoxPrideMonth:');
+  expect(document.querySelector('.emote-card-name')?.textContent).toBe(':pulexFoxPrideMonth:');
+  expect(document.querySelector('.emote-card-description')?.textContent).toBe('😈');
+});
+
+test('leaves out the description when an emoji alt text is just its shortcode', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
+  render(FormattedBody, {
+    props: {
+      html: '<img data-mx-emoticon src="mxc://example.org/emoji" alt=":wave:" title=":wave:" height="32">',
+    },
+  });
+  await tick();
+
+  await user.hover(screen.getByRole('img', { name: ':wave:' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(document.querySelector('.emote-card-name')?.textContent).toBe(':wave:');
+  expect(document.querySelector('.emote-card-description')).toBeNull();
 });
 
 test('shows the target of a link whose text differs from it on hover', async () => {
@@ -813,13 +866,13 @@ test.each([
   expect(document.querySelector('pre code')?.querySelector('span')).toBeNull();
 });
 
-test.each(['https://matrix.to/#/@ezera:example.org', 'matrix:u/ezera:example.org'])(
+test.each(['https://matrix.to/#/@casey:example.org', 'matrix:u/casey:example.org'])(
   'labels a user mention the same on %s',
   async (href) => {
     render(FormattedBody, { props: { html: `<a href="${href}">hello</a>` } });
     await tick();
 
-    expect(screen.getByRole('link', { name: '@ezera' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '@casey' })).toHaveAttribute(
       'data-matrix-link',
       'user'
     );

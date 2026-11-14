@@ -358,6 +358,28 @@ export const composerSchema = new Schema({
     },
   },
   marks: {
+    // Spoilers wrap other marks so formatting changes keep a single reveal target.
+    spoiler: {
+      attrs: { reason: { default: '' } },
+      parseDOM: [
+        {
+          tag: 'span[data-mx-spoiler]',
+          getAttrs: (dom) => ({ reason: dom.getAttribute('data-mx-spoiler') ?? '' }),
+        },
+      ],
+      toDOM: (mark) => ['span', { 'data-mx-spoiler': mark.attrs.reason as string }, 0],
+    },
+    link: {
+      attrs: { href: {} },
+      inclusive: false,
+      parseDOM: [{ tag: 'a[href]', getAttrs: (dom) => ({ href: dom.getAttribute('href') }) }],
+      toDOM: (mark) => {
+        const href = mark.attrs.href as string;
+        return parseMatrixLink(href)
+          ? ['a', { href, 'data-org.matrix.msc4550.link': '' }, 0]
+          : ['a', { href }, 0];
+      },
+    },
     strong: {
       parseDOM: [
         { tag: 'strong' },
@@ -379,7 +401,7 @@ export const composerSchema = new Schema({
     },
     code: {
       code: true,
-      excludes: 'strong em strike code underline sub sup color bg_color link',
+      excludes: 'code sub sup color bg_color',
       parseDOM: [{ tag: 'code' }],
       toDOM: () => ['code', 0],
     },
@@ -424,27 +446,6 @@ export const composerSchema = new Schema({
         },
       ],
       toDOM: (mark) => ['span', { 'data-mx-bg-color': mark.attrs.value as string }, 0],
-    },
-    spoiler: {
-      attrs: { reason: { default: '' } },
-      parseDOM: [
-        {
-          tag: 'span[data-mx-spoiler]',
-          getAttrs: (dom) => ({ reason: dom.getAttribute('data-mx-spoiler') ?? '' }),
-        },
-      ],
-      toDOM: (mark) => ['span', { 'data-mx-spoiler': mark.attrs.reason as string }, 0],
-    },
-    link: {
-      attrs: { href: {} },
-      inclusive: false,
-      parseDOM: [{ tag: 'a[href]', getAttrs: (dom) => ({ href: dom.getAttribute('href') }) }],
-      toDOM: (mark) => {
-        const href = mark.attrs.href as string;
-        return parseMatrixLink(href)
-          ? ['a', { href, 'data-org.matrix.msc4550.link': '' }, 0]
-          : ['a', { href }, 0];
-      },
     },
   },
 });

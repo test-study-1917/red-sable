@@ -1,14 +1,16 @@
 <script lang="ts">
   import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpLeftIcon';
   import PencilSimpleIcon from 'phosphor-svelte/lib/PencilSimpleIcon';
+  import UsersIcon from 'phosphor-svelte/lib/UsersIcon';
 
   interface Props {
     offset: number;
     armed: boolean;
     edit?: boolean;
+    members?: boolean;
   }
 
-  let { offset, armed, edit = false }: Props = $props();
+  let { offset, armed, edit = false, members = false }: Props = $props();
 </script>
 
 <div
@@ -19,6 +21,8 @@
 >
   {#if edit}
     <PencilSimpleIcon weight="bold" />
+  {:else if members}
+    <UsersIcon weight="bold" />
   {:else}
     <ReplyIcon weight="bold" />
   {/if}
@@ -34,6 +38,7 @@
     overflow: hidden;
     pointer-events: none;
     position: absolute;
+    /* stylelint-disable-next-line csstools/use-logical -- swipe gestures stay physical */
     right: 0;
     top: 0;
   }

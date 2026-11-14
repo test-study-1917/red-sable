@@ -27,7 +27,7 @@
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import TimelineItem from '#lib/features/room/timeline/TimelineItem.svelte';
   import { previewMessage } from '#lib/features/room/timeline/preview-message.js';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
   import ColorSetting from '#lib/ui/ColorSetting.svelte';
   import { hexColorOrEmpty } from '#lib/ui/hex-color.js';
   import { type SenderCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
@@ -174,11 +174,8 @@
     try {
       let avatar = draft.avatar;
       if (avatarFile) {
-        const upright = await uprightJpeg(avatarFile);
-        avatar = await core.media.uploadMedia(
-          upright.type || 'image/*',
-          new Uint8Array(await upright.arrayBuffer())
-        );
+        const { mime, bytes } = await uprightImageBytes(avatarFile);
+        avatar = await core.media.uploadMedia(mime, bytes);
       }
       const identityChanged = draft.name !== base.name || avatar !== base.avatar;
       const colorsChanged = draft.light !== base.light || draft.dark !== base.dark;
@@ -257,7 +254,12 @@
 </script>
 
 {#if tab === 'preview'}
-  <div class="preview-panel" role="tabpanel" id="profile-panel-preview">
+  <div
+    class="preview-panel"
+    role="tabpanel"
+    id="profile-panel-preview"
+    aria-labelledby="profile-tab-preview"
+  >
     <MentionProfileCard {userId} member={null} roomId="" profile={previewProfile} />
     <TimelineItem
       item={previewItem}
@@ -268,7 +270,12 @@
     />
   </div>
 {:else}
-  <div role="tabpanel" id="profile-panel-edit" aria-busy={loading}>
+  <div
+    role="tabpanel"
+    id="profile-panel-edit"
+    aria-labelledby="profile-tab-edit"
+    aria-busy={loading}
+  >
     <form
       class="profile-form"
       onsubmit={(event) => {

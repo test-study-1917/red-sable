@@ -19,6 +19,7 @@
   import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import PresenceDot from '#lib/ui/primitives/PresenceDot.svelte';
   import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { ownPresence } from '#lib/rooms/presence-override.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
   import ProfileCard from '#lib/ui/primitives/ProfileCard.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
@@ -28,6 +29,7 @@
   import SignOutWarningDialog from './SignOutWarningDialog.svelte';
   import '#lib/ui/primitives/nav-tab.css';
   import './sidebar-tools.css';
+  import QrLinkDialog from '../qr-login/QrLinkDialog.svelte';
 
   type Mode = 'mobile' | 'compact' | 'desktop';
 
@@ -42,6 +44,7 @@
   const signOut = new SignOutGuard(core);
   let switching = $state(false);
   let accountSwitching = $state(true);
+  let linkingDevice = $state(false);
   let logoutAccountId = $state<string | null>(null);
   let accountToLogout = $derived(
     core.accounts.find((account) => account.account_id === logoutAccountId) ?? null
@@ -53,7 +56,7 @@
     resolveUserStatus(activeProfile, presenceStore.get(core.session?.user_id ?? ''))
   );
   let avatarUrl = $derived(activeProfile?.avatar_url ?? null);
-  let ownPresence = $derived(preferences.sendPresence ? preferences.presence : null);
+  let presence = $derived(preferences.sendPresence ? ownPresence() : null);
 
   onMount(() => {
     void runtimeConfig().then((config) => {
@@ -92,6 +95,10 @@
     }
 
     void goto(resolve(`settings/${section}`), { shallow: true, state: { settings: { section } } });
+  }
+
+  function linkDevice(): void {
+    linkingDevice = true;
   }
 
   async function logoutAccount(accountId: string): Promise<void> {
@@ -133,11 +140,11 @@
 </script>
 
 {#snippet ownAvatar()}
-  <Avatar size="small" src={avatarUrl} name={displayName} alt={displayName} />
-  {#if ownPresence}
+  <Avatar size="small" src={avatarUrl} name={displayName} alt={displayName} refreshOnResume />
+  {#if presence}
     <PresenceDot
-      presence={ownPresence}
-      label={i18n.t(`presence.${ownPresence}`)}
+      {presence}
+      label={i18n.t(`presence.${presence}`)}
       class="account-presence"
       size="medium"
     />
@@ -174,6 +181,7 @@
             : 'desktop-tool nav-tab-bottom'}"
           aria-label={i18n.t('nav.switchAccount')}
         >
+          <span class="nav-tab-hit-area" aria-hidden="true"></span>
           {@render ownAvatar()}
         </button>
       {/snippet}
@@ -217,6 +225,7 @@
         {switching}
         onSwitch={switchAccount}
         onProfile={openProfile}
+        onLinkDevice={linkDevice}
         onLogoutAccount={requestLogout}
         onReauth={reauthenticate}
         onLogout={logout}
@@ -232,6 +241,8 @@
     trigger={profileTrigger}
   />
 {/if}
+
+<QrLinkDialog bind:open={linkingDevice} mode="grant" />
 
 <DialogFrame
   open={accountToLogout !== null}
@@ -274,9 +285,9 @@
   }
 
   :global(.quick-tool > .account-presence) {
+    inset-inline-end: -0.125rem;
     bottom: -0.125rem;
     position: absolute;
-    right: -0.125rem;
   }
 
   .logout-dialog {

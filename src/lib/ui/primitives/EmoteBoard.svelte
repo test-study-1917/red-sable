@@ -1,7 +1,14 @@
 <script lang="ts">
+  import { inlineKey } from '#lib/language.svelte.js';
+  import { clamp } from '#lib/clamp.js';
   import { MediaQuery } from 'svelte/reactivity';
   import { innerWidth } from 'svelte/reactivity/window';
-  import type { ImagePackView, ImageUsageView, PackImageView } from '#src/generated/protocol';
+  import type {
+    EmoteCell as Cell,
+    ImagePackView,
+    ImageUsageView,
+    PackImageView,
+  } from '#src/generated/protocol';
   import { useCoreClient } from '#lib/core/context.js';
   import GifGrid from '#lib/gif/GifGrid.svelte';
   import type { GifProviderSetting, GifResult, GifsConfig } from '#lib/gif/providers.js';
@@ -25,8 +32,9 @@
   import { tick, untrack } from 'svelte';
 
   import { emojiGroups, searchReactionEmoji, shortcodeFor } from '#lib/emoji/emoji.js';
-  import { readRecentReactions, rememberReaction } from '#lib/emoji/recents.svelte.js';
-  import { readRecent, rememberEmote } from '#lib/emoji/recent-packs.svelte.js';
+  import { RecentReactions } from '#lib/emoji/recents.svelte.js';
+  import { emoteRecents } from '#lib/model/model.js';
+  import { readRecentStickers, rememberSticker } from '#lib/emoji/recent-packs.svelte.js';
 
   interface Props {
     roomId: string;
@@ -36,10 +44,11 @@
     resizable?: boolean;
     /** Reactions can be plain unicode, so the board offers both on one surface. */
     unicode?: boolean;
+    unicodeOnly?: boolean;
     /** A reaction key cannot be a sticker. */
     stickers?: boolean;
     reactions?: boolean;
-    gifs?: { config: GifsConfig; providerSetting: GifProviderSetting } | null;
+    gifs?: { config: GifsConfig; serviceUrl: string; providerSetting: GifProviderSetting } | null;
     onPick: (image: PackImageView, usage: ImageUsageView, keepOpen: boolean) => void;
     onPickUnicode?: (emoji: string, keepOpen: boolean) => void;
     onPickGif?: (gif: GifResult) => void;
@@ -52,6 +61,7 @@
     variant = 'popover',
     resizable = false,
     unicode = false,
+    unicodeOnly = false,
     stickers = true,
     reactions = false,
     gifs = null,
@@ -60,8 +70,8 @@
     onPickGif,
   }: Props = $props();
   const core = useCoreClient();
+  const history = new RecentReactions(core);
 
-  type Cell = { emoji: string } | { image: PackImageView };
   type PickerRow =
     | { id: string; kind: 'lead' }
     | { id: string; kind: 'header'; label: string; pack: ImagePackView | null }
@@ -86,8 +96,7 @@
   let packs = $state.raw<ImagePackView[]>([]);
   let loading = $state(true);
   let failed = $state(false);
-  let recent = $derived(readRecent(tab === 'sticker' ? 'sticker' : 'emoticon'));
-  let recentReactions = $derived(uniqueReactions());
+  let recent = $derived(tab === 'sticker' ? readRecentStickers() : []);
   let preview = $state.raw<{ image: PackImageView; pack: ImagePackView } | null>(null);
   let activeCell = $state.raw<{ section: string; index: number }>({ section: '', index: 0 });
   let gridWidth = $state(0);
@@ -102,9 +111,18 @@
   let mounted = $state.raw({ start: 0, end: 0 });
   let pendingFocus: { section: string; index: number } | null = null;
   let searchFocused = $state(false);
-  let chosen = $state.raw({ key: '', row: 0, col: 0 });
+  let chosen = $state.raw<{ key: string; row: number; col: number; source?: string }>({
+    key: '',
+    row: 0,
+    col: 0,
+  });
 
   $effect(() => {
+    if (unicodeOnly) {
+      loading = false;
+      packs = [];
+      return;
+    }
     let cancelled = false;
     const accountId = core.session?.account_id ?? null;
     loading = true;
@@ -162,10 +180,6 @@
       .filter((section) => section.images.length > 0);
   });
 
-  let packOf = $derived(
-    new Map(sections.flatMap((section) => section.images.map((image) => [image, section.pack])))
-  );
-
   let searching = $derived(query.trim() !== '');
   /** Search is by emote, so matches arrive as one flat list across packs. */
   let matchedImages = $derived(
@@ -179,38 +193,25 @@
       : []
   );
 
-  let recentImages = $derived.by(() => {
-    if (query.trim() !== '') return [];
-    const all = sections.flatMap((section) => section.images);
-    return recent
-      .map(
-        (key) =>
-          all.find((image) => image.url === key) ?? all.find((image) => image.shortcode === key)
-      )
-      .filter((image): image is PackImageView => image !== undefined)
-      .slice(0, 16);
-  });
-
   let emojiTab = $derived(unicode && tab === 'emoticon');
+
+  let recents = $derived(
+    searching || gifTab
+      ? { images: [], cells: [] }
+      : emoteRecents({
+          recent,
+          frequent: history.current,
+          images: sections.flatMap((section) => section.images),
+          unicode: emojiTab,
+          reactions,
+        })
+  );
+  let recentImages = $derived(recents.images);
+  let frequentCells = $derived(recents.cells);
 
   let searchEmojis = $derived(
     emojiTab && searching ? searchReactionEmoji(query.trim(), 96).map((entry) => entry.emoji) : []
   );
-
-  let frequentCells = $derived.by((): Cell[] => {
-    if (searching || gifTab) return [];
-    const images = recentImages
-      .filter((image) => !emojiTab || !recentReactions.includes(image.url))
-      .map((image): Cell => ({ image }));
-    if (!emojiTab) return images;
-    const all = sections.flatMap((section) => section.images);
-    const recent = recentReactions.map((emoji): Cell => {
-      const image = all.find((candidate) => candidate.url === emoji);
-      return image ? { image } : { emoji };
-    });
-    const cells = reactions ? recent : recent.filter((cell) => !isUnresolvedImage(cell));
-    return [...cells, ...images];
-  });
 
   let groupSections = $derived(
     emojiTab && !searching
@@ -245,7 +246,7 @@
   );
   const emojiColumns = $derived(
     Math.max(
-      narrowSheet ? 6 : 8,
+      narrowSheet ? 6 : 7,
       Math.floor((emojiRowWidth + imageCell.gap) / (imageCell.width + imageCell.gap))
     )
   );
@@ -337,6 +338,14 @@
   let navIndex = $derived(new Map(navRows.map((row, index) => [row.id, index])));
   let boardKey = $derived(`${tab}:${query.trim()}`);
   let selection = $derived.by(() => {
+    if (chosen.key === boardKey && chosen.source !== undefined) {
+      for (const [row, items] of navRows.entries()) {
+        const col = rowCells(items).findIndex(
+          (cell) => (cell.image?.url ?? cell.emoji) === chosen.source
+        );
+        if (col >= 0) return { row, col };
+      }
+    }
     const row = chosen.key === boardKey ? Math.min(chosen.row, navRows.length - 1) : 0;
     const length = navRows[row] ? rowCells(navRows[row]).length : 0;
     return { row, col: chosen.key === boardKey ? Math.min(chosen.col, length - 1) : 0 };
@@ -437,14 +446,22 @@
       const style = getComputedStyle(list);
       // Measure the row width after space is reserved for the scrollbar.
       const measured = size?.inlineSize ?? Number.parseFloat(style.width);
-      if (Number.isFinite(measured)) gridWidth = measured;
+      // Zoom makes sizes jitter by a fraction of a pixel, and storing that jitter remeasures forever.
+      const settled = (a: number, b: number): boolean => Math.abs(a - b) < 0.5;
+      const lastWidth = untrack(() => gridWidth);
+      if (Number.isFinite(measured) && !settled(measured, lastWidth)) gridWidth = measured;
       const bounds = cell.getBoundingClientRect();
       // Match fractional cell sizes to flex wrapping.
       const width = bounds.width;
       const gap = Number.parseFloat(style.columnGap) || 0;
       const row = bounds.height + (Number.parseFloat(style.marginBottom) || 0);
       const last = untrack(() => imageMeasure);
-      if (last?.tab === measuredTab && last.width === width && last.gap === gap && last.row === row)
+      if (
+        last?.tab === measuredTab &&
+        settled(last.width, width) &&
+        settled(last.gap, gap) &&
+        settled(last.row, row)
+      )
         return;
       imageMeasure = { tab: measuredTab, width, gap, row };
     };
@@ -458,25 +475,36 @@
     return () => observer.disconnect();
   }
 
-  function isUnresolvedImage(cell: Cell): boolean {
-    return 'emoji' in cell && cell.emoji.startsWith('mxc://');
-  }
-
-  function uniqueReactions(): string[] {
-    return [...new Set(readRecentReactions())];
-  }
-
   function cellLabel(cell: Cell): string {
-    return 'image' in cell ? `:${cell.image.shortcode}:` : (shortcodeFor(cell.emoji) ?? cell.emoji);
+    return cell.image !== undefined
+      ? `:${cell.image.shortcode}:`
+      : (shortcodeFor(cell.emoji) ?? cell.emoji);
   }
 
   function pickCell(cell: Cell, keepOpen: boolean): void {
-    if ('image' in cell) {
+    if (cell.image !== undefined) {
       pick(cell.image, keepOpen);
       return;
     }
-    rememberReaction(cell.emoji);
+    keepPickFocus(keepOpen, cell.emoji);
+    if (!reactions) rememberEmoji(cell.emoji);
     onPickUnicode?.(cell.emoji, keepOpen);
+  }
+
+  function keepPickFocus(keepOpen: boolean, source: string): void {
+    if (!keepOpen) return;
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement)) return;
+    const board = focused.closest('.board');
+    const section = focused.closest<HTMLElement>('[data-section]')?.dataset.section;
+    void tick().then(() => {
+      const target = section
+        ? board?.querySelector<HTMLElement>(
+            `[data-section="${CSS.escape(section)}"] [data-source="${CSS.escape(source)}"]`
+          )
+        : focused;
+      target?.focus({ preventScroll: true });
+    });
   }
 
   function targetCell(key: string, from: number, last: number): number | null {
@@ -495,7 +523,7 @@
     count: number
   ): void {
     const from = activeCell.section === id ? activeCell.index : 0;
-    const target = targetCell(event.key, from, count - 1);
+    const target = targetCell(inlineKey(event.key), from, count - 1);
     if (target === null) return;
 
     event.preventDefault();
@@ -545,7 +573,7 @@
       if (event.key === 'Enter') submitQuery(event);
       return;
     }
-    if (moveSelection(event.key)) {
+    if (moveSelection(inlineKey(event.key))) {
       event.preventDefault();
       return;
     }
@@ -558,6 +586,9 @@
     const cell = showFreeText && chosen.key !== boardKey ? undefined : selectedCell();
     if (cell) {
       event.preventDefault();
+      if (event.shiftKey) {
+        chosen = { key: boardKey, ...selection, source: cell.image?.url ?? cell.emoji };
+      }
       pickCell(cell, event.shiftKey);
       return;
     }
@@ -578,13 +609,26 @@
   }
 
   function showPreview(image: PackImageView, pack: ImagePackView | null): void {
-    const owner = pack ?? packOf.get(image);
+    const owner =
+      pack ??
+      sections.find((section) => section.images.some((candidate) => candidate.url === image.url))
+        ?.pack;
     if (owner) preview = { image, pack: owner };
   }
 
   function pick(image: PackImageView, keepOpen: boolean): void {
-    rememberEmote(image.url, tab === 'sticker' ? 'sticker' : 'emoticon');
+    keepPickFocus(keepOpen, image.url);
+    if (!reactions) {
+      if (tab === 'sticker') rememberSticker(image.url);
+      else rememberEmoji(image.url);
+    }
     onPick(image, tab as ImageUsageView, keepOpen);
+  }
+
+  function rememberEmoji(key: string): void {
+    core.rpc.messages.rememberEmoji({ key }).catch((error: unknown) => {
+      console.warn('[sable emotes] the pick could not be remembered', error);
+    });
   }
 
   const MIN_BOARD_WIDTH = 250;
@@ -592,7 +636,7 @@
 
   function resizeBoard(width: number): void {
     writeBoardSize({
-      width: Math.max(MIN_BOARD_WIDTH, Math.min(maxBoardWidth, width)),
+      width: clamp(width, MIN_BOARD_WIDTH, maxBoardWidth),
       height: readBoardSize()?.height ?? 457,
     });
   }
@@ -669,7 +713,7 @@
       }}
       {@attach focusSearch}
     />
-    <span class="sr-only" role="status">{enterTarget}</span>
+    <span class="screen-reader-only" role="status">{enterTarget}</span>
     {#if !gifTab && sections.length > 0}
       <p class="pack-visibility">{i18n.t('composer.packMediaVisibility')}</p>
     {/if}
@@ -678,6 +722,7 @@
   {#if gifs && gifTab}
     <GifGrid
       config={gifs.config}
+      serviceUrl={gifs.serviceUrl}
       providerSetting={gifs.providerSetting}
       {query}
       onPick={(gif: GifResult) => {
@@ -759,7 +804,7 @@
                     >
                       {#each row.cells as cell, column (column)}
                         {@const index = row.start + column}
-                        {@const source = 'image' in cell ? cell.image.url : cell.emoji}
+                        {@const source = cell.image !== undefined ? cell.image.url : cell.emoji}
                         {@const label = cellLabel(cell)}
                         <Tooltip {label}>
                           {#snippet trigger({ props })}
@@ -768,6 +813,7 @@
                               type="button"
                               role="gridcell"
                               data-cell={index}
+                              data-source={source}
                               data-selected={isSelected(row.id, column) || undefined}
                               tabindex={tabStop(row.section, index, column) ? 0 : -1}
                               aria-label={label}
@@ -775,10 +821,10 @@
                                 pickCell(cell, event.shiftKey);
                               }}
                               onpointerenter={() => {
-                                if ('image' in cell) showPreview(cell.image, null);
+                                if (cell.image !== undefined) showPreview(cell.image, null);
                               }}
                               onfocus={() => {
-                                if ('image' in cell) showPreview(cell.image, null);
+                                if (cell.image !== undefined) showPreview(cell.image, null);
                               }}
                               {@attach focusWhenPending(row.section, index)}
                             >
@@ -802,7 +848,10 @@
                     </div>
                   </div>
                 {:else}
-                  <ul {@attach measureImageRow}>
+                  <ul
+                    style={`grid-template-columns: repeat(${String(imageColumns)}, var(--emote-cell))`}
+                    {@attach measureImageRow}
+                  >
                     {#each row.images as image, column (column)}
                       {@const imageLabel = `:${image.shortcode}:`}
                       <li>
@@ -844,7 +893,10 @@
         {/key}
       </div>
 
-      <nav class={['rail', { hidden: searching }]} aria-label={i18n.t('composer.packs')}>
+      <nav
+        class={['rail', 'scrollbar-hidden', { hidden: searching }]}
+        aria-label={i18n.t('composer.packs')}
+      >
         {#if frequentCells.length > 0}
           {@const frequentLabel = i18n.t('timeline.frequentlyUsed')}
           <Tooltip label={frequentLabel}>
@@ -998,14 +1050,13 @@
   /* Fixed, or a long pack name widens the rail and squeezes the grid. */
   .rail {
     align-items: center;
-    border-left: var(--border-width) solid var(--surface-container-line);
+    border-inline-start: var(--border-width) solid var(--surface-container-line);
     display: flex;
     flex: 0 0 3.25rem;
     flex-direction: column;
     gap: var(--space-200);
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: none;
   }
 
   .rail-divider {
@@ -1075,8 +1126,7 @@
   }
 
   .grids ul {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
     justify-content: center;
     list-style: none;
     margin: 0;
@@ -1156,15 +1206,6 @@
     display: none;
   }
 
-  .sr-only {
-    clip-path: inset(50%);
-    height: 1px;
-    overflow: hidden;
-    position: absolute;
-    white-space: nowrap;
-    width: 1px;
-  }
-
   .free-text {
     background: var(--surface-var-container);
     border: var(--border-width) solid var(--surface-var-container-line);
@@ -1173,13 +1214,13 @@
     cursor: pointer;
     font: inherit;
     font-size: var(--font-size-small);
-    margin-bottom: var(--space-300);
+    margin: var(--space-200);
     overflow: hidden;
     padding: var(--space-150) var(--space-200);
-    text-align: left;
+    text-align: start;
     text-overflow: ellipsis;
     white-space: nowrap;
-    width: 100%;
+    width: 98%;
   }
 
   .free-text:hover {
@@ -1223,6 +1264,7 @@
   .preview code {
     color: inherit;
     font-size: var(--font-size-subheading);
+    min-width: 0;
   }
 
   .preview :global(.preview-image) {
@@ -1235,6 +1277,7 @@
     object-fit: contain;
   }
 
+  .preview code,
   .preview-pack,
   .preview-hint {
     overflow: hidden;

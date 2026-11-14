@@ -21,6 +21,7 @@
   } from './inbox';
   import { InboxFeed } from './inbox-feed.svelte';
   import InboxFeedRow from './InboxFeedRow.svelte';
+  import NotificationReason from './NotificationReason.svelte';
   import MessagePreview from '#lib/features/room/messages/MessagePreview.svelte';
   import MentionProfile from '#lib/features/room/members/MentionProfile.svelte';
   import { MemberProfile } from '#lib/features/room/members/member-profile.svelte.js';
@@ -31,7 +32,6 @@
   import InboxSectionHeader from './InboxSectionHeader.svelte';
   import { markRoomUnread, markRoomsRead } from '#lib/features/sidebar/nav-rooms.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
 
@@ -56,16 +56,18 @@
   });
   const marking = new SvelteSet<string>();
   const readNow = new SvelteSet<string>();
-  const filters: readonly NotificationFilter[] = ['direct', 'mentions', 'all'];
+  const filters: readonly NotificationFilter[] = ['direct', 'mentions', 'threads', 'all'];
   const filterLabels: Record<NotificationFilter, string> = {
     all: 'inbox.filterAll',
     mentions: 'inbox.filterMentions',
     direct: 'inbox.filterDirect',
+    threads: 'inbox.filterThreads',
   };
   const emptyLabels: Record<NotificationFilter, string> = {
     all: 'inbox.notificationsEmptyAll',
     mentions: 'inbox.notificationsEmptyMentions',
     direct: 'inbox.notificationsEmptyDirect',
+    threads: 'inbox.notificationsEmptyThreads',
   };
   let section = $state<HTMLElement>();
   let heading = $state<HTMLElement>();
@@ -122,8 +124,7 @@
     const listed = new Set(unreadGroups.map((group) => group.roomId));
     markRoomsRead(
       unreadRooms.filter((room) => !listed.has(room.room_id)),
-      core.rpc.timeline,
-      readReceiptIsPrivate()
+      core.rpc.timeline
     );
     await Promise.all(
       unreadGroups.map(async (group) => {
@@ -195,10 +196,9 @@
       await core.rpc.timeline.markRead({
         room_id: roomId,
         event_id: null,
-        private_receipt: readReceiptIsPrivate(),
         thread_root: null,
         subscription: null,
-        fully_read: false,
+        fully_read: true,
       });
       return true;
     } catch (error) {
@@ -222,10 +222,9 @@
       await core.rpc.timeline.markRead({
         room_id: item.room_id,
         event_id: item.event_id,
-        private_receipt: readReceiptIsPrivate(),
         thread_root: null,
         subscription: null,
-        fully_read: false,
+        fully_read: true,
       });
       for (const candidate of covered) readNow.add(candidate.event_id);
       await tick();
@@ -326,6 +325,7 @@
           </span>
           {#snippet message()}
             {#each group.items as item, index (item.event_id)}
+              <NotificationReason {item} />
               <MessagePreview
                 timeline
                 roomId={group.roomId}

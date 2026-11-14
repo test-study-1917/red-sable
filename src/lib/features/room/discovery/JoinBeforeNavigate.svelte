@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { serverNameOf } from '#lib/matrix-id.js';
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { goto } from '$app/navigation';
   import { untrack } from 'svelte';
 
@@ -7,7 +9,9 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { joinRoom, knockRoom } from '#lib/core/api/rooms.js';
   import { i18n } from '#lib/i18n.js';
-  import { roomSectionPath, viaFor } from '#lib/rooms/permalink.js';
+  import { isCoreError } from '#src/transport';
+  import { bannedMessage } from '#lib/rooms/join-errors.js';
+  import { joinVia, roomSectionPath } from '#lib/rooms/permalink.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { childRouting } from '#lib/rooms/spaces.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
@@ -15,7 +19,7 @@
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import FormattedBody from '../messages/FormattedBody.svelte';
-  import { topicHtml } from '../topic-html';
+  import { topicToHtml } from '#lib/model/model.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
   import RoomIcon from '#lib/ui/primitives/RoomIcon.svelte';
   import UserIcon from 'phosphor-svelte/lib/UserIcon';
@@ -25,12 +29,11 @@
   import PanelHeaderButton from '#lib/ui/primitives/PanelHeaderButton.svelte';
   import BackIcon from 'phosphor-svelte/lib/CaretLeftIcon';
   import { backToRoomList } from '../room-navigation';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import DoorIcon from 'phosphor-svelte/lib/DoorIcon';
   import DoorOpenIcon from 'phosphor-svelte/lib/DoorOpenIcon';
   import SealQuestionIcon from 'phosphor-svelte/lib/SealQuestionIcon';
   import SealCheckIcon from 'phosphor-svelte/lib/SealCheckIcon';
-  import { MediaQuery } from 'svelte/reactivity';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
   interface Props {
@@ -44,7 +47,7 @@
 
   const core = useCoreClient();
   const roomList = useRoomList();
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
 
   let preview = $state<RoomPreviewView | null>(null);
   let failed = $state(false);
@@ -56,7 +59,7 @@
   const reasonId = $props.id();
 
   let title = $derived(preview?.name ?? roomId);
-  let localServer = $derived(core.session?.user_id.split(':').slice(1).join(':') ?? null);
+  let localServer = $derived(core.session ? serverNameOf(core.session.user_id) : null);
 
   $effect(() => {
     const address = roomId;
@@ -68,10 +71,7 @@
     core.rpc.rooms
       .preview({
         address,
-        via: viaFor(
-          address,
-          untrack(() => selectedVias)
-        ),
+        via: [...untrack(() => selectedVias)],
       })
       .then((result) => {
         if (active) preview = result;
@@ -91,7 +91,9 @@
      so it tries joining first and offers to knock only once that is refused. */
   let currentMembership = $derived(membership ?? preview?.state ?? 'left');
   let invited = $derived(currentMembership === 'invited');
-  let banned = $derived(currentMembership === 'banned');
+  let joinBanned = $state(false);
+  let banReason = $state<string | null>(null);
+  let banned = $derived(currentMembership === 'banned' || joinBanned);
   let mustKnock = $derived(preview?.join_rule === 'knock' && !invited);
   let restricted = $derived(
     preview?.join_rule === 'restricted' || preview?.join_rule === 'knock_restricted'
@@ -104,13 +106,24 @@
   let selectedVias = $derived(via.length > 0 ? via : parent.via);
   let listedKey = $derived(selectedVias.join(','));
 
+  let provenanceTooltip = $derived.by(() => {
+    const origin = preview?.via;
+    if (!origin || origin.type === 'client') return '';
+    return i18n.t(
+      origin.type === 'unknown'
+        ? 'join.uncertainProvenanceTooltip'
+        : localServer && origin.server === localServer
+          ? 'join.trustedProvenanceTooltip'
+          : 'join.untrustedProvenanceTooltip',
+      { server: origin.type === 'remote' ? origin.server : undefined }
+    );
+  });
+
   // The alias resolves on servers that have never seen the room id.
   let address = $derived(preview?.canonical_alias ?? roomId);
 
-  async function routingFor(): Promise<string[]> {
-    const known = viaFor(address, selectedVias);
-    if (known.length > 0 || parent.parentId === null) return known;
-    return core.rpc.rooms.viaServers({ room_id: parent.parentId });
+  function routingFor(): Promise<string[]> {
+    return joinVia(core, selectedVias, parent.parentId);
   }
 
   async function join(): Promise<void> {
@@ -124,7 +137,12 @@
       await goto(target, { replace: true });
     } catch (error) {
       console.warn('[sable room] join failed', error);
-      failedAction = 'join';
+      if (isCoreError(error, 'banned')) {
+        banReason = error.detail.reason;
+        joinBanned = true;
+      } else {
+        failedAction = 'join';
+      }
     } finally {
       busy = false;
     }
@@ -162,9 +180,7 @@
   }
 </script>
 
-<svelte:head>
-  <title>{preview?.name ?? i18n.t('a11y.loading')} - Sable</title>
-</svelte:head>
+<PageTitle title={preview?.name ?? i18n.t('a11y.loading')} />
 
 <div class="wrapper" data-inset-owner="top">
   {#if !appLayout.current}
@@ -175,7 +191,7 @@
           label={i18n.t('timeline.back')}
           onclick={backToRoomList}
         >
-          <BackIcon />
+          <BackIcon class="mirror-rtl" />
         </PanelHeaderButton>
       {/snippet}
     </PanelHeader>
@@ -256,7 +272,7 @@
         {/if}
         {#if preview?.topic}
           <div class="join-topic" {@attach scrollHint}>
-            <FormattedBody html={topicHtml(preview.topic)} />
+            <FormattedBody html={preview.topic_html ?? topicToHtml(preview.topic)} />
           </div>
         {/if}
         {#if failedAction}
@@ -276,7 +292,7 @@
         {/if}
         {#if banned}
           <p role="alert" style:color="var(--crit-main)">
-            {i18n.t('join.banned')}
+            {bannedMessage(banReason)}
           </p>
         {/if}
         {#if !failed && !banned}
@@ -310,18 +326,7 @@
         {/if}
 
         {#if preview && preview.via.type !== 'client'}
-          <Tooltip
-            align="center"
-            side="bottom"
-            label={i18n.t(
-              preview.via.type === 'unknown'
-                ? 'join.uncertainProvenanceTooltip'
-                : localServer && preview.via.server === localServer
-                  ? 'join.trustedProvenanceTooltip'
-                  : 'join.untrustedProvenanceTooltip',
-              { server: preview.via.type === 'remote' ? preview.via.server : undefined }
-            )}
-          >
+          <Tooltip align="center" side="bottom" label={provenanceTooltip}>
             {#snippet trigger({ props })}
               {#if preview && preview.via.type !== 'client'}
                 <div {...props} class="provenance">
@@ -372,7 +377,7 @@
     min-width: 0;
     padding: var(--space-700) var(--space-600);
 
-    @media (width <= 48rem) {
+    @media (--compact-layout) {
       background-image: linear-gradient(to top, var(--primary-container) 0%, transparent 30%);
     }
   }
@@ -429,7 +434,7 @@
     content: '';
     height: 100%;
     position: absolute;
-    transform: translateX(calc((var(--space-400) + 3.5px) / 2));
+    transform: translateX(calc((var(--space-400) + 3.5px) / 2 * var(--inline-sign)));
     width: 1px;
   }
 

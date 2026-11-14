@@ -12,36 +12,10 @@ import {
   type SearchPerson,
 } from './resolve-targets';
 import { resolveSearchQuery } from './search-query';
-import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { roomView } from '#lib/test-support/room-views.js';
 
 function room(overrides: Partial<RoomListItemView>): RoomListItemView {
-  return withCounts({
-    room_id: '!id:example.org',
-    canonical_alias: null,
-    name: null,
-    topic: null,
-    avatar_url: null,
-    is_direct: false,
-    direct_targets: [],
-    join_rule: 'invite',
-    tags: [],
-    state: 'joined',
-    encrypted: false,
-    is_tombstoned: false,
-    call_participants: [],
-    screen_sharers: [],
-    room_kind: 'text',
-    supports_knock: false,
-    supports_restricted: false,
-    supports_knock_restricted: false,
-    space_children: [],
-    unread: 0,
-    notifying: 0,
-    highlight: 0,
-    marked_unread: false,
-    latest_event: null,
-    ...overrides,
-  });
+  return roomView({ room_id: '!id:example.org', encrypted: false, ...overrides });
 }
 
 const rooms = searchRooms([
@@ -87,7 +61,7 @@ test('an unknown room resolves to nothing rather than the first room', () => {
 
 const senders: SearchPerson[] = [
   { user_id: '@ada:example.org', display_name: 'Ada Lovelace' },
-  { user_id: '@erwan:other.example', display_name: 'Erwan' },
+  { user_id: '@kris:other.example', display_name: 'Kris' },
 ];
 
 function resolveUserTarget(people: SearchPerson[], value: string): string | undefined {
@@ -184,14 +158,14 @@ test('a room outside every joined space has no parent space', () => {
 
 const directRooms = searchRooms([
   room({
-    room_id: '!dm-erwan:example.org',
+    room_id: '!dm-kris:example.org',
     is_direct: true,
-    direct_targets: ['@erwan:example.org'],
+    direct_targets: ['@kris:example.org'],
   }),
   room({
     room_id: '!group:example.org',
     is_direct: true,
-    direct_targets: ['@erwan:example.org', '@alice:example.org'],
+    direct_targets: ['@kris:example.org', '@alice:example.org'],
   }),
   room({
     room_id: '!dm-alice:example.org',
@@ -210,8 +184,8 @@ function resolveDirectRooms(value: string): string[] | undefined {
 }
 
 test('with: resolves a person to every direct room they are in', () => {
-  expect(resolveDirectRooms('@erwan:example.org')).toEqual([
-    '!dm-erwan:example.org',
+  expect(resolveDirectRooms('@kris:example.org')).toEqual([
+    '!dm-kris:example.org',
     '!group:example.org',
   ]);
   expect(resolveDirectRooms('alice')).toEqual(['!group:example.org', '!dm-alice:example.org']);

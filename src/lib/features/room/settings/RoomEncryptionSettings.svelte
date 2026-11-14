@@ -2,6 +2,7 @@
   import type { RoomPowerLevelsView, RoomListItemView } from '#src/generated/protocol';
 
   import { useCoreClient } from '#lib/core/context.js';
+  import { loadE2eePolicy } from '#lib/deployment/e2ee-policy.svelte.js';
   import { i18n } from '#lib/i18n.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
@@ -29,7 +30,11 @@
 
   let roomId = $derived(room?.room_id ?? null);
   let enabled = $derived(room?.encrypted === true);
-  let canEnable = $derived(canSendState(levels, ownPowerLevel, EVENT_TYPE));
+  const policy = loadE2eePolicy(core);
+  let canEnable = $derived(
+    canSendState(levels, ownPowerLevel, EVENT_TYPE) && !policy.current.forceDisabled
+  );
+  let unencryptedForMe = $derived(room?.encrypted === false && !canEnable);
 
   async function enable(): Promise<void> {
     const target = roomId;
@@ -51,10 +56,16 @@
 
 <SettingsRow
   title={i18n.t('common.endToEndEncryption')}
-  description={enabled ? i18n.t('room.encryptionOn') : i18n.t('room.encryptionOff')}
+  description={enabled
+    ? i18n.t('room.encryptionOn')
+    : unencryptedForMe
+      ? i18n.t('room.encryptionNotOn')
+      : i18n.t('room.encryptionOff')}
 >
   {#if enabled}
     <StatusBadge variant="success" label={i18n.t('room.encryptionEnabled')} />
+  {:else if unencryptedForMe}
+    <StatusBadge variant="warning" label={i18n.t('room.encryptionNotEnabled')} />
   {:else if canEnable}
     <Button
       size="small"

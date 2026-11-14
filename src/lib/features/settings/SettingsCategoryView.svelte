@@ -18,6 +18,7 @@
 </script>
 
 <AppPageShell
+  maxWidth="100%"
   title={i18n.t(category.name)}
   description={category.description ? i18n.t(category.description) : undefined}
   density="compact"
@@ -51,7 +52,6 @@
 
 <style>
   :global(.settings-scroll .app-page-shell.settings-category) {
-    max-width: none;
     overflow: visible;
   }
 
@@ -95,9 +95,14 @@
     bottom: 100%;
     content: '';
     height: var(--space-500);
-    left: 0;
+    inset-inline: 0;
     pointer-events: none;
     position: absolute;
-    right: 0;
+  }
+
+  @supports not (color: color-mix(in srgb, black, white)) {
+    .settings-preview-dock::before {
+      background: var(--surface-container);
+    }
   }
 </style>

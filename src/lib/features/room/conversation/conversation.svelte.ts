@@ -11,6 +11,7 @@ import type {
 
 import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
+import { embedServiceUrl } from '#lib/config/embed-service.js';
 import { runtimeConfig } from '#lib/config/runtime-config.js';
 import { t } from '#lib/i18n.js';
 import type { CoreClient, OutgoingMentions } from '#lib/core/client.svelte.js';
@@ -39,11 +40,21 @@ import {
 } from '#lib/features/composer/sed-edit.js';
 import { runSlash, SlashError } from '#lib/features/composer/slash-commands.js';
 import { knockPagePath } from '#lib/rooms/join-or-knock.js';
-import { gifFilename, proxiedGif, type GifResult } from '#lib/gif/providers.js';
+import {
+  gifFilename,
+  isAllowedGifMediaUrl,
+  isUploadedGifSource,
+  proxiedGif,
+  type GifResult,
+} from '#lib/gif/providers.js';
 import { replyPreviewBody, type ReplyVersion } from '#lib/features/room/messages/reply-preview.js';
 import { isMediaCaptionContent } from '#lib/features/room/messages/media-caption.js';
-import { previewableLinks } from '#lib/features/room/media/link-preview.js';
-import { previewSources, resolveUrlPreview } from '#lib/features/room/media/link-preview-cache.js';
+import { previewableLinks, previewWhitelistEntry } from '#lib/features/room/media/link-preview.js';
+import {
+  previewSources,
+  resolveUrlPreview,
+  usesTunnel,
+} from '#lib/features/room/media/link-preview-cache.js';
 import { projectPersona } from '#lib/personas/persona.js';
 import type { PersonaStore } from '#lib/personas/personas.svelte.js';
 import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
@@ -52,7 +63,7 @@ import { stateEventText } from '#lib/features/room/timeline/state-event-text.js'
 import { isMessageRow } from '#lib/features/room/timeline/timeline-format.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 
-const NO_MENTIONS: OutgoingMentions = { userIds: [], room: false };
+const NO_MENTIONS: OutgoingMentions = { user_ids: [], room: false };
 
 export type ConversationSendResult = { kind: 'gifSearch'; query: string };
 
@@ -63,7 +74,9 @@ export type ConversationDeps = {
   roomId: () => string;
   spaceIds?: (roomId: string) => readonly string[];
   encrypted?: () => boolean | null;
+  publicRoom?: () => boolean;
   beforeSend?: () => Promise<void>;
+  afterSend?: (roomId: string) => void;
   threadRoot?: string | null;
 };
 
@@ -86,8 +99,10 @@ export class Conversation {
   readonly #roomId: () => string;
   readonly #spaceIds: (roomId: string) => readonly string[];
   readonly #encrypted: () => boolean | null;
+  readonly #publicRoom: () => boolean;
   readonly #threadRoot: string | null;
   readonly #beforeSend: () => Promise<void>;
+  readonly #afterSend: (roomId: string) => void;
   /* eslint-disable-next-line svelte/prefer-svelte-reactivity */
   readonly #requestedDetails = new Set<string>();
 
@@ -98,7 +113,9 @@ export class Conversation {
     roomId,
     spaceIds = () => [],
     encrypted,
+    publicRoom,
     beforeSend = () => Promise.resolve(),
+    afterSend = () => {},
     threadRoot = null,
   }: ConversationDeps) {
     this.#core = core;
@@ -107,8 +124,10 @@ export class Conversation {
     this.#roomId = roomId;
     this.#spaceIds = spaceIds;
     this.#encrypted = encrypted ?? (() => null);
+    this.#publicRoom = publicRoom ?? (() => false);
     this.#threadRoot = threadRoot;
     this.#beforeSend = beforeSend;
+    this.#afterSend = afterSend;
     this.restored = readReply(this.#replyKey(), this.#accountId()) ?? null;
     this.#context = this.restored;
   }
@@ -146,15 +165,19 @@ export class Conversation {
     dismissed: readonly string[]
   ): Promise<{ previews: UrlPreviewView[]; suppressed: boolean }> {
     const sources = previewSources(this.#encrypted());
-    if (!sources.server && !sources.client) return { previews: [], suppressed: false };
+    const tunnel = usesTunnel(this.#encrypted(), this.#publicRoom());
     if (!html) return { previews: [], suppressed: false };
-    const links = previewableLinks(html, body);
+    const links = previewableLinks(html, body).filter((url) => body.includes(url));
     const wanted = links.filter((url) => !dismissed.includes(url));
     const previews = await Promise.all(
-      wanted.map((url) => resolveUrlPreview(this.#core.rpc.messages, url, sources))
+      wanted.map(
+        async (url) =>
+          (await resolveUrlPreview(this.#core.rpc.messages, url, sources, tunnel)) ??
+          previewWhitelistEntry(url)
+      )
     );
     return {
-      previews: previews.filter((preview) => preview !== null),
+      previews,
       suppressed: links.length > 0 && wanted.length === 0,
     };
   }
@@ -197,14 +220,15 @@ export class Conversation {
         edited?.event_id ?? (pending.eventId.startsWith('$') ? pending.eventId : null),
         body,
         {
-          transactionId: edited?.event_id ? null : edited?.transaction_id,
+          transaction_id: edited?.event_id ? null : edited?.transaction_id,
           formatted,
-          mentions,
+          mentions: [...mentions.user_ids],
+          mentions_room: mentions.room,
           kind: editedKind(edited),
-          mediaCaption: pending.mediaCaption,
-          threadRoot: this.#threadRoot,
+          media_caption: pending.mediaCaption,
+          thread_root: this.#threadRoot,
           persona: pending.persona ?? null,
-          forumTitle: this.forumTitle,
+          forum_title: this.forumTitle,
         }
       );
       this.forumTitle = '';
@@ -226,6 +250,7 @@ export class Conversation {
       formatted,
       developerTools: preferences.developerTools,
       rpc: this.#core.rpc,
+      e2eePolicy: () => this.#core.e2eePolicy(),
       persona: () => this.#personaFor(targetRoomId, '', null).persona,
     });
     if (outcome.kind === 'done') {
@@ -248,6 +273,7 @@ export class Conversation {
       return;
     }
 
+    await this.#personas.load();
     const untouched = outcome.body === body;
     const outgoing = this.#personaFor(
       targetRoomId,
@@ -263,18 +289,20 @@ export class Conversation {
       dismissed
     );
     await sendMessage(this.#core.rpc, targetRoomId, outgoing.body, {
-      inReplyTo: pending?.eventId ?? null,
-      threadRoot: this.#threadRoot,
+      in_reply_to: pending?.eventId ?? null,
+      thread_root: this.#threadRoot,
       formatted: outgoing.formatted,
-      mentions: untouched || outcome.verbatim === true ? mentions : NO_MENTIONS,
-      silentReply: pending?.silentReply ?? false,
+      mentions: [...(untouched || outcome.verbatim === true ? mentions.user_ids : [])],
+      mentions_room: untouched || outcome.verbatim === true ? mentions.room : false,
+      silent_reply: pending?.silentReply ?? false,
       kind: outcome.msgtype,
       persona: outgoing.persona,
-      linkPreviews,
-      noLinkPreviews: suppressed,
-      imageSourcePacks,
-      forumTitle: this.#threadRoot === null && !pending?.eventId ? this.forumTitle : null,
+      link_previews: linkPreviews,
+      no_link_previews: suppressed,
+      image_source_packs: imageSourcePacks,
+      forum_title: this.#threadRoot === null && !pending?.eventId ? this.forumTitle : null,
     });
+    this.#afterSend(targetRoomId);
     this.forumTitle = '';
     this.context = null;
   };
@@ -289,11 +317,12 @@ export class Conversation {
     await this.#beforeSend();
     const profile = this.#personaFor(targetRoomId, '', null).persona;
     await sendMessage(this.#core.rpc, targetRoomId, body, {
-      inReplyTo: pending?.eventId ?? null,
-      threadRoot: this.#threadRoot,
-      mentions: { userIds: [bot], room: false },
-      silentReply: pending?.silentReply ?? false,
-      botCommand: invocation,
+      in_reply_to: pending?.eventId ?? null,
+      thread_root: this.#threadRoot,
+      mentions: [bot],
+      mentions_room: false,
+      silent_reply: pending?.silentReply ?? false,
+      bot_command: invocation,
       persona: profile ? { ...profile, has_fallback: false } : null,
     });
     if (pending) this.context = null;
@@ -320,6 +349,7 @@ export class Conversation {
       threadRoot: this.#threadRoot,
       persona: outgoing.persona,
     });
+    this.#afterSend(targetRoomId);
   };
 
   readonly sendGallery = async (
@@ -343,6 +373,7 @@ export class Conversation {
       silentReply: reply?.silentReply ?? options.silentReply ?? false,
       threadRoot: this.#threadRoot,
     });
+    this.#afterSend(targetRoomId);
   };
 
   readonly sendSticker = async (
@@ -366,6 +397,20 @@ export class Conversation {
   };
 
   readonly sendGif = async (targetRoomId: string, gif: GifResult): Promise<void> => {
+    if (preferences.reuploadGifs && !isUploadedGifSource(gif.mediaUrl)) {
+      if (!isAllowedGifMediaUrl(gif.mediaUrl)) throw new Error('GIF is not from a known provider');
+      const service = (await runtimeConfig()).embeds.serviceUrl;
+      if (service === null) throw new Error('no embed service to fetch the GIF through');
+      const response = await fetch(embedServiceUrl(service, 'gifs/media', { url: gif.mediaUrl }));
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`);
+      const name = gifFilename(gif.title, gif.mimetype);
+      await this.sendAttachment(
+        targetRoomId,
+        new File([await response.blob()], name, { type: gif.mimetype })
+      );
+      return;
+    }
+
     await this.#beforeSend();
     const { gifs } = await runtimeConfig();
     const proxied = proxiedGif(gif, gifs.proxyUrl);
@@ -502,7 +547,7 @@ export class Conversation {
   };
 
   readonly setTyping = async (targetRoomId: string, typing: boolean): Promise<void> => {
-    if (!preferences.sendTypingNotifications) return;
+    if (!preferences.sendTypingNotifications || !targetRoomId.startsWith('!')) return;
     await this.#core.rpc.messages.setTyping({ room_id: targetRoomId, typing });
   };
 
@@ -544,12 +589,7 @@ export class Conversation {
     const items = this.#timeline.items;
     for (let index = items.length - 1; index >= 0; index--) {
       const item = items[index];
-      if (
-        !item.event_id ||
-        (!isMessageRow(item) && item.content.kind !== 'unable_to_decrypt') ||
-        item.content.kind === 'redacted'
-      )
-        continue;
+      if (!item.event_id || !isMessageRow(item) || item.content.kind === 'redacted') continue;
       await this.#toggleReaction(item.event_id, key, sourcePack);
       return;
     }
@@ -697,13 +737,14 @@ export class Conversation {
       if (body === null) break;
       await this.#beforeSend();
       await editMessage(this.#core.rpc, targetRoomId, item.event_id, body, {
-        transactionId: item.event_id ? null : item.transaction_id,
+        transaction_id: item.event_id ? null : item.transaction_id,
         formatted: rich?.formatted ?? null,
-        mentions: rich?.mentions,
+        mentions: [...(rich?.mentions.user_ids ?? [])],
+        mentions_room: rich?.mentions.room ?? false,
         kind: editedKind(item),
-        threadRoot: this.#threadRoot,
+        thread_root: this.#threadRoot,
         persona: item.per_message_profile ?? null,
-        forumTitle: item.forum_title ?? '',
+        forum_title: item.forum_title ?? '',
       });
       return;
     }
@@ -823,7 +864,5 @@ export class Conversation {
 
 function editedKind(edited: TimelineItemView | undefined): MessageKind {
   const content = edited?.content;
-  if (content?.kind !== 'message') return 'text';
-  if (content.emote) return 'emote';
-  return content.notice ? 'notice' : 'text';
+  return content?.kind === 'message' ? content.msgtype : 'text';
 }

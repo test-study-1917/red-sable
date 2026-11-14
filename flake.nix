@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.zst";
 
   outputs =
     { self, nixpkgs }:
@@ -20,10 +20,13 @@
         let
           callPackage = lib.callPackageWith (pkgs // packages // { src = self; });
           packages = {
-            sable-deepfilternet-assets = callPackage ./packaging/nix/deepfilternet.nix { };
+            sable-wasm-bindgen-cli = callPackage ./packaging/nix/wasm-bindgen-cli.nix { };
             sable-unwrapped = callPackage ./packaging/nix/unwrapped.nix { };
             sable = callPackage ./packaging/nix/sable.nix { };
             default = packages.sable;
+          }
+          // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            sable-desktop = callPackage ./packaging/nix/desktop.nix { };
           };
         in
         packages

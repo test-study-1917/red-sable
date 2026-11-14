@@ -1,12 +1,12 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
+use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::ruma::events::room::history_visibility::HistoryVisibility;
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId};
 use serde::{Deserialize, Serialize};
 
 use super::Handler;
-use crate::protocol::{RpcError, DeviceView, EncryptionStatusView, IdentityResetStep, KeyBackupDownloadView, KeyBackupStatusView, ShareHistoryView, SignOutSafetyView, UserSecurityView};
+use crate::protocol::{RpcCode, RpcError, DehydratedDeviceView, DeviceView, EncryptionStatusView, IdentityResetStep, KeyBackupDownloadView, KeyBackupStatusView, ShareHistoryView, SignOutSafetyView, UserSecurityView};
 use crate::verification::{self, VERIFICATION_METHODS, encryption_status, sign_out_safety};
 use crate::{Core, ResultExt};
 
@@ -29,6 +29,8 @@ domain! {
     rename_device,
     discard_room_key,
     share_history,
+    dehydrated_device,
+    set_dehydrated_device,
     request_verification,
     withdraw_verification,
     set_device_blocked,
@@ -47,7 +49,8 @@ impl Handler for StatusParams {
     type Ok = EncryptionStatusView;
 
     async fn run(self, core: &Arc<Core>) -> Result<EncryptionStatusView, RpcError> {
-        Ok(encryption_status(&core.client().await?).await)
+        let client = core.client().await?;
+        Ok(core.with_open_stores(async || encryption_status(&client).await).await)
     }
 }
 
@@ -85,7 +88,7 @@ impl Handler for SignOutSafetyParams {
     type Ok = SignOutSafetyView;
 
     async fn run(self, core: &Arc<Core>) -> Result<SignOutSafetyView, RpcError> {
-        Ok(sign_out_safety(&core.client().await?).await)
+        Ok(sign_out_safety(core, &core.client().await?).await)
     }
 }
 
@@ -97,9 +100,6 @@ pub struct DevicesParams {}
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct DevicesOk {
     pub devices: Vec<DeviceView>,
-    pub account_management: bool,
-    /// Signed in with OAuth, which is what linking a device by QR code needs.
-    pub oauth: bool,
 }
 
 impl Handler for DevicesParams {
@@ -107,20 +107,9 @@ impl Handler for DevicesParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<DevicesOk, RpcError> {
         let client = core.client().await?;
-        let oauth = client.oauth().full_session().is_some();
-        let account_management = oauth
-            && client
-                .oauth()
-                .server_metadata()
-                .await
-                .ok()
-                .and_then(|metadata| metadata.account_management_uri)
-                .is_some();
 
         Ok(DevicesOk {
             devices: verification::own_devices(&client).await,
-            account_management,
-            oauth,
         })
     }
 }
@@ -154,9 +143,9 @@ impl Handler for RecoverIdentityParams {
         client
             .encryption()
             .recovery()
-            .recover(&self.recovery_key)
+            .recover_and_fix_backup(&self.recovery_key)
             .await
-            .map_err(|error| core.recovery_error(error))?;
+            .map_err(|error| core.recovery_error(&error))?;
         core.adopt_account_data_key(&client, &self.recovery_key)
             .await;
         Ok(())
@@ -172,6 +161,9 @@ pub struct EnableRecoveryParams {
     /// A passphrase to unlock the key with. The key is returned either way.
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// Deletes the unreadable server backup and the history it holds.
+    #[serde(default)]
+    pub replace_backup: bool,
 }
 
 impl Handler for EnableRecoveryParams {
@@ -180,6 +172,13 @@ impl Handler for EnableRecoveryParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
         let client = core.client().await?;
+        let backups = client.encryption().backups();
+        if self.replace_backup && !backups.are_enabled().await {
+            backups
+                .disable_and_delete()
+                .await
+                .or_failed(core, "replace_backup")?;
+        }
         let recovery = client.encryption().recovery();
         let enable = recovery.enable();
 
@@ -187,7 +186,10 @@ impl Handler for EnableRecoveryParams {
             Some(passphrase) => enable.with_passphrase(passphrase).await,
             None => enable.await,
         }
-        .or_failed(core, "enable_recovery")?;
+        .map_err(|error| match error {
+            RecoveryError::BackupExistsOnServer => RpcCode::BackupExists.into(),
+            error => core.failed_with("enable_recovery", &error),
+        })?;
         core.adopt_account_data_key(&client, &recovery_key).await;
         Ok(recovery_key)
     }
@@ -338,7 +340,7 @@ impl Handler for RenameDeviceParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let client = core.client().await?;
-        let generation = core.session_generation.load(Ordering::SeqCst);
+        let generation = core.lifecycle.current();
         client
             .rename_device(&self.device_id, &self.display_name)
             .await
@@ -388,7 +390,7 @@ impl Handler for ShareHistoryParams {
             return Ok(ShareHistoryView::Unencrypted);
         }
         let client = core.client().await?;
-        let own = client.user_id().ok_or(RpcError::NotLoggedIn)?;
+        let own = client.user_id().ok_or(RpcCode::NotLoggedIn)?;
         let identity = client
             .encryption()
             .get_user_identity(own)
@@ -407,6 +409,32 @@ impl Handler for ShareHistoryParams {
             .await
             .or_failed(core, "share_history")?;
         Ok(ShareHistoryView::Shared)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct DehydratedDeviceParams {}
+
+impl Handler for DehydratedDeviceParams {
+    type Ok = DehydratedDeviceView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<DehydratedDeviceView, RpcError> {
+        core.dehydrated_device().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetDehydratedDeviceParams {
+    pub enabled: bool,
+}
+
+impl Handler for SetDehydratedDeviceParams {
+    type Ok = DehydratedDeviceView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<DehydratedDeviceView, RpcError> {
+        core.set_dehydrated_device(self.enabled).await
     }
 }
 
@@ -434,7 +462,7 @@ impl Handler for RequestVerificationParams {
                 .get_device(&self.user_id, &device_id)
                 .await
                 .or_failed(core, "request_verification_device")?
-                .ok_or(RpcError::Unavailable)?
+                .ok_or(RpcCode::Unavailable)?
                 .request_verification_with_methods(VERIFICATION_METHODS.to_vec())
                 .await
                 .or_failed(core, "request_verification")?,
@@ -442,7 +470,7 @@ impl Handler for RequestVerificationParams {
                 .get_user_identity(&self.user_id)
                 .await
                 .or_failed(core, "request_verification_identity")?
-                .ok_or(RpcError::Unavailable)?
+                .ok_or(RpcCode::Unavailable)?
                 .request_verification_with_methods(VERIFICATION_METHODS.to_vec())
                 .await
                 .or_failed(core, "request_verification")?,
@@ -478,7 +506,7 @@ impl Handler for WithdrawVerificationParams {
             .get_user_identity(&self.user_id)
             .await
             .or_failed(core, "withdraw_verification_identity")?
-            .ok_or(RpcError::Unavailable)?
+            .ok_or(RpcCode::Unavailable)?
             .withdraw_verification()
             .await
             .or_failed(core, "withdraw_verification")?;
@@ -563,7 +591,7 @@ impl Handler for StartSasVerificationParams {
             .start_sas()
             .await
             .or_failed(core, "start_sas_verification")?
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         Ok(())
     }
 }

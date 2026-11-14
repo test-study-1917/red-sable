@@ -1,24 +1,28 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
-  import { setPageState } from '#lib/platform/page-state.js';
+  import { clamp } from '#lib/clamp.js';
   import { untrack, type Snippet } from 'svelte';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
+  import { isPlainClick } from '#lib/ui/plain-click.js';
+  import { afterNextPaint } from '#lib/ui/after-paint.js';
   import BackIcon from 'phosphor-svelte/lib/CaretLeftIcon';
   import PanelHeader from '#lib/ui/primitives/PanelHeader.svelte';
   import PanelHeaderButton from '#lib/ui/primitives/PanelHeaderButton.svelte';
   import SidebarNav from '#lib/features/sidebar/SidebarNav.svelte';
   import UserQuickTools from '#lib/features/sidebar/UserQuickTools.svelte';
   import { providePageMeta } from '#lib/core/page-meta.js';
+  import { HorizontalSwipe } from '#lib/ui/horizontal-swipe.svelte.js';
+  import { currentDirection } from '#lib/language.svelte.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import {
-    finishSwipeGesture,
-    startSwipeGesture,
-    updateSwipeGesture,
-    type SwipeGesture,
-  } from '#lib/ui/swipe-gesture.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
-  import { backToRoomList, goToPage, isRoomSwitch } from '#lib/features/room/room-navigation.js';
+    backToRoomList,
+    goToPage,
+    MOBILE_TAB_PATHS,
+    setMobileDrawerOpen,
+  } from '#lib/features/room/room-navigation.js';
   import CoreHealthBanner from '#lib/ui/CoreHealthBanner.svelte';
+  import BottomSheet from '#lib/ui/primitives/BottomSheet.svelte';
+  import AlertList, { alertListState } from './AlertList.svelte';
 
   interface Props {
     children: Snippet;
@@ -26,24 +30,22 @@
 
   let { children }: Props = $props();
 
-  type Gesture = SwipeGesture & { width: number };
-
   let position = $state<number | undefined>();
-  let dragging = $state(false);
-  let gesture: Gesture | undefined;
-  let settleFrame: number | undefined;
-  let routeFrame: number | undefined;
+  const swipe = new HorizontalSwipe();
+  let sign = $derived(currentDirection() === 'rtl' ? -1 : 1);
+  let swipeWidth = 0;
+  let cancelSettle: (() => void) | undefined;
+  let cancelRoute: (() => void) | undefined;
   let track: HTMLDivElement | undefined;
   let inertOpen = $state<boolean | undefined>();
   let inertTimer: ReturnType<typeof setTimeout> | undefined;
   let focusContentOnSettle = false;
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   /** Routes whose own index is the room list. Anywhere else the list would
       hide the page that was asked for behind an inert panel. Keyed on the path
       so room-list hydration cannot flash the sidebar over a room. */
   const LIST_INDEX_PATHS = new Set(['/home', '/rooms', '/direct']);
   const BLANK_INDEX_PATHS = new Set(['/home', '/rooms']);
-  const MOBILE_QUICK_TOOLS_PATHS = new Set(['/navigate', '/inbox', '/profile', '/alerts']);
   let pathname = $derived(page.url.pathname);
   let settledPath = $state(page.url.pathname);
   let routeChanging = $derived(pathname !== settledPath && page.params.roomId === undefined);
@@ -52,8 +54,8 @@
   let settingsPage = $derived(/^\/settings(\/[^/]+)?$/.test(pathname));
   let defaultOpen = $derived(LIST_INDEX_PATHS.has(pathname) || spaceIndex);
   let pinnedOpen = $derived(BLANK_INDEX_PATHS.has(pathname) || spaceIndex);
-  let pinnedClosed = $derived(MOBILE_QUICK_TOOLS_PATHS.has(pathname));
-  let showMobileQuickTools = $derived(MOBILE_QUICK_TOOLS_PATHS.has(pathname));
+  let pinnedClosed = $derived(MOBILE_TAB_PATHS.has(pathname));
+  let showMobileQuickTools = $derived(MOBILE_TAB_PATHS.has(pathname));
   let showMobileBackBar = $derived(
     !appLayout.current &&
       !pinnedOpen &&
@@ -110,43 +112,35 @@
   $effect(() => {
     const next = pathname;
     cancelSettling();
-    if (routeFrame !== undefined) cancelAnimationFrame(routeFrame);
-    routeFrame = requestAnimationFrame(() => {
-      routeFrame = requestAnimationFrame(() => {
-        settledPath = next;
-        routeFrame = undefined;
-      });
+    cancelRoute?.();
+    cancelRoute = afterNextPaint(() => {
+      settledPath = next;
+      cancelRoute = undefined;
     });
     position = undefined;
-    dragging = false;
-    gesture = undefined;
+    swipe.cancel();
     return () => {
-      if (routeFrame !== undefined) cancelAnimationFrame(routeFrame);
+      cancelRoute?.();
     };
   });
 
   function cancelSettling() {
-    if (settleFrame === undefined) return;
-
-    cancelAnimationFrame(settleFrame);
-    settleFrame = undefined;
+    cancelSettle?.();
+    cancelSettle = undefined;
   }
 
   function settleDrawer() {
-    dragging = false;
     // Give the browser a rendered frame with transitions enabled before
     // releasing the drag offset to the open or closed transform.
-    settleFrame = requestAnimationFrame(() => {
-      settleFrame = requestAnimationFrame(() => {
-        position = undefined;
-        settleFrame = undefined;
-      });
+    cancelSettle = afterNextPaint(() => {
+      position = undefined;
+      cancelSettle = undefined;
     });
   }
 
   function setOpen(next: boolean): void {
     if (next === open || (!next && pinnedOpen)) return;
-    void setPageState({ ...page.state, mobileDrawer: next ? 'open' : 'closed' }, true);
+    setMobileDrawerOpen(next);
     if (!next) {
       focusContentOnSettle = true;
       return;
@@ -163,46 +157,31 @@
     if (!(target instanceof HTMLDivElement)) return;
 
     const width = target.clientWidth;
-    if (width === 0) return;
+    if (width === 0 || pinnedClosed) return;
 
-    const swipe = startSwipeGesture(event, open ? 0 : -width);
-    if (!swipe) return;
-
-    if (pinnedClosed) return;
-
-    gesture = { ...swipe, width };
+    if (swipe.start(event, open ? 0 : -width * sign)) swipeWidth = width;
   }
 
   function handleTouchMove(event: TouchEvent) {
-    if (!gesture) return;
-
-    const update = updateSwipeGesture(gesture, event);
-    if (!update || update.mode !== 'horizontal') return;
-
-    if (!dragging) {
-      dragging = true;
-    }
-    position = Math.max(-gesture.width, Math.min(0, gesture.startPosition + update.distanceX));
+    const next = swipe.move(event, (x) => sign * clamp(sign * x, -swipeWidth, 0));
+    if (next !== undefined) position = next;
   }
 
   function finishGesture(cancelled: boolean) {
-    const activeGesture = gesture;
-    gesture = undefined;
-    if (!activeGesture || activeGesture.mode !== 'horizontal') {
-      dragging = false;
+    const currentPosition = swipe.position;
+    const result = swipe.finish(cancelled);
+    if (!result) {
       position = undefined;
       return;
     }
 
-    const currentPosition = position ?? activeGesture.startPosition;
-    const result = finishSwipeGesture(activeGesture, currentPosition, cancelled);
     if (result.handled) {
       if (result.direction === 'right') {
-        setOpen(true);
+        setOpen(sign > 0);
       } else if (result.direction === 'left') {
-        setOpen(false);
+        setOpen(sign < 0);
       } else {
-        setOpen(currentPosition > -activeGesture.width / 2);
+        setOpen(sign * currentPosition > -swipeWidth / 2);
       }
     }
 
@@ -210,29 +189,30 @@
   }
 
   function revealCurrentPage(event: MouseEvent) {
-    if (appLayout.current || !(event.target instanceof Element)) return;
+    if (event.defaultPrevented || appLayout.current || !(event.target instanceof Element)) return;
     const link = event.target.closest('a[href]');
     if (!(link instanceof HTMLAnchorElement)) return;
+    if (
+      !isPlainClick(event) ||
+      link.origin !== page.url.origin ||
+      link.target ||
+      link.hasAttribute('download')
+    ) {
+      return;
+    }
     if (link.pathname === pathname) {
       event.preventDefault();
       setOpen(false);
       return;
     }
-    const plain =
-      event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-    if (plain && isRoomSwitch(link.href)) {
-      event.preventDefault();
-      goToPage(link.href);
-    }
+    event.preventDefault();
+    goToPage(link.href);
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'ArrowLeft') {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      setOpen(false);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      setOpen(true);
+      setOpen((event.key === 'ArrowRight') === sign > 0);
     }
   }
 </script>
@@ -267,7 +247,7 @@
   </p>
   <div
     bind:this={track}
-    class={['drawer-track', { open, dragging, 'route-changing': routeChanging }]}
+    class={['drawer-track', { open, dragging: swipe.dragging, 'route-changing': routeChanging }]}
     style:transform={position === undefined
       ? undefined
       : `translate3d(${String(position)}px, 0, 0)`}
@@ -302,7 +282,7 @@
               label={i18n.t('timeline.back')}
               onclick={backToRoomList}
             >
-              <BackIcon />
+              <BackIcon class="mirror-rtl" />
             </PanelHeaderButton>
           {/snippet}
         </PanelHeader>
@@ -311,7 +291,17 @@
         {@render children()}
       </div>
       {#if !appLayout.current}
-        <div class="mobile-quick-tools"><UserQuickTools mobile /></div>
+        <BottomSheet
+          bind:open={alertListState.open}
+          contentInset={false}
+          background="transparent"
+          label=""
+          closeLabel=""
+        >
+          <AlertList />
+        </BottomSheet>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div class="mobile-quick-tools" onclick={revealCurrentPage}><UserQuickTools mobile /></div>
       {/if}
     </section>
   </div>
@@ -327,7 +317,7 @@
   .drawer-track {
     display: flex;
     height: 100%;
-    transform: translateX(-50%);
+    transform: translateX(calc(-50% * var(--inline-sign)));
     width: 200%;
     will-change: transform;
   }
@@ -367,6 +357,12 @@
     overflow: hidden;
   }
 
+  @media (prefers-reduced-motion: no-preference) {
+    .drawer-track:not(.open) .content {
+      view-transition-name: tab-page;
+    }
+  }
+
   .mobile-quick-tools {
     flex: 0 0 auto;
     height: 0;
@@ -383,7 +379,7 @@
     visibility: collapse;
   }
 
-  @media (width < 48rem) {
+  @media (--compact-layout) {
     .navigation-panel,
     .content-panel.with-quick-tools,
     .content-panel:has(> .content > :global([data-inset-owner~='bottom'])) {
@@ -402,13 +398,15 @@
     }
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .mobile-quick-tools {
       display: none;
     }
 
     .drawer-viewport {
-      margin-left: calc(var(--navigation-rail-width) + var(--room-nav-width) + var(--safe-left));
+      margin-inline-start: calc(
+        var(--navigation-rail-width) + var(--room-nav-width) + var(--safe-left)
+      );
     }
 
     .screen-reader-only,
@@ -428,7 +426,7 @@
       --edge-inset-bottom: 0px;
 
       flex-basis: 100%;
-      padding-left: 0;
+      padding-inline-start: 0;
       width: 100%;
     }
   }

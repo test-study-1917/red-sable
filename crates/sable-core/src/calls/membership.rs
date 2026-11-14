@@ -321,6 +321,64 @@ pub(crate) async fn active_members(room: &Room) -> Vec<CallMember> {
     members
 }
 
+fn sticky_timing(
+    sticky: Option<StickyField>,
+    unsigned: Option<StickyUnsignedIn>,
+    created_ts: u64,
+    now_ms: u64,
+) -> Option<(u64, u64)> {
+    let duration = sticky.and_then(|sticky| sticky.0?.duration_ms)?;
+    let order_expires_at_ms = created_ts.saturating_add(duration);
+    let duration = duration.min(3_600_000);
+    let expires_at_ms = unsigned
+        .and_then(|unsigned| unsigned.msc4354_ttl_ms.or(unsigned.ttl_ms)?.0)
+        .map_or_else(
+            || now_ms.min(created_ts).saturating_add(duration),
+            |ttl| now_ms.saturating_add(ttl.min(duration)),
+        );
+    if duration == 0 || expires_at_ms <= now_ms {
+        return None;
+    }
+    Some((order_expires_at_ms, expires_at_ms))
+}
+
+fn sticky_wire(content: &StickyContentIn, kind: &str, has_stable_key: bool) -> Option<RtcWire> {
+    let wire = match content
+        .rest
+        .get("slot_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("m.call#ROOM") | None => RtcWire::Deployed,
+        Some("m.call#room") => RtcWire::Stable,
+        _ => return None,
+    };
+    if wire == RtcWire::Stable && (kind != "m.rtc.member" || !has_stable_key) {
+        return None;
+    }
+    Some(wire)
+}
+
+fn sticky_tombstone(content: &StickyContentIn, key: &str, wire: RtcWire) -> Option<bool> {
+    let member_content = content.rest.get("member");
+    let left = member_content
+        .and_then(|member| member.get("membership"))
+        .is_some_and(|membership| membership.as_str() != Some("join"));
+    if left
+        && (member_content
+            .and_then(|member| member.get("id"))
+            .and_then(serde_json::Value::as_str)
+            != Some(key)
+            || content
+                .rest
+                .get("slot_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(wire.slot()))
+    {
+        return None;
+    }
+    Some(left || content.rest.keys().all(|field| field == "slot_id"))
+}
+
 #[serde_as]
 #[derive(Deserialize)]
 struct StickyEventIn {
@@ -531,10 +589,6 @@ impl StickyMemberships {
         self.apply(&value, now_ms)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Validation and ordering are kept together"
-    )]
     pub(crate) fn apply(&mut self, value: &serde_json::Value, now_ms: u64) -> bool {
         self.entries.retain(|_, entry| entry.expires_at_ms > now_ms);
         self.redacted.retain(|_, expires| *expires > now_ms);
@@ -567,63 +621,26 @@ impl StickyMemberships {
         let Some(created_ts) = event.origin_server_ts else {
             return false;
         };
-        let Some(duration) = event
-            .msc4354_sticky
-            .or(event.sticky)
-            .and_then(|sticky| sticky.0?.duration_ms)
-        else {
+        let Some((order_expires_at_ms, expires_at_ms)) = sticky_timing(
+            event.msc4354_sticky.or(event.sticky),
+            event.unsigned,
+            created_ts,
+            now_ms,
+        ) else {
             return false;
         };
-        let duration = duration.min(3_600_000);
-        let order_expires_at_ms = created_ts.saturating_add(duration);
-        let expires_at_ms = event
-            .unsigned
-            .and_then(|unsigned| unsigned.msc4354_ttl_ms.or(unsigned.ttl_ms)?.0)
-            .map_or(now_ms.min(created_ts).saturating_add(duration), |ttl| {
-                now_ms.saturating_add(ttl.min(duration))
-            });
-        if duration == 0 || expires_at_ms <= now_ms {
+        let Some(wire) = sticky_wire(&content, &kind, stable_key.is_some()) else {
             return false;
-        }
-        let wire = match content
-            .rest
-            .get("slot_id")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("m.call#ROOM") | None => RtcWire::Deployed,
-            Some("m.call#room") => RtcWire::Stable,
-            _ => return false,
         };
-        if wire == RtcWire::Stable && kind != "m.rtc.member" {
-            return false;
-        }
-        if wire == RtcWire::Stable && stable_key.is_none() {
-            return false;
-        }
         let entry_key = (sender, key.to_owned(), wire, kind);
         if self.entries.get(&entry_key).is_some_and(|old| {
             (order_expires_at_ms, event_id) <= (old.order_expires_at_ms, old.event_id.as_str())
         }) {
             return false;
         }
-        let member_content = content.rest.get("member");
-        let left = member_content
-            .and_then(|member| member.get("membership"))
-            .is_some_and(|membership| membership.as_str() != Some("join"));
-        if left
-            && (member_content
-                .and_then(|member| member.get("id"))
-                .and_then(serde_json::Value::as_str)
-                != Some(key)
-                || content
-                    .rest
-                    .get("slot_id")
-                    .and_then(serde_json::Value::as_str)
-                    != Some(wire.slot()))
-        {
+        let Some(tombstone) = sticky_tombstone(&content, key, wire) else {
             return false;
-        }
-        let tombstone = left || content.rest.keys().all(|field| field == "slot_id");
+        };
         let member = if tombstone {
             None
         } else {
@@ -712,10 +729,14 @@ fn alias_foci(event: &mut serde_json::Value, room_id: &str) {
     }
 }
 
+#[expect(
+    deprecated,
+    reason = "calls still get their token from the JWT service of the earlier MSC4195"
+)]
 fn livekit_urls(foci: &[Focus]) -> Vec<String> {
     foci.iter()
         .filter_map(|focus| match focus {
-            Focus::Livekit(livekit) => Some(livekit.service_url.clone()),
+            Focus::Livekit(livekit) | Focus::LegacyLivekit(livekit) => livekit.service_url.clone(),
             _ => None,
         })
         .filter(|url| !url.is_empty())
@@ -766,10 +787,10 @@ mod tests {
 
     fn member(device: &str, created_ts: u64, foci: &[&str]) -> CallMember {
         CallMember {
-            user_id: owned_user_id!("@erwan:localhost"),
+            user_id: owned_user_id!("@kris:localhost"),
             device_id: Some(device.into()),
             member_id: None,
-            identity: format!("@erwan:localhost:{device}"),
+            identity: format!("@kris:localhost:{device}"),
             mode: CallMode::Legacy,
             created_ts,
             joined_ts: created_ts,
@@ -792,8 +813,8 @@ mod tests {
         let laptop = member("LAPTOP", 100, &[]);
 
         assert!(!laptop.same_generation(&member("PHONE", 100, &[])));
-        assert!(laptop.is_own(user_id!("@erwan:localhost"), device_id!("LAPTOP")));
-        assert!(!laptop.is_own(user_id!("@erwan:localhost"), device_id!("PHONE")));
+        assert!(laptop.is_own(user_id!("@kris:localhost"), device_id!("LAPTOP")));
+        assert!(!laptop.is_own(user_id!("@kris:localhost"), device_id!("PHONE")));
     }
 
     #[test]
@@ -814,11 +835,11 @@ mod tests {
         let raw = |extra: &str| {
             format!(
                 r#"{{
-                    "sender":"@erwan:localhost",
+                    "sender":"@kris:localhost",
                     "content": {{
                         "slot_id":"m.call#ROOM",
                         "application":{{"type":"m.call"}},
-                        "member":{{"user_id":"@erwan:localhost","device_id":"LAPTOP","id":"member-1"}},
+                        "member":{{"user_id":"@kris:localhost","device_id":"LAPTOP","id":"member-1"}},
                         "transports":{{"published":[]}}{extra}
                     }}
                 }}"#
@@ -836,24 +857,24 @@ mod tests {
     fn test_a_sticky_member_uses_its_member_id_for_the_deployed_identity() {
         let member = sticky_member(
             r#"{
-                "sender":"@erwan:localhost",
+                "sender":"@kris:localhost",
                 "content": {
                     "slot_id":"m.call#ROOM",
                     "application":{"type":"m.call"},
-                    "member":{"user_id":"@erwan:localhost","device_id":"LAPTOP","id":"member-1"},
+                    "member":{"user_id":"@kris:localhost","device_id":"LAPTOP","id":"member-1"},
                     "transports":{"published":[{"type":"livekit","livekit_service_url":"https://focus.example.org"}]}
                 }
             }"#,
         )
         .unwrap();
 
-        assert_eq!(member.user_id, user_id!("@erwan:localhost"));
+        assert_eq!(member.user_id, user_id!("@kris:localhost"));
         assert_eq!(member.device_id.as_deref(), Some(device_id!("LAPTOP")));
         assert_eq!(member.member_id, "member-1");
         assert_eq!(member.foci, ["https://focus.example.org"]);
         assert_eq!(
             member.identity,
-            "HDygEJZPKxdLyHX7ic7VpvsISAOOtDo/FX8oZfgj3+0"
+            "fy53C+VzB2i4DYEzQ2rL8RixeS0KyRA1qnFiggsxWhs"
         );
     }
 
@@ -862,7 +883,7 @@ mod tests {
         assert!(
             sticky_member(
                 r#"{
-                "sender":"@erwan:localhost",
+                "sender":"@kris:localhost",
                 "content": {
                     "slot_id":"m.call#ROOM",
                     "application":{"type":"m.call"},
@@ -875,10 +896,10 @@ mod tests {
     }
     fn sticky_event(id: &str, origin: u64) -> serde_json::Value {
         serde_json::json!({
-            "type":"org.matrix.msc4143.rtc.member", "sender":"@erwan:localhost", "event_id":id,
+            "type":"org.matrix.msc4143.rtc.member", "sender":"@kris:localhost", "event_id":id,
             "origin_server_ts":origin,"msc4354_sticky":{"duration_ms":900_000},
             "content":{"msc4354_sticky_key":"member", "slot_id":"m.call#ROOM", "application":{"type":"m.call"},
-                "member":{"user_id":"@erwan:localhost","device_id":"PHONE","id":"member"},
+                "member":{"user_id":"@kris:localhost","device_id":"PHONE","id":"member"},
                 "transports":{"published":[{"type":"livekit","livekit_service_url":"https://sfu.example"}]}}
         })
     }
@@ -1072,7 +1093,7 @@ mod tests {
         leave["sender"] = serde_json::json!("@other:localhost");
         assert!(store.apply(&leave, 200));
         assert_eq!(store.members(200).len(), 1);
-        leave["sender"] = serde_json::json!("@erwan:localhost");
+        leave["sender"] = serde_json::json!("@kris:localhost");
         assert!(store.apply(&leave, 200));
         assert_eq!(
             store.members(200),
@@ -1179,6 +1200,18 @@ mod tests {
     }
 
     #[test]
+    fn sticky_order_uses_the_unclamped_duration() {
+        let mut store = super::StickyMemberships::default();
+        let mut first = sticky_event("$a", 100);
+        first["msc4354_sticky"]["duration_ms"] = serde_json::json!(3_600_200);
+        assert!(store.apply(&first, 100));
+        let mut second = sticky_event("$b", 200);
+        second["msc4354_sticky"]["duration_ms"] = serde_json::json!(3_600_000);
+        assert!(!store.apply(&second, 200));
+        assert_eq!(store.members(200)[0].created_ts, 100);
+    }
+
+    #[test]
     fn malformed_sticky_memberships_cannot_act_as_leave_events() {
         let mut store = super::StickyMemberships::default();
         assert!(store.apply(&sticky_event("$a", 100), 100));
@@ -1218,7 +1251,7 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let room_id = room_id!("!call:example.org");
-        let now = super::super::keys::now_ms();
+        let now = crate::now_ms();
         let mut builder = JoinedRoomBuilder::new(room_id);
         for (device, selection) in [("LEGACY", "oldest_membership"), ("COMPAT", "multi_sfu")] {
             let event = json!({
@@ -1275,7 +1308,7 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let room_id = room_id!("!call:example.org");
-        let now = super::super::keys::now_ms();
+        let now = crate::now_ms();
         let event = json!({
             "type": "org.matrix.msc3401.call.member",
             "state_key": "_@user:example.org_DEVICE_m.call",

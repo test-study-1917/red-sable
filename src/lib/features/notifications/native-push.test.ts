@@ -1,10 +1,10 @@
-import type { NativePushConfig } from '#lib/platform/push.js';
+import type { NativePushAccount, NativePushConfig } from '#lib/platform/push.js';
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   register: vi.fn<(config: NativePushConfig) => Promise<void>>(),
-  unregister: vi.fn<() => Promise<void>>(),
+  unregister: vi.fn<(account?: NativePushAccount) => Promise<void>>(),
   list: vi.fn(),
   select: vi.fn<(name: string) => Promise<void>>(),
   config: vi.fn(),
@@ -18,7 +18,8 @@ vi.mock('#lib/platform/push.js', () => ({
   setPushDistributor: mocks.select,
 }));
 vi.mock('#lib/platform/notifications.js', () => ({ deliversNativePush: mocks.native }));
-vi.mock('#lib/settings/preferences.svelte.js', () => ({ preferences: { richPushPayloads: true } }));
+const preferences = vi.hoisted(() => ({ richPushPayloads: true, pushEmbeddedServerUrl: '' }));
+vi.mock('#lib/settings/preferences.svelte.js', () => ({ preferences }));
 vi.mock('#lib/notifications/push-config.js', async (original) => ({
   ...(await original<typeof import('#lib/notifications/push-config.js')>()),
   pushConfig: mocks.config,
@@ -72,7 +73,7 @@ beforeEach(() => {
       stored.set(key, value);
     },
   });
-  mocks.native.mockResolvedValue(true);
+  mocks.native.mockReturnValue(true);
   mocks.list.mockResolvedValue(['embedded-websocket', 'io.heckel.ntfy', 'org.example.sunup']);
   mocks.config.mockResolvedValue(config);
   mocks.register.mockResolvedValue(undefined);
@@ -117,6 +118,17 @@ test('still registers a request that differs from the pending one', async () => 
     registerNativePush(override, other, accounts),
   ]);
   expect(mocks.register).toHaveBeenCalledTimes(2);
+});
+
+test('registers again when message text is turned off during a registration', async () => {
+  const first = registerNativePush(override, session, accounts);
+  preferences.richPushPayloads = false;
+  const second = registerNativePush(override, session, accounts);
+  await Promise.all([first, second]);
+  preferences.richPushPayloads = true;
+
+  expect(mocks.register).toHaveBeenCalledTimes(2);
+  expect(mocks.register.mock.lastCall?.[0].eventIdOnly).toBe(true);
 });
 
 test('declares every signed-in account, not only the active one', async () => {
@@ -180,6 +192,26 @@ test('uses a deployment-provided built-in server', async () => {
   });
   await registerNativePush(override, session, accounts);
   expect(mocks.register.mock.calls[0][0].embeddedGatewayUrl).toBe('https://ntfy.example');
+});
+
+test('a server picked in settings wins over the deployment one', async () => {
+  mocks.config.mockResolvedValue({
+    ...config,
+    details: { ...config.details, unifiedPushEmbeddedServerUrl: 'https://ntfy.example' },
+  });
+  preferences.pushEmbeddedServerUrl = 'https://ntfy.mine.example';
+  await registerNativePush(override, session, accounts);
+  preferences.pushEmbeddedServerUrl = '';
+  expect(mocks.register.mock.calls[0][0].embeddedGatewayUrl).toBe('https://ntfy.mine.example');
+});
+
+test('registers again when the built-in server changes', async () => {
+  await registerNativePush(override, session, accounts);
+  preferences.pushEmbeddedServerUrl = 'https://ntfy.mine.example';
+  await registerNativePush(override, session, accounts);
+  preferences.pushEmbeddedServerUrl = '';
+  expect(mocks.register).toHaveBeenCalledTimes(2);
+  expect(mocks.register.mock.lastCall?.[0].embeddedGatewayUrl).toBe('https://ntfy.mine.example');
 });
 
 test.each(['embedded-websocket', 'io.heckel.ntfy', 'org.example.sunup'])(
@@ -260,7 +292,7 @@ test('a failed switch does not block a later retry', async () => {
 });
 
 test('does not register native push in the browser', async () => {
-  mocks.native.mockResolvedValue(false);
+  mocks.native.mockReturnValue(false);
   await registerNativePush(override, session, accounts);
   expect(mocks.register).not.toHaveBeenCalled();
 });
@@ -341,4 +373,52 @@ test('turning native push off cancels a pending retry', async () => {
   await unregisterNativePush();
   await vi.advanceTimersByTimeAsync(3_600_000);
   expect(mocks.register).toHaveBeenCalledTimes(1);
+});
+
+test('logging out another account preserves an in-flight registration and its retry', async () => {
+  vi.useFakeTimers();
+  const pending = Promise.withResolvers<undefined>();
+  mocks.register.mockReturnValueOnce(pending.promise);
+
+  const registration = registerNativePush(override, other, accounts);
+  await vi.waitFor(() => {
+    expect(mocks.register).toHaveBeenCalledTimes(1);
+  });
+  const logout = unregisterNativePush(session);
+  pending.reject(timedOut);
+  await expect(registration).rejects.toBe(timedOut);
+  await logout;
+
+  expect(mocks.unregister).toHaveBeenCalledWith(session);
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(mocks.register).toHaveBeenCalledTimes(2);
+  expect(mocks.register.mock.lastCall?.[0]).toMatchObject({
+    userId: other.user_id,
+    deviceId: other.device_id,
+    accounts: [{ userId: other.user_id, deviceId: other.device_id }],
+  });
+});
+
+test('logging out the failing account cancels only its retry', async () => {
+  vi.useFakeTimers();
+  mocks.register.mockRejectedValueOnce(timedOut);
+
+  await expect(registerNativePush(override, session, accounts)).rejects.toBe(timedOut);
+  await unregisterNativePush(session);
+  await vi.advanceTimersByTimeAsync(3_600_000);
+
+  expect(mocks.unregister).toHaveBeenCalledWith(session);
+  expect(mocks.register).toHaveBeenCalledTimes(1);
+});
+
+test('logging out another device of the same user preserves the active device retry', async () => {
+  vi.useFakeTimers();
+  mocks.register.mockRejectedValueOnce(timedOut);
+
+  await expect(registerNativePush(override, session, accounts)).rejects.toBe(timedOut);
+  await unregisterNativePush({ user_id: session.user_id, device_id: 'PREVIOUS' });
+  await vi.advanceTimersByTimeAsync(15_000);
+
+  expect(mocks.register).toHaveBeenCalledTimes(2);
+  expect(mocks.register.mock.lastCall?.[0].deviceId).toBe(session.device_id);
 });

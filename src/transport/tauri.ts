@@ -1,11 +1,14 @@
+import { attachmentBytes } from './attachment-bytes';
 import * as Sentry from '@sentry/sveltekit';
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 import type { RpcError, CoreEvent } from '#src/generated/protocol';
-import { CoreError, type Transport } from './index';
+import { commandFailed, type Transport } from './index';
+import { createStallMonitor } from './stall-monitor';
+import { recordDebugLog } from '#lib/observability/debug-log.svelte.js';
+import { wasmLogLevel } from '#lib/observability/wasm-log.js';
 import { rawInvoke } from '#lib/platform/raw-invoke.js';
 import { resetWebStorage } from '#lib/platform/session-storage.js';
-import { migrateV1 } from '#lib/migrations/v1/migration.js';
 
 async function carry<T>(
   command: string,
@@ -15,7 +18,7 @@ async function carry<T>(
   try {
     return await rawInvoke<T>(command, bytes, headers);
   } catch (error) {
-    throw new CoreError(error as RpcError);
+    throw commandFailed(error as RpcError, command);
   }
 }
 
@@ -24,6 +27,19 @@ async function carry<T>(
  */
 export function createTauriTransport(): Transport {
   const listeners = new Set<(event: CoreEvent) => void>();
+  const stallListeners = new Set<(stalled: boolean) => void>();
+  // The status read waits for the core like any command, and unlike most it needs no network.
+  const stalls = createStallMonitor(
+    () => {
+      const answered = (): void => {
+        stalls.responsive();
+      };
+      invoke('call', { method: 'session.sync_status', params: {} }).then(answered, answered);
+    },
+    (stalled) => {
+      for (const listener of stallListeners) listener(stalled);
+    }
+  );
 
   const channel = new Channel<CoreEvent[]>();
   channel.onmessage = (events) => {
@@ -43,14 +59,24 @@ export function createTauriTransport(): Transport {
 
   const ready = invoke<unknown>('subscribe_events', { channel });
 
+  const logs = new Channel<string[]>();
+  logs.onmessage = (lines) => {
+    for (const line of lines) {
+      const level = wasmLogLevel(line);
+      recordDebugLog(level, level === 'error' ? 'error' : 'general', 'core', line.trim());
+    }
+  };
+
   return {
     async call(method, params) {
       await ready;
-      await migrateV1();
+      const settle = stalls.watch();
       try {
         return await invoke<unknown>('call', { method, params });
       } catch (error) {
-        throw new CoreError(error as RpcError);
+        throw commandFailed(error as RpcError, method);
+      } finally {
+        settle();
       }
     },
 
@@ -65,7 +91,7 @@ export function createTauriTransport(): Transport {
         });
         return new Uint8Array(bytes);
       } catch (error) {
-        throw new CoreError(error as RpcError);
+        throw commandFailed(error as RpcError, 'fetch_media');
       }
     },
 
@@ -73,7 +99,7 @@ export function createTauriTransport(): Transport {
       try {
         await invoke('forget_media', { source });
       } catch (error) {
-        throw new CoreError(error as RpcError);
+        throw commandFailed(error as RpcError, 'forget_media');
       }
     },
 
@@ -82,6 +108,7 @@ export function createTauriTransport(): Transport {
       filename,
       mime,
       bytes,
+      thumbnail,
       caption,
       formattedCaption,
       mentions,
@@ -93,7 +120,7 @@ export function createTauriTransport(): Transport {
       persona,
       spoiler,
     }) {
-      await carry('send_attachment', bytes, {
+      await carry('send_attachment', attachmentBytes([{ bytes, thumbnail }]), {
         request: JSON.stringify({
           room_id: roomId,
           filename,
@@ -113,39 +140,42 @@ export function createTauriTransport(): Transport {
     },
 
     async sendGallery(gallery) {
-      try {
-        await invoke('send_gallery', {
-          request: {
-            room_id: gallery.roomId,
-            attachments: gallery.attachments.map(({ filename, mime, info = null }) => ({
+      await carry('send_gallery', attachmentBytes(gallery.attachments), {
+        request: JSON.stringify({
+          room_id: gallery.roomId,
+          attachments: gallery.attachments.map(
+            ({ filename, mime, info = null, spoiler = false }) => ({
               filename,
               mime,
               info,
-            })),
-            caption: gallery.caption ?? null,
-            formatted_caption: gallery.formattedCaption ?? null,
-            mentions: gallery.mentions ?? [],
-            mentions_room: gallery.mentionsRoom ?? false,
-            in_reply_to: gallery.inReplyTo ?? null,
-            silent_reply: gallery.silentReply ?? false,
-            thread_root: gallery.threadRoot ?? null,
-            persona: gallery.persona ?? null,
-          },
-          items: gallery.attachments.map((attachment) => ({
-            ...attachment,
-            bytes: Array.from(attachment.bytes),
-          })),
-        });
-      } catch (error) {
-        throw new CoreError(error as RpcError);
-      }
+              spoiler,
+            })
+          ),
+          caption: gallery.caption ?? null,
+          formatted_caption: gallery.formattedCaption ?? null,
+          mentions: gallery.mentions ?? [],
+          mentions_room: gallery.mentionsRoom ?? false,
+          in_reply_to: gallery.inReplyTo ?? null,
+          silent_reply: gallery.silentReply ?? false,
+          thread_root: gallery.threadRoot ?? null,
+          persona: gallery.persona ?? null,
+        }),
+      });
     },
 
     uploadMedia(mime, bytes) {
       return carry<string>('upload_media', bytes, { mime });
     },
 
-    setDebugLogs() {},
+    async rtcData(sessionId, frame) {
+      return new Uint8Array(await carry<ArrayBuffer>('rtc_data', frame, { session: sessionId }));
+    },
+
+    setDebugLogs(enabled) {
+      invoke('set_debug_logs', { enabled, channel: logs }).catch((error: unknown) => {
+        console.warn('[sable transport] core log capture unavailable', error);
+      });
+    },
 
     subscribe(onEvent) {
       listeners.add(onEvent);
@@ -156,8 +186,9 @@ export function createTauriTransport(): Transport {
       return () => {};
     },
 
-    subscribeStall() {
-      return () => {};
+    subscribeStall(onStall) {
+      stallListeners.add(onStall);
+      return () => stallListeners.delete(onStall);
     },
 
     async resetCaches(accountIds) {
@@ -177,6 +208,8 @@ export function createTauriTransport(): Transport {
 
     close() {
       listeners.clear();
+      stallListeners.clear();
+      stalls.reset();
     },
   };
 }

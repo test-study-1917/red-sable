@@ -78,11 +78,11 @@ export function findMember(
 }
 
 export function memberName(members: readonly MemberView[], userId: string): string {
-  return profileOverrides.name(userId, findMember(members, userId)?.display_name ?? userId);
+  return findMember(members, userId)?.display_name ?? userId;
 }
 
 export function memberAvatar(members: readonly MemberView[], userId: string): string | null {
-  return profileOverrides.avatar(userId, findMember(members, userId)?.avatar_url ?? null);
+  return findMember(members, userId)?.avatar_url ?? null;
 }
 
 export interface MemberIdentity {
@@ -92,9 +92,7 @@ export interface MemberIdentity {
 }
 
 export function memberIdentity(members: readonly MemberView[], userId: string): MemberIdentity {
-  const member = findMember(members, userId);
-
-  return { userId, name: member?.display_name ?? userId, avatar: member?.avatar_url ?? null };
+  return { userId, name: memberName(members, userId), avatar: memberAvatar(members, userId) };
 }
 
 export function personaWithColor(

@@ -5,14 +5,17 @@
   import BugIcon from 'phosphor-svelte/lib/BugIcon';
   import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import ChatCircleIcon from 'phosphor-svelte/lib/ChatCircleIcon';
+  import LockSimpleIcon from 'phosphor-svelte/lib/LockSimpleIcon';
+  import LockSimpleOpenIcon from 'phosphor-svelte/lib/LockSimpleOpenIcon';
   import PhoneIcon from 'phosphor-svelte/lib/PhoneIcon';
   import SpeakerHighIcon from 'phosphor-svelte/lib/SpeakerHighIcon';
   import UserCircleIcon from 'phosphor-svelte/lib/UserCircleIcon';
-  import type { MemberView } from '#src/generated/protocol';
+  import type { MemberView, PresenceView } from '#src/generated/protocol';
 
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import PanelHeader from '#lib/ui/primitives/PanelHeader.svelte';
   import PanelHeaderButton from '#lib/ui/primitives/PanelHeaderButton.svelte';
+  import PresenceDot from '#lib/ui/primitives/PresenceDot.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
   import { participantKeys } from '#lib/features/call/participant-keys.js';
@@ -27,6 +30,8 @@
     roomName: string;
     roomAvatar: string | null;
     topic?: string | null;
+    encrypted?: boolean | null;
+    presence?: PresenceView | null;
     isVoice: boolean;
     callParticipants: readonly string[];
     members: readonly MemberView[];
@@ -52,6 +57,8 @@
     roomName,
     roomAvatar,
     topic = null,
+    encrypted = null,
+    presence = null,
     isVoice,
     callParticipants,
     members,
@@ -81,23 +88,37 @@
         })
       : i18n.t('common.voiceRoom')
   );
+  let encryptionLabel = $derived(
+    encrypted === null
+      ? null
+      : encrypted
+        ? i18n.t('room.encryptionOn')
+        : i18n.t('room.encryptionNotOn')
+  );
   let topicShown = $derived(topic !== null && topic.trim() !== '' && onTopic !== null);
 </script>
 
 <PanelHeader class="room-header" suffixToolbarLabel={i18n.t('room.actionsLabel')}>
   {#snippet prefix()}
     <PanelHeaderButton class="back-button" label={i18n.t('timeline.back')} onclick={onBack}>
-      <BackIcon />
+      <BackIcon class="mirror-rtl" />
     </PanelHeaderButton>
 
-    <Avatar class="room-avatar" id={roomId} src={roomAvatar} name={roomName} size="small" />
+    <span class="room-avatar">
+      <Avatar id={roomId} src={roomAvatar} openable={true} name={roomName} size="small" />
+    </span>
   {/snippet}
 
   {#snippet main()}
     <div class={['room-identity', { 'with-topic': topicShown }]}>
-      <h1>{roomName}</h1>
+      <div class="room-title">
+        <h1 tabindex="-1" data-room-heading><bdi>{roomName}</bdi></h1>
+        {#if presence && presence !== 'offline'}
+          <PresenceDot {presence} label={i18n.t(`presence.${presence}`)} size="medium" />
+        {/if}
+      </div>
       {#if topicShown}
-        <button class="room-topic" type="button" onclick={onTopic}>{topic}</button>
+        <button class="room-topic" type="button" onclick={onTopic}><bdi>{topic}</bdi></button>
       {/if}
     </div>
     {#if elementCallActive}
@@ -133,6 +154,15 @@
   {/snippet}
 
   {#snippet suffix()}
+    {#if encryptionLabel !== null}
+      <Tooltip label={encryptionLabel}>
+        {#snippet trigger({ props })}
+          <span {...props} class="encryption-state" role="img" aria-label={encryptionLabel}>
+            {#if encrypted}<LockSimpleIcon />{:else}<LockSimpleOpenIcon />{/if}
+          </span>
+        {/snippet}
+      </Tooltip>
+    {/if}
     <PanelHeaderButton
       class="search-button"
       label={i18n.t('common.searchMessages')}
@@ -214,13 +244,25 @@
     min-width: 0;
   }
 
+  .room-title {
+    align-items: center;
+    display: flex;
+    gap: var(--space-150);
+    min-width: 0;
+  }
+
   h1 {
     font-size: var(--font-size-heading);
     line-height: var(--line-height-heading);
     margin: 0;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  h1:focus {
+    outline: none;
   }
 
   .room-identity.with-topic h1 {
@@ -238,7 +280,7 @@
     margin: 0;
     overflow: hidden;
     padding: 0;
-    text-align: left;
+    text-align: start;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -253,7 +295,7 @@
     outline-offset: var(--focus-ring-offset);
   }
 
-  :global(.avatar-root.room-avatar) {
+  .room-avatar {
     display: none;
   }
 
@@ -282,6 +324,18 @@
     display: flex;
   }
 
+  .encryption-state {
+    color: var(--surface-var-on-container);
+    display: flex;
+    opacity: var(--opacity-placeholder);
+    padding: var(--space-100);
+  }
+
+  .encryption-state :global(svg) {
+    height: var(--icon-size-small);
+    width: var(--icon-size-small);
+  }
+
   .voice-faces :global(.avatar-root.voice-face) {
     --avatar-size: 1.25rem;
 
@@ -289,7 +343,7 @@
   }
 
   .voice-faces :global(.avatar-root.voice-face:not(:first-child)) {
-    margin-left: calc(-1 * var(--space-150));
+    margin-inline-start: calc(-1 * var(--space-150));
   }
 
   .voice-count {
@@ -308,12 +362,12 @@
     width: var(--icon-size-medium);
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     :global(.back-button) {
       display: none;
     }
 
-    :global(.avatar-root.room-avatar) {
+    .room-avatar {
       display: inline-flex;
     }
   }

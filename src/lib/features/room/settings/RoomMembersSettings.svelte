@@ -7,10 +7,11 @@
     RoomListItemView,
   } from '#src/generated/protocol';
 
-  import { CoreError } from '#src/transport';
+  import { isCoreError } from '#src/transport';
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { isUserId } from '#lib/guards.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -29,6 +30,7 @@
     MEMBER_SORT_LABELS,
     groupMembers,
     matchesFilter,
+    memberName,
     membershipFor,
     type MembershipFilter,
   } from '#lib/rooms/member-listing.js';
@@ -42,9 +44,14 @@
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
 
   import '#lib/ui/primitives/settings-row.css';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
-  import { FOUNDER_POWER_LEVEL, type PowerLevelTagMap } from './power-level-tags';
+  import {
+    FOUNDER_POWER_LEVEL,
+    isValidPowerLevel,
+    type PowerLevelTagMap,
+  } from './power-level-tags';
 
   interface Props {
     room: RoomListItemView | null;
@@ -61,7 +68,6 @@
     { level: -1, label: 'timeline.powerLevelMuted' },
   ];
 
-  const userIdPattern = /^@[^:\s]+:\S+$/;
   const noMembers: MemberView[] = [];
 
   let tab = $state<MembershipFilter>('join');
@@ -97,8 +103,7 @@
   let inviteQuery = $derived(canInviteInline ? search.trim() : '');
   let candidates = $derived.by(() => {
     const typed =
-      userIdPattern.test(inviteQuery) &&
-      !directory.results.some((entry) => entry.user_id === inviteQuery)
+      isUserId(inviteQuery) && !directory.results.some((entry) => entry.user_id === inviteQuery)
         ? [{ user_id: inviteQuery, display_name: null, avatar_url: null }]
         : [];
     return [...typed, ...directory.results].filter(
@@ -188,10 +193,6 @@
     }
   }
 
-  function memberName(member: MemberView): string {
-    return member.display_name ?? member.user_id;
-  }
-
   async function load(): Promise<void> {
     const target = roomId;
     const filter = tab;
@@ -243,7 +244,7 @@
       console.warn('[sable room] member action failed', error);
       await load();
       failed = true;
-      denied = error instanceof CoreError && error.detail.code === 'denied';
+      denied = isCoreError(error, 'denied');
     } finally {
       busy = null;
     }
@@ -262,7 +263,7 @@
     );
     for (const [level, tag] of Object.entries(powerTags)) labels[String(Number(level))] = tag.name;
     const known = Object.entries(labels)
-      .filter(([level]) => Number(level) <= ownPowerLevel)
+      .filter(([level]) => isValidPowerLevel(Number(level)) && Number(level) <= ownPowerLevel)
       .sort(([left], [right]) => Number(right) - Number(left))
       .map(([value, label]) => ({ value, label }));
     const current = String(member.power_level);
@@ -370,13 +371,9 @@
   </div>
 
   <div class="search">
-    <TextInput
+    <SearchField
       bind:value={search}
-      type="search"
-      placeholder={canInviteInline
-        ? i18n.t('room.membersSearchOrInvite')
-        : i18n.t('timeline.searchMembers')}
-      aria-label={canInviteInline
+      label={canInviteInline
         ? i18n.t('room.membersSearchOrInvite')
         : i18n.t('timeline.searchMembers')}
     />
@@ -714,11 +711,6 @@
     align-items: center;
     display: flex;
     gap: var(--space-200);
-  }
-
-  .search > :global(.text-input) {
-    flex: 1;
-    min-width: 0;
   }
 
   .user-id {

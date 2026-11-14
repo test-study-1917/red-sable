@@ -2,12 +2,14 @@ import type {
   MemberView,
   MessageKind,
   PerMessageProfileView,
+  PersonaView,
   SlashInvocation,
   Rpc,
 } from '#src/generated/protocol';
-import { CoreError } from '#src/transport';
+import { isCoreError } from '#src/transport';
 
-import { knockRoom } from '#lib/core/api/rooms.js';
+import { knockRoom, openDirectMessage } from '#lib/core/api/rooms.js';
+import type { E2eePolicy } from '#lib/deployment/e2ee-policy.js';
 import { setMemberLook } from '#lib/core/api/members.js';
 import { joinOrOfferKnock } from '#lib/rooms/join-or-knock.js';
 import { parseSlash } from '#lib/model/model.js';
@@ -16,6 +18,7 @@ import { preferences } from '#lib/settings/preferences.svelte.js';
 
 import { geoUriFor } from './composer-location.js';
 import { rainbowFormatted, rainbowHtml } from './rainbow.js';
+import { isRecord } from '#lib/guards.js';
 
 export { parseSlash, pronounSets, slashCommandNames } from '#lib/model/model.js';
 
@@ -43,6 +46,7 @@ export type SlashContext = {
   formatted?: string | null;
   developerTools?: boolean;
   rpc: SlashRpc;
+  e2eePolicy: () => Promise<E2eePolicy>;
   persona?: () => PerMessageProfileView | null;
 };
 
@@ -162,9 +166,7 @@ async function eachUser(
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  return isRecord(value) ? value : {};
 }
 
 function locationParams(roomId: string, geoUri: string) {
@@ -217,7 +219,7 @@ async function addWidget(
   try {
     await rpc.room_state.addWidget({ room_id: roomId, name: widget.name, url: widget.url });
   } catch (error) {
-    if (error instanceof CoreError && error.detail.code === 'invalid_url') {
+    if (isCoreError(error, 'invalid_url')) {
       return usageError(name);
     }
     throw error;
@@ -235,19 +237,27 @@ async function addPersona(
   const avatar = persona.avatar ?? existing?.avatar_url ?? null;
   if (avatar !== null && !MXC_URI.test(avatar)) return usageError(name);
 
+  const next = {
+    id,
+    display_name: persona.name ?? existing?.display_name ?? id,
+    avatar_url: avatar,
+    pronouns: existing?.pronouns ?? [],
+    color_on_light: existing?.color_on_light ?? null,
+    color_on_dark: existing?.color_on_dark ?? null,
+    triggers: existing?.triggers ?? [],
+    pluralkit: existing?.pluralkit ?? null,
+    last_used: existing?.last_used ?? null,
+    alternate_avatars: existing?.alternate_avatars ?? null,
+    biography: existing?.biography ?? null,
+    banner_url: existing?.banner_url ?? null,
+    is_animal: existing?.is_animal ?? null,
+    has_animal: existing?.has_animal ?? null,
+    animal_need: existing?.animal_need ?? null,
+    sort_flags: existing?.sort_flags ?? null,
+  } satisfies PersonaView;
   await rpc.personas.save({
-    persona: {
-      id,
-      display_name: persona.name ?? existing?.display_name ?? id,
-      avatar_url: avatar,
-      pronouns: existing?.pronouns ?? [],
-      color_on_light: existing?.color_on_light ?? null,
-      color_on_dark: existing?.color_on_dark ?? null,
-      triggers: existing?.triggers ?? [],
-      pluralkit: existing?.pluralkit ?? null,
-      last_used: existing?.last_used ?? null,
-      alternate_avatars: existing?.alternate_avatars ?? null,
-    },
+    persona: next,
+    base_persona: existing ?? next,
     previous_id: existing ? id : null,
   });
   return DONE;
@@ -266,9 +276,15 @@ async function addPersonaProxy(
       ...persona,
       triggers: [
         ...persona.triggers,
-        { prefix: proxy.prefix, suffix: proxy.suffix, keep_trigger: false },
+        {
+          prefix: proxy.prefix,
+          suffix: proxy.suffix,
+          keep_trigger: false,
+          alternate_avatar_id: null,
+        },
       ],
     },
+    base_persona: persona,
     previous_id: proxy.id,
   });
   return DONE;
@@ -312,7 +328,7 @@ async function run(
   invocation: SlashInvocation,
   context: SlashContext
 ): Promise<SlashOutcome> {
-  const { roomId, userId, rpc } = context;
+  const { roomId, userId, rpc, e2eePolicy } = context;
   switch (invocation.command) {
     case 'bug_report':
       return { kind: 'bugReport' };
@@ -411,7 +427,7 @@ async function run(
       );
     case 'start_dm':
       return eachUser(invocation.user_ids, (target) =>
-        rpc.rooms.createDm({ user_id: target, encrypted: null })
+        openDirectMessage({ rpc, e2eePolicy }, target)
       );
     case 'convert_to_dm':
       await rpc.account.setDirect({

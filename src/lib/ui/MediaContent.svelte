@@ -40,6 +40,7 @@
     size?: number | null;
     blurhash?: string | null;
     thumbnail?: string | null;
+    thumbnailMime?: string | null;
     durationMs?: number | null;
     waveform?: number[] | null;
     audioMetadata?: AudioMetadataView | null;
@@ -59,6 +60,7 @@
     size = null,
     blurhash = null,
     thumbnail = null,
+    thumbnailMime = null,
     durationMs = null,
     waveform = null,
     audioMetadata = null,
@@ -204,7 +206,9 @@
     {height}
     {blurhash}
     {thumbnail}
+    {thumbnailMime}
     {playback}
+    {size}
     class={className}
   />
 {:else}
@@ -413,6 +417,6 @@
   }
 
   .retry-media {
-    margin-left: var(--space-300);
+    margin-inline-start: var(--space-300);
   }
 </style>

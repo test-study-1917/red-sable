@@ -6,10 +6,12 @@ import {
   unregisterNativePushConfig,
   listPushDistributors,
   setPushDistributor,
+  type NativePushAccount,
 } from '#lib/platform/push.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 
 import {
+  embeddedServer,
   hasCompleteOverride,
   pushConfig,
   type PushOverride,
@@ -35,7 +37,7 @@ async function register(
   accounts: readonly SessionInfo[],
   provider: PushProvider = selectedPushProvider()
 ): Promise<void> {
-  if (!(await deliversNativePush())) return;
+  if (!deliversNativePush()) return;
 
   const { resolved, details } = await pushConfig(override);
   if (!resolved) throw new PushConfigMissing();
@@ -55,7 +57,7 @@ async function register(
         ? (details.iosPushAppID ?? null)
         : null,
     unifiedPushGatewayUrl: details?.unifiedPushGatewayUrl ?? null,
-    embeddedGatewayUrl: details?.unifiedPushEmbeddedServerUrl ?? 'https://ntfy.sh',
+    embeddedGatewayUrl: preferences.pushEmbeddedServerUrl.trim() || embeddedServer(details),
     provider,
     eventIdOnly: !preferences.richPushPayloads,
     userId: session?.user_id ?? null,
@@ -138,6 +140,8 @@ export function registerNativePush(
     session?.device_id,
     accounts.map((account) => [account.user_id, account.device_id, account.needs_reauth]),
     selectedPushProvider(),
+    preferences.richPushPayloads,
+    preferences.pushEmbeddedServerUrl,
   ]);
   if (queuedRegistration?.key === key) return queuedRegistration.result;
   const result = enqueue(async () => {
@@ -161,11 +165,24 @@ export function registerNativePush(
   return result;
 }
 
-export function unregisterNativePush(): Promise<void> {
-  wanted = null;
-  cancelRetry();
-  retryAttempt = 0;
-  return enqueue(() => unregisterNativePushConfig());
+export function unregisterNativePush(account?: NativePushAccount): Promise<void> {
+  if (
+    !account ||
+    (wanted?.session?.user_id === account.user_id && wanted.session.device_id === account.device_id)
+  ) {
+    wanted = null;
+    cancelRetry();
+    retryAttempt = 0;
+  } else if (wanted) {
+    wanted = {
+      ...wanted,
+      accounts: wanted.accounts.filter(
+        (candidate) =>
+          candidate.user_id !== account.user_id || candidate.device_id !== account.device_id
+      ),
+    };
+  }
+  return enqueue(() => unregisterNativePushConfig(account));
 }
 
 export function switchPushProvider(

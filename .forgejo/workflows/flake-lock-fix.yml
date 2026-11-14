@@ -6,7 +6,7 @@ on:
     paths:
       - 'pnpm-lock.yaml'
       - '**/Cargo.lock'
-      - 'scripts/build/fetch-deepfilternet.mjs'
+      - 'packaging/nix/wasm-bindgen-cli.nix'
   workflow_dispatch:
 
 jobs:
@@ -22,26 +22,15 @@ jobs:
         with:
           ref: main
           persist-credentials: true
-          token: ${{ github.token }}
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Install Lix
         uses: https://github.com/samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
         with:
           extra_nix_config: experimental-features = nix-command flakes
 
-      # Only the fixed-output derivations carry hashes, so there's no need to build the app.
       - name: Fix hash mismatches
-        run: |
-          set +o pipefail
-          nix build -L --keep-going --no-link \
-            .#sable-unwrapped.pnpmDeps \
-            .#sable-unwrapped.cargoDeps \
-            .#sable-deepfilternet-assets 2>&1 |
-            tee /dev/stderr |
-            grep -E '(specified|got):' | grep -oE 'sha256-\S+' | paste - - |
-            while read -r old new; do
-              sed -i "s|$old|$new|" packaging/nix/*.nix
-            done
+        run: scripts/release/fix-nix-hashes.sh
 
       - name: Commit and push if changed
         run: |

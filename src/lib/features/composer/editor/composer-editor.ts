@@ -1,3 +1,5 @@
+import { clamp } from '#lib/clamp.js';
+import { afterNextPaint } from '#lib/ui/after-paint.js';
 import {
   baseKeymap,
   chainCommands,
@@ -31,13 +33,15 @@ import type { PackImageView } from '#src/generated/protocol';
 
 import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
-import { toProseMirrorKey } from '#lib/ui/shortcuts/binding.js';
+import { isNumpadEvent, matchesBinding, toProseMirrorKey } from '#lib/ui/shortcuts/binding.js';
 import { bindingFor } from '#lib/ui/shortcuts/bindings.svelte.js';
+import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
 import type { ShortcutId } from '#lib/ui/shortcuts/shortcuts.js';
 import type { AutocompleteQuery } from '../autocomplete';
 import { filesFrom } from '#lib/composer/composer-files.js';
 import { autolinks } from './autolinks';
 import { compositionInputRules } from './composition-rules';
+import { emoticonInputRule } from './emoticons';
 import {
   activeColors,
   activeMarks,
@@ -85,7 +89,12 @@ function shortcutKeymap(commands: Partial<Record<ShortcutId, Command>>): Plugin 
         const map: Record<string, Command> = {};
         for (const [id, command] of Object.entries(commands)) {
           const binding = bindingFor(id);
-          if (binding) map[toProseMirrorKey(binding)] = command;
+          if (!binding) continue;
+          // ProseMirror keymaps only see event.key, so numpad keys would collide with their main-row twins.
+          if (!isNumpadEvent(event)) map[toProseMirrorKey(binding)] = command;
+          else if (matchesBinding(binding, event, isMacPlatform())) {
+            return command(view.state, view.dispatch, view);
+          }
         }
         return keydownHandler(map)(view, event);
       },
@@ -651,6 +660,10 @@ export interface ComposerEditorOptions {
   emotes: () => readonly PackImageView[];
   label: () => string;
   describedBy?: string;
+  id?: string;
+  richText?: boolean;
+  multiline?: boolean;
+  maxLength?: number;
   listboxId: string;
   activeOptionId: () => string | null;
   editable: () => boolean;
@@ -662,7 +675,7 @@ export interface ComposerEditorOptions {
   onLinkRequest: () => void;
   mentionName?: (userId: string) => string | null;
   onSpoilerRequest: () => void;
-  onSourceToggle: (source: boolean) => void;
+  onSourceToggle?: (source: boolean) => void;
 }
 
 function isDocEmpty(doc: ProseMirrorNode): boolean {
@@ -695,7 +708,7 @@ export class ComposerEditor {
   private iosEnter: { shift: boolean; handled: boolean } | null = null;
   private shiftHeld = false;
   private keyboardReset: HTMLTextAreaElement | undefined;
-  private keyboardResetFrame: number | undefined;
+  private cancelKeyboardReset: (() => void) | undefined;
 
   constructor(private options: ComposerEditorOptions) {}
 
@@ -714,13 +727,16 @@ export class ComposerEditor {
     return true;
   }
 
+  private insertsNewline(): boolean {
+    return this.options.multiline || enterInsertsNewline();
+  }
+
   private blockBreak: Command = (state, dispatch, view) =>
-    preferences.richTextComposer &&
-    !this.source &&
+    !this.markdownMode() &&
     chainCommands(openFence, openHorizontalRule, closeFence)(state, dispatch, view);
 
   private shiftEnter: Command = (state, dispatch, view) =>
-    enterInsertsNewline()
+    !this.options.multiline && this.insertsNewline()
       ? this.submit()
       : this.blockBreak(state, dispatch, view) || softBreak(state, dispatch, view);
 
@@ -730,13 +746,13 @@ export class ComposerEditor {
     if (iosEnter?.handled) return true;
     if (iosEnter?.shift) return this.shiftEnter(state, dispatch, view);
     if (this.options.onNavigate('Enter')) return true;
-    const rich = preferences.richTextComposer && !this.source;
+    const rich = !this.markdownMode();
     if (this.blockBreak(state, dispatch, view)) return true;
     if (exitEmptyCodeLine(state, dispatch, view)) return true;
     if (newlineInCode(state, dispatch, view)) return true;
     if (splitListEntry(state, dispatch, view)) return true;
     if (insideListItem(state) && liftEmptyBlock(state, dispatch, view)) return true;
-    if (!enterInsertsNewline()) return this.submit();
+    if (!this.insertsNewline()) return this.submit();
     return rich
       ? chainCommands(liftEmptyBlock, softBreak)(state, dispatch, view)
       : insertHardBreak(state, dispatch, view);
@@ -746,6 +762,7 @@ export class ComposerEditor {
     const activeOption = this.options.activeOptionId();
 
     return {
+      ...(this.options.id ? { id: this.options.id } : {}),
       'aria-label': this.options.label(),
       role: 'combobox',
       'aria-controls': this.options.listboxId,
@@ -754,7 +771,7 @@ export class ComposerEditor {
       /* No `aria-multiline`: it is a textbox property, invalid on a combobox. */
       spellcheck: preferences.composerSpellcheck ? 'true' : 'false',
       autocapitalize: preferences.composerAutocapitalize ? 'sentences' : 'off',
-      enterkeyhint: !enterInsertsNewline() ? 'send' : 'enter',
+      enterkeyhint: !this.insertsNewline() ? 'send' : 'enter',
       ...(this.options.describedBy ? { 'aria-describedby': this.options.describedBy } : {}),
     };
   }
@@ -762,15 +779,32 @@ export class ComposerEditor {
   private plugins(): Plugin[] {
     /* Read once, here, rather than inside the view: an option the constructor
        calls becomes a dependency of the attachment that mounts it. */
-    const rich = untrack(() => preferences.richTextComposer) && !this.source;
+    const rich = untrack(() => !this.markdownMode());
+
+    const maxLength = this.options.maxLength;
 
     return [
       history(),
+      ...(maxLength === undefined
+        ? []
+        : [
+            new Plugin({
+              filterTransaction: (tr, state) => {
+                if (!tr.docChanged || tr.getMeta('setDoc')) return true;
+                const length = plainTextOf(tr.doc).length;
+                return length <= maxLength || length <= plainTextOf(state.doc).length;
+              },
+            }),
+          ]),
       documentEdgeGuard(),
       queryPlugin(),
       inputRules({
         rules: [
           shortcodeInputRule(this.options.emotes),
+          emoticonInputRule(
+            () => preferences.emoticonToEmoji,
+            () => this.markdownMode()
+          ),
           ...(rich
             ? [
                 mfmTimeInputRule(composerSchema.nodes.mfm_time),
@@ -783,16 +817,17 @@ export class ComposerEditor {
       compositionInputRules(),
       ...(rich ? [autolinks(), keymap(formattingKeymap)] : []),
       shortcutKeymap({
-        ...(rich
-          ? {
-              ...formattingShortcuts,
-              'composer.link': () => {
-                this.options.onLinkRequest();
-                return true;
-              },
-            }
-          : {}),
+        ...Object.fromEntries(
+          Object.entries(formattingShortcuts).map(([id, action]) => [
+            id,
+            () => {
+              this.format(action);
+              return true;
+            },
+          ])
+        ),
         'composer.toggleSource': () => {
+          if (!this.options.onSourceToggle) return false;
           this.options.onSourceToggle(this.toggleSource());
           return true;
         },
@@ -866,7 +901,8 @@ export class ComposerEditor {
   }
 
   mount(node: HTMLElement): () => void {
-    const state = this.createState();
+    const restored = this.detachedDoc;
+    const state = this.createState(restored, restored && Selection.atEnd(restored));
 
     /* The constructor calls editable() and reads the attributes, so an unguarded
        build makes every option a dependency of the attachment that mounts it. */
@@ -889,18 +925,14 @@ export class ComposerEditor {
           transformPasted: (slice, pasteView) =>
             this.pastedMentions(pasteView.state, openLoneParagraph(slice)),
           clipboardTextParser: (text, _context, plain) => {
-            return plain || this.source || !preferences.richTextComposer
-              ? textSlice(text)
-              : markdownSlice(text);
+            return plain || this.markdownMode() ? textSlice(text) : markdownSlice(text);
           },
           handleTextInput: (inputView, from, to, text) => {
             const end = inputView.state.doc.content.size;
             if (from < 0 || to < from || to > end) {
               if (text === '') return true;
-              const start = Math.max(0, Math.min(from, end));
-              inputView.dispatch(
-                inputView.state.tr.insertText(text, start, Math.max(start, Math.min(to, end)))
-              );
+              const start = clamp(from, 0, end);
+              inputView.dispatch(inputView.state.tr.insertText(text, start, clamp(to, start, end)));
               return true;
             }
             if (text !== ' ' || from !== to || from !== this.pillSpace) return false;
@@ -939,7 +971,7 @@ export class ComposerEditor {
                 event.cancelable &&
                 hasIosKeyboardContextQuirk() &&
                 (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') &&
-                !(this.iosEnter?.shift && enterInsertsNewline()) &&
+                !(this.iosEnter?.shift && this.insertsNewline()) &&
                 (this.blockBreak(view.state, view.dispatch, view) ||
                   (this.iosEnter?.shift
                     ? newlineInCode
@@ -1017,6 +1049,11 @@ export class ComposerEditor {
     );
 
     this.view = view;
+    if (restored) {
+      untrack(() => {
+        this.report(state, false);
+      });
+    }
     const stopTrace = traceComposerInput(view.dom);
 
     if (hasIosKeyboardContextQuirk()) {
@@ -1030,8 +1067,8 @@ export class ComposerEditor {
 
     return () => {
       stopTrace();
-      if (this.keyboardResetFrame !== undefined) cancelAnimationFrame(this.keyboardResetFrame);
-      this.keyboardResetFrame = undefined;
+      this.cancelKeyboardReset?.();
+      this.cancelKeyboardReset = undefined;
       this.keyboardReset?.remove();
       this.keyboardReset = undefined;
       view.destroy();
@@ -1055,7 +1092,7 @@ export class ComposerEditor {
   }
 
   syncKeyHint(): void {
-    void enterInsertsNewline();
+    void this.insertsNewline();
     this.view?.setProps({});
   }
 
@@ -1112,23 +1149,24 @@ export class ComposerEditor {
 
   clear(): void {
     const view = this.view;
-    if (!view) return;
+    if (!view) {
+      this.detachedDoc = undefined;
+      return;
+    }
     view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
     if (this.keyboardReset && view.hasFocus()) this.resetKeyboard(view, this.keyboardReset);
   }
 
   private resetKeyboard(view: EditorView, proxy: HTMLTextAreaElement): void {
     proxy.focus({ preventScroll: true });
-    if (this.keyboardResetFrame !== undefined) cancelAnimationFrame(this.keyboardResetFrame);
-    this.keyboardResetFrame = requestAnimationFrame(() => {
-      this.keyboardResetFrame = requestAnimationFrame(() => {
-        this.keyboardResetFrame = undefined;
-        if (this.view !== view || document.activeElement !== proxy) return;
-        const typed = proxy.value;
-        proxy.value = '';
-        view.focus();
-        if (typed) view.dispatch(view.state.tr.insertText(typed));
-      });
+    this.cancelKeyboardReset?.();
+    this.cancelKeyboardReset = afterNextPaint(() => {
+      this.cancelKeyboardReset = undefined;
+      if (this.view !== view || document.activeElement !== proxy) return;
+      const typed = proxy.value;
+      proxy.value = '';
+      view.focus();
+      if (typed) view.dispatch(view.state.tr.insertText(typed));
     });
   }
 
@@ -1138,8 +1176,13 @@ export class ComposerEditor {
 
   setDoc(doc: ProseMirrorNode): void {
     const view = this.view;
-    if (!view) return;
-    const transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
+    if (!view) {
+      this.detachedDoc = doc;
+      return;
+    }
+    const transaction = view.state.tr
+      .replaceWith(0, view.state.doc.content.size, doc.content)
+      .setMeta('setDoc', true);
     transaction.setSelection(Selection.atEnd(transaction.doc));
     view.dispatch(transaction);
   }
@@ -1345,7 +1388,7 @@ export class ComposerEditor {
   }
 
   private markdownMode(): boolean {
-    return this.source || !preferences.richTextComposer;
+    return this.source || !(this.options.richText ?? preferences.richTextComposer);
   }
 
   format(action: FormatAction): void {

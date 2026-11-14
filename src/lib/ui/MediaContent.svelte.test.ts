@@ -192,6 +192,36 @@ test('falls back to the plain audio player when there is no waveform', async () 
 
   expect(document.querySelector('.voice-message-player')).toBeNull();
   expect(document.querySelector('.audio-container')).not.toBeNull();
+  expect(screen.getByRole('button', { name: 'Play clip.ogg' })).toBeInTheDocument();
+  expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute(
+    'aria-valuetext',
+    '00:00 / XX:XX'
+  );
+});
+
+test('audio file volume popover sets and remembers the volume', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
+  const props = {
+    kind: 'audio' as const,
+    source: 'mxc://example.org/audio-volume',
+    mime: 'audio/ogg',
+    filename: 'clip.ogg',
+    waveform: null,
+  };
+  const first = render(MediaContent, { props });
+  await settle();
+
+  await userEvent.click(screen.getByRole('button', { name: 'Volume' }));
+  const slider = await screen.findByRole('slider', { name: 'Volume' });
+  slider.focus();
+  await userEvent.keyboard('{ArrowLeft}');
+  expect(document.querySelector('audio')?.volume).toBe(0.95);
+
+  first.unmount();
+  render(MediaContent, { props: { ...props, source: 'mxc://example.org/audio-volume-2' } });
+  await settle();
+
+  expect(document.querySelector('audio')?.volume).toBe(0.95);
 });
 
 test('labels unavailable attachments', async () => {
@@ -288,6 +318,29 @@ test.each([
     expect(document.querySelector('video')?.getAttribute('controlslist')).toBe(controlsList);
   }
 );
+
+test('a video the platform cannot decode offers a download instead', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));
+  render(MediaContent, {
+    props: {
+      kind: 'video',
+      source: 'mxc://example.org/hevc',
+      mime: 'video/mp4',
+      filename: 'clip.mp4',
+    },
+  });
+
+  await settle();
+  await userEvent.click(screen.getByRole('button', { name: /^Play / }));
+  await settle();
+
+  document.querySelector('video')?.dispatchEvent(new Event('error'));
+  await settle();
+
+  expect(document.querySelector('video')).toBeNull();
+  expect(screen.getByText(/can't be played on this device/)).toBeTruthy();
+  expect(document.querySelector('a[download="clip.mp4"]')).not.toBeNull();
+});
 
 test('voice message speed button cycles the playback rate', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer()));

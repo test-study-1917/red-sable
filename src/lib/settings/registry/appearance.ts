@@ -1,3 +1,4 @@
+import BridgeIcon from 'phosphor-svelte/lib/BridgeIcon';
 import CalendarBlankIcon from 'phosphor-svelte/lib/CalendarBlankIcon';
 import ChatTextIcon from 'phosphor-svelte/lib/ChatTextIcon';
 import ChatsCircleIcon from 'phosphor-svelte/lib/ChatsCircleIcon';
@@ -7,7 +8,6 @@ import DotIcon from 'phosphor-svelte/lib/DotIcon';
 import EyeIcon from 'phosphor-svelte/lib/EyeIcon';
 import HouseIcon from 'phosphor-svelte/lib/HouseIcon';
 import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
-import KeyboardIcon from 'phosphor-svelte/lib/KeyboardIcon';
 import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
 import MagnifyingGlassPlusIcon from 'phosphor-svelte/lib/MagnifyingGlassPlusIcon';
 import MegaphoneIcon from 'phosphor-svelte/lib/MegaphoneIcon';
@@ -19,11 +19,11 @@ import SmileyIcon from 'phosphor-svelte/lib/SmileyIcon';
 import TextAaIcon from 'phosphor-svelte/lib/TextAaIcon';
 import TranslateIcon from 'phosphor-svelte/lib/TranslateIcon';
 import TreeStructureIcon from 'phosphor-svelte/lib/TreeStructureIcon';
+import UsersIcon from 'phosphor-svelte/lib/UsersIcon';
 import WheelchairMotionIcon from 'phosphor-svelte/lib/WheelchairMotionIcon';
 import { setLanguage } from '#lib/i18n.js';
 import { availableLocales, localeLabel, SYSTEM_LANGUAGE } from '#lib/locales.js';
-import { supportsDesktopWindow } from '#lib/platform/window-decorations.js';
-import { SUBSPACE_DEPTHS } from '../preferences.svelte';
+import { SUBSPACE_DEPTHS } from '../definitions';
 import type { SettingsCategory } from '../registry';
 
 export const appearanceCategory: SettingsCategory = {
@@ -85,6 +85,18 @@ export const appearanceCategory: SettingsCategory = {
       ],
     },
     {
+      key: 'voiceParticipantPlacement',
+      section: 'sidebar',
+      icon: UsersIcon,
+      name: 'settings.voiceParticipantPlacement',
+      type: 'select',
+      options: [
+        { value: 'both', label: 'settings.voiceParticipantsBoth' },
+        { value: 'below', label: 'settings.voiceParticipantsBelow' },
+        { value: 'inline', label: 'settings.voiceParticipantsInline' },
+      ],
+    },
+    {
       key: 'showSpaceEvents',
       section: 'sidebar',
       icon: CalendarBlankIcon,
@@ -107,6 +119,13 @@ export const appearanceCategory: SettingsCategory = {
       type: 'boolean',
     },
     {
+      key: 'showBridgeBadges',
+      section: 'sidebar',
+      icon: BridgeIcon,
+      name: 'settings.showBridgeBadges',
+      type: 'boolean',
+    },
+    {
       key: 'showRoomBanners',
       section: 'sidebar',
       icon: ImageIcon,
@@ -120,6 +139,20 @@ export const appearanceCategory: SettingsCategory = {
       name: 'settings.showDmTopics',
       description: 'settings.showDmTopicsHint',
       type: 'boolean',
+    },
+    {
+      key: 'messagePreviews',
+      section: 'sidebar',
+      icon: ChatTextIcon,
+      name: 'settings.messagePreviews',
+      description: 'settings.messagePreviewsHint',
+      type: 'select',
+      options: [
+        { value: 'off', label: 'settings.messagePreviewsOff' },
+        { value: 'direct', label: 'settings.messagePreviewsDirect' },
+        { value: 'rooms', label: 'settings.messagePreviewsRooms' },
+        { value: 'all', label: 'settings.messagePreviewsAll' },
+      ],
     },
     {
       key: 'subspaceHierarchyLimit',
@@ -188,15 +221,6 @@ export const appearanceCategory: SettingsCategory = {
       type: 'range',
       step: 0.05,
       applyOnCommit: true,
-    },
-    {
-      key: 'zoomShortcuts',
-      section: 'accessibility',
-      icon: KeyboardIcon,
-      name: 'settings.zoomShortcuts',
-      description: 'settings.zoomShortcutsHint',
-      type: 'boolean',
-      supported: supportsDesktopWindow,
     },
     {
       key: 'textScale',

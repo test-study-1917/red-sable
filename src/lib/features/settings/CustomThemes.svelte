@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { inlineKey } from '#lib/language.svelte.js';
   import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
   import { onDestroy, tick } from 'svelte';
 
@@ -7,6 +8,7 @@
     enableCustomTweak,
     installCustomTheme,
     installCustomTweak,
+    linkThemeFile,
     removeCustomTheme,
     removeCustomTweak,
     clearThemePreview,
@@ -29,6 +31,7 @@
     themeSwatches,
   } from '#lib/settings/theme-file.js';
   import { pickFiles } from '#lib/platform/files.js';
+  import { pickThemeFiles, watchesThemeFiles } from '#lib/platform/theme-files.js';
   import { systemDark } from '#lib/platform/system-theme.js';
   import { i18n, t } from '#lib/i18n.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
@@ -40,6 +43,7 @@
 
   import ThemeCatalog from './ThemeCatalog.svelte';
   import ThemeTile from './ThemeTile.svelte';
+  import { communityFeatures } from '#lib/deployment/links.js';
   import { fetchCatalogFile, type CatalogEntry } from '#lib/settings/theme-catalog.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
@@ -55,6 +59,7 @@
     onThemeChosen,
   }: { onboarding?: boolean; onThemeChosen?: (kind: ResolvedTheme) => void } = $props();
 
+  let catalogAvailable = $derived(communityFeatures());
   let catalogOpen = $state(false);
   let installing = $state<string | null>(null);
   let error = $state<string | null>(null);
@@ -101,15 +106,20 @@
     pendingToast = id;
   }
 
-  function install(css: string, fallback: string, source?: string, activate = false): boolean {
+  function install(
+    css: string,
+    fallback: string,
+    source?: string,
+    activate = false
+  ): string | null {
     const parsed = parseThemeFile(css, fallback);
     if (parsed === 'size') {
       error = i18n.t('settings.customThemesErrorSize');
-      return false;
+      return null;
     }
     if (parsed === 'header') {
       error = i18n.t('settings.customThemesErrorHeader');
-      return false;
+      return null;
     }
     if (parsed.kind === 'tweak') {
       const tweak = { ...parsed.tweak, source };
@@ -117,7 +127,7 @@
       offerUndo(t('settings.themeInstalled', { name: tweak.name }), () => {
         removeCustomTweak(tweak.id);
       });
-      return true;
+      return tweak.id;
     }
     const theme = { ...parsed.theme, source };
     const previous = selectedCustomThemeId(theme.kind);
@@ -136,7 +146,7 @@
         }
       }
     );
-    return true;
+    return theme.id;
   }
 
   async function tryFromCatalog(entry: CatalogEntry): Promise<void> {
@@ -210,7 +220,29 @@
     }
   }
 
+  async function importLinkedFiles(): Promise<void> {
+    error = null;
+    try {
+      for (const file of await pickThemeFiles()) {
+        const name = file.path.split(/[\\/]/).pop() ?? file.path;
+        if (!isThemeFileName(name)) {
+          error = i18n.t('settings.customThemesErrorChoose');
+          continue;
+        }
+        const id = install(file.css, themeFileBaseName(name));
+        if (id !== null) linkThemeFile(id, file);
+      }
+    } catch (cause) {
+      console.debug('[sable themes] theme file not imported', cause);
+      error = i18n.t('settings.customThemesErrorChoose');
+    }
+  }
+
   async function importTheme(): Promise<void> {
+    if (watchesThemeFiles()) {
+      await importLinkedFiles();
+      return;
+    }
     const files = await pickFiles('*');
     if (files) {
       await importFiles(files);
@@ -233,7 +265,8 @@
       ...(event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[role="radio"]'),
     ];
     const from = radios.indexOf(document.activeElement as HTMLElement);
-    const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+    const key = inlineKey(event.key);
+    const step = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1;
     const to = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : (from + step + 2) % 2;
     if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key))
       return;
@@ -399,15 +432,17 @@
   {/if}
 
   <div class="actions">
-    <Button
-      variant={onboarding ? 'secondary' : 'primary'}
-      block={onboarding}
-      aria-haspopup="dialog"
-      aria-expanded={catalogOpen}
-      onclick={openCatalog}
-    >
-      {onboarding ? i18n.t('setup.browseThemes') : i18n.t('settings.themeCatalogTitle')}
-    </Button>
+    {#if catalogAvailable}
+      <Button
+        variant={onboarding ? 'secondary' : 'primary'}
+        block={onboarding}
+        aria-haspopup="dialog"
+        aria-expanded={catalogOpen}
+        onclick={openCatalog}
+      >
+        {onboarding ? i18n.t('setup.browseThemes') : i18n.t('settings.themeCatalogTitle')}
+      </Button>
+    {/if}
     {#if !onboarding}
       <Button variant="secondary" onclick={() => void importTheme()}>
         {i18n.t('settings.customThemesImport')}
@@ -462,7 +497,7 @@
   {/if}
 </div>
 
-{#if catalogOpen}
+{#if catalogAvailable && catalogOpen}
   <ThemeCatalog
     bind:open={() => catalogOpen, setCatalogOpen}
     {installing}

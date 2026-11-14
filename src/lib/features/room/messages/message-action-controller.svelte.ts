@@ -5,13 +5,15 @@ import type { PersonaStore } from '#lib/personas/personas.svelte.js';
 import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
 import { t } from '#lib/i18n.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
-import { saveBytes, savesNatively } from '#lib/platform/files.js';
+import { saveBytes, savesNatively, saveVideoToPhotos } from '#lib/platform/files.js';
 import { favoriteGifs, isFavorite, toggleFavorite } from '#lib/gif/favorites.svelte.js';
+import { isNativeMobile, isAndroid } from '#lib/platform/os.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
-import { gifFromProxiedMxc } from '#lib/gif/providers.js';
+import { gifFromProxiedMxc, gifFromUploadedMxc } from '#lib/gif/providers.js';
 import { downloadCandidates, emoteCandidates } from '#lib/features/emotes/steal-emotes.js';
 import { pinErrorMessage, type PinnedEvents } from '../timeline/pinned-events.svelte.js';
 import type { Bookmarks } from '#lib/rooms/bookmarks.svelte.js';
+import { meowlnirFor } from '#lib/rooms/meowlnir-registry.svelte.js';
 import type { MessageDialogs } from './message-dialogs.svelte.js';
 import type { ReplyVersion } from './reply-preview';
 import { messageActionPolicy } from './message-action-policy';
@@ -105,14 +107,23 @@ export class MessageActionExecutor {
     });
     const gif =
       item.content.kind === 'image'
-        ? gifFromProxiedMxc(
+        ? (gifFromProxiedMxc(
             item.content.source,
             item.content.filename,
             item.content.width,
             item.content.height,
             item.content.size,
             item.content.mime
-          )
+          ) ??
+          gifFromUploadedMxc(
+            item.content.source,
+            item.content.filename,
+            item.content.width,
+            item.content.height,
+            item.content.size,
+            item.content.mime,
+            item.content.animated
+          ))
         : undefined;
     const downloadMedia = async (media: {
       source: string;
@@ -141,6 +152,36 @@ export class MessageActionExecutor {
       } catch (error) {
         console.warn('[sable timeline] media download failed', error);
         toasts.error(t('errors.actionFailed'));
+      }
+    };
+
+    const saveVideoToLibrary = async (): Promise<void> => {
+      if (!policy.media || this.savingSource !== null) return;
+      this.savingSource = policy.media.source;
+      const slow = setTimeout(() => {
+        this.savingSlow = true;
+      }, SAVE_FEEDBACK_DELAY_MS);
+      try {
+        const bytes = await core.media.fetchMedia(policy.media.source, 0, 0);
+        const url = URL.createObjectURL(new Blob([bytes], { type: policy.media.mime ?? '' }));
+        try {
+          const outcome = await saveVideoToPhotos(
+            url,
+            policy.media.filename || 'video',
+            policy.media.mime ?? undefined
+          );
+          if (outcome === 'saved') toasts.info(t('viewer.saved'));
+          if (outcome === 'failed') toasts.error(t('errors.actionFailed'));
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } catch (error) {
+        console.warn('[sable timeline] save to photos failed', error);
+        toasts.error(t('errors.actionFailed'));
+      } finally {
+        clearTimeout(slow);
+        this.savingSource = null;
+        this.savingSlow = false;
       }
     };
 
@@ -175,12 +216,12 @@ export class MessageActionExecutor {
 
     async function openSource(eventId: string): Promise<void> {
       try {
-        const { source, encrypted, original } = await core.rpc.timeline.eventSource({
+        const { source, encrypted, original, encryption } = await core.rpc.timeline.eventSource({
           room_id: roomId,
           event_id: eventId,
           include_original: true,
         });
-        dialogs.open(item, { kind: 'source', source, encrypted, original });
+        dialogs.open(item, { kind: 'source', source, encrypted, original, encryption });
       } catch (error) {
         console.warn('[sable timeline] source unavailable', error);
         toasts.error(t('errors.actionFailed'));
@@ -214,7 +255,14 @@ export class MessageActionExecutor {
     }
 
     async function copyText(): Promise<void> {
-      if (policy.body) await writeClipboard(policy.body);
+      if (!policy.body) return;
+      try {
+        await writeClipboard(policy.body);
+        toasts.info(t('common.copied'));
+      } catch (error) {
+        console.debug('[sable timeline] copy message failed', error);
+        toasts.error(t('errors.actionFailed'));
+      }
     }
     return {
       roomId,
@@ -306,6 +354,10 @@ export class MessageActionExecutor {
             if (policy.media) void downloadMedia(policy.media);
           }
         : undefined,
+      onSaveToPhotos:
+        item.content.kind === 'video' && isNativeMobile() && !isAndroid()
+          ? () => void saveVideoToLibrary()
+          : undefined,
       gifFavorited: gif !== undefined && isFavorite(favoriteGifs(), gif),
       onFavoriteGif: gif
         ? () => {
@@ -330,6 +382,12 @@ export class MessageActionExecutor {
             dialogs.open(item, { kind: 'report' });
           }
         : undefined,
+      onMeowlnirBan:
+        !item.is_own && item.sender && meowlnirFor(roomId, core.session?.user_id)
+          ? () => {
+              dialogs.open(item, { kind: 'meowlnir-ban' });
+            }
+          : undefined,
     };
   }
 }

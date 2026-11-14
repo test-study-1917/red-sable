@@ -38,6 +38,13 @@
   --button-default-height: var(--control-height-medium);
 }
 
+.btn-large:not(.icon-button) {
+  --button-default-height: var(--control-height-large);
+
+  border-radius: var(--radius-inner);
+  border-width: var(--border-width);
+}
+
 .btn > svg {
   flex: 0 0 auto;
   height: var(--button-icon-size);
@@ -93,6 +100,14 @@
   --button-container-active: var(--crit-container-active);
   --button-line: var(--crit-container-line);
   --button-on-container: var(--crit-on-container);
+}
+
+.btn-success {
+  --button-container: var(--success-container);
+  --button-container-hover: var(--success-container-hover);
+  --button-container-active: var(--success-container-active);
+  --button-line: var(--success-container-line);
+  --button-on-container: var(--success-on-container);
 }
 
 .btn-small {
@@ -173,7 +188,7 @@
 }
 
 .icon-button-large {
-  --button-height: var(--control-height-500);
+  --button-height: var(--control-height-large);
   --button-icon-size: var(--size-x500);
 }
 

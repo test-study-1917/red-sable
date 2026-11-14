@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest';
-import { CoreError } from '#src/transport';
+import { CoreError, transportFailure } from '#src/transport';
 
 const sentry = vi.hoisted(() => ({ isInitialized: vi.fn(() => true), captureMessage: vi.fn() }));
 vi.mock('@sentry/sveltekit', () => sentry);
@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 test('reports a restore failure with its native log reference', () => {
-  reportSessionFailure('restore', new CoreError({ code: 'failed', log_id: 'e7' }));
+  reportSessionFailure('restore', new CoreError(transportFailure('e7')));
   expect(sentry.captureMessage).toHaveBeenCalledWith(
     'session.restore',
     expect.objectContaining({
@@ -52,5 +52,13 @@ test('does not include transport error text or arbitrary session-end reasons', (
 test('does not capture when reporting is disabled', () => {
   sentry.isInitialized.mockReturnValue(false);
   reportSessionFailure('restore', new Error('failure'));
+  expect(sentry.captureMessage).not.toHaveBeenCalled();
+});
+
+test('leaves a core crash to its own report', () => {
+  reportSessionFailure(
+    'restore',
+    new CoreError(transportFailure('core panicked: core failed to start: TypeError: Load failed'))
+  );
   expect(sentry.captureMessage).not.toHaveBeenCalled();
 });

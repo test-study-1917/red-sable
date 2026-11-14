@@ -9,12 +9,7 @@
   import '#lib/ui/primitives/menu.css';
 
   import { fuzzyMatchParts } from './fuzzy.js';
-  import {
-    filterRoomsByQuery,
-    parentSpaceNames,
-    parseJumpQuery,
-    roomDisplayName,
-  } from './room-jump.js';
+  import { filterRoomsByQuery, parentSpaceNames, parseJumpQuery } from './room-jump.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
   interface Props {
@@ -78,7 +73,7 @@
   />
   <p class="hint">{i18n.t('shortcuts.paletteHint')}</p>
   {#if results.length === 0}
-    <p class="empty">{i18n.t('shortcuts.paletteEmpty')}</p>
+    <p class="empty-text empty">{i18n.t('shortcuts.paletteEmpty')}</p>
   {:else}
     {#if heading}<p class="heading">{heading}</p>{/if}
     <ul
@@ -89,7 +84,8 @@
       {@attach scrollHint}
     >
       {#each results as room, index (room.room_id)}
-        {@const name = roomDisplayName(room)}
+        {@const name = room.display_name}
+        {@const avatar = room.display_avatar_url}
         {@const parent = parents.get(room.room_id)}
         <li role="presentation">
           <button
@@ -103,10 +99,10 @@
             onclick={() => onSelect(room)}
           >
             <Avatar
-              class={['jump-avatar', { glyph: !room.avatar_url }]}
+              class={['jump-avatar', { glyph: !avatar }]}
               size="small"
-              id={room.avatar_url ? room.room_id : null}
-              src={room.avatar_url}
+              id={avatar ? room.room_id : null}
+              src={avatar}
               {name}
               uniform
             >
@@ -153,6 +149,10 @@
     --menu-item-gap: var(--space-300);
   }
 
+  .option[aria-selected='true'] {
+    background: var(--surface-container-active);
+  }
+
   .jump-list :global(.jump-avatar.glyph) {
     opacity: var(--opacity-p500);
   }
@@ -165,7 +165,7 @@
     display: grid;
     flex: 1;
     min-width: 0;
-    text-align: left;
+    text-align: start;
   }
 
   .name,
@@ -194,9 +194,7 @@
   }
 
   .empty {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
-    margin: var(--space-400) 0 0;
+    margin-top: var(--space-400);
     text-align: center;
   }
 </style>

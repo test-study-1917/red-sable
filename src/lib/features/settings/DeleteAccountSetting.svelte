@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { logoutRedirectUrl } from '#lib/deployment/policy.js';
   import { CoreError } from '#src/transport';
+  import { redirectAfterLogout } from '#lib/auth/logout-redirect.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { openExternalAuthUrl } from '#lib/platform/external-auth.js';
@@ -12,23 +14,11 @@
   import '#lib/ui/primitives/settings-row.css';
 
   const core = useCoreClient();
-  let oauth = $state(false);
   let open = $state(false);
   let password = $state('');
   let typedUserId = $state('');
   let busy = $state(false);
   let error = $state<string | null>(null);
-
-  $effect(() => {
-    void core.rpc.encryption.devices().then(
-      ({ oauth: supported }) => {
-        oauth = supported;
-      },
-      (cause: unknown) => {
-        console.debug('[sable settings] device list unavailable', cause);
-      }
-    );
-  });
 
   function messageFor(cause: unknown): string {
     if (cause instanceof CoreError) {
@@ -61,7 +51,9 @@
         open = false;
         return;
       }
+      const redirectUrl = logoutRedirectUrl();
       await core.logout();
+      redirectAfterLogout(core, redirectUrl);
     } catch (cause) {
       error = messageFor(cause);
     } finally {
@@ -72,7 +64,11 @@
 
 <SettingsSection headingId="account-delete" title={i18n.t('settings.deleteAccount')}>
   <ul class="settings-rows">
-    <SettingsRow id="delete-account" description={i18n.t('settings.deleteAccountHint')}>
+    <SettingsRow
+      id="delete-account"
+      title={i18n.t('settings.deleteAccount')}
+      description={i18n.t('settings.deleteAccountHint')}
+    >
       <Button variant="danger" onclick={() => (open = true)}>
         {i18n.t('settings.deleteAccountAction')}
       </Button>
@@ -97,7 +93,7 @@
     {i18n.t('settings.deleteAccountTypeUserId', { userId })}
   </Label>
   <TextInput id="delete-account-confirm" bind:value={typedUserId} autocomplete="off" />
-  {#if !oauth}
+  {#if core.oauthMetadata === null}
     <Label for="delete-account-password">{i18n.t('settings.password')}</Label>
     <TextInput
       id="delete-account-password"

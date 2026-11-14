@@ -8,6 +8,7 @@ import androidx.core.app.ActivityCompat
 import androidx.work.WorkManager
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
@@ -66,6 +67,7 @@ class PolicyArgs {
     var notifyOnce: Boolean = true
     var clearOnRead: Boolean = true
     var privateReceipts: Boolean = false
+    var quietWhenActiveElsewhere: Boolean = false
 }
 
 @InvokeArg
@@ -75,7 +77,11 @@ class ChimeArgs {
 
 private const val CHIME_ASSET = "msg.webm"
 
-@TauriPlugin
+@TauriPlugin(
+    permissions = [
+        Permission(strings = ["android.permission.ACCESS_LOCAL_NETWORK"], alias = "localNetwork"),
+    ],
+)
 class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
     private val manager = activity.getSystemService(NotificationManager::class.java)
 
@@ -162,6 +168,7 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
         policy.notifyOnce = args.notifyOnce
         policy.clearOnRead = args.clearOnRead
         policy.privateReceipts = args.privateReceipts
+        policy.quietWhenActiveElsewhere = args.quietWhenActiveElsewhere
         if (!args.enabled || !args.content) dismissAll()
         invoke.resolve()
     }
@@ -223,6 +230,7 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
             WorkManager.getInstance(activity).cancelAllWorkByTag("push-room:$id")
             PushNotificationGate.dismiss(activity, id) { manager.cancel(id) }
         }
+        PushNotifier.cancelOrphanedSummary(activity)
     }
 
     private fun dismissAll() {

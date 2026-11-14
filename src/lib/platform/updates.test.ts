@@ -60,3 +60,46 @@ test('mobile reports current when the manifest is not newer', async () => {
 
   await expect(checkForMobileUpdate()).resolves.toBe(false);
 });
+
+test.each([
+  ['1.2.3-nightly.9', '1.2.3-nightly.10', true],
+  ['1.2.3-nightly.10', '1.2.3', true],
+  ['1.2.3', '1.2.3-nightly.10', false],
+  ['1.2.3', 'v1.2.4', true],
+  ['1.2.3', '1.2', false],
+])('mobile compares %s with %s using SemVer precedence', async (current, latest, newer) => {
+  vi.stubEnv('VITE_APP_VERSION', current);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({ ok: true, json: () => ({ version: latest }) })
+  );
+  const { checkForMobileUpdate } = await load();
+  await expect(checkForMobileUpdate()).resolves.toBe(newer);
+});
+
+test.each([
+  ['1.2.3', '1.2.4', true],
+  ['1.2.3', '1.2.3', false],
+  ['1.2.3-nightly.261102101830.g1f8e484fbccb', '1.2.3-nightly.261102225045.g31a82d40d5f4', true],
+  ['1.2.3', null, false],
+])('a packaged desktop build on %s compares against %s', async (current, latest, newer) => {
+  vi.stubEnv('VITE_APP_VERSION', current);
+  vi.stubGlobal('sableElectron', { latestVersion: () => Promise.resolve(latest) });
+
+  const { checkForPackagedUpdate } = await load();
+
+  await expect(checkForPackagedUpdate()).resolves.toBe(newer ? latest : null);
+});
+
+test.each([
+  ['linux', false, true],
+  ['darwin', false, false],
+  ['win32', true, true],
+])('desktop checks on %s with self updates %s are %s', async (platform, automatic, supported) => {
+  vi.stubGlobal('sableElectron', { platform });
+  vi.stubGlobal('__SABLE_AUTO_UPDATE__', automatic);
+
+  const { supportsDesktopUpdateChecks } = await load();
+
+  expect(supportsDesktopUpdateChecks()).toBe(supported);
+});

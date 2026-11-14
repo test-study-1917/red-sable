@@ -2,11 +2,12 @@
   export function priorityProvider() {
     const POLL_INTERVAL_MS = 300_000;
 
+    const web = updatePlatform() === 'web';
     let dismissedGeneration = $state(0);
-    let visible = $derived(webUpdateState.generation > dismissedGeneration);
+    let visible = $derived(web && webUpdateState.generation > dismissedGeneration);
 
     $effect(() => {
-      if (!preferences.autoUpdateCheck || !('serviceWorker' in navigator)) return undefined;
+      if (!web || !preferences.autoUpdateCheck || !('serviceWorker' in navigator)) return undefined;
 
       const check = (): void => {
         checkForWebUpdate().catch((error: unknown) => {
@@ -22,7 +23,10 @@
     return {
       get priority(): Priority {
         if (visible) {
-          return 'update';
+          return {
+            level: 'update',
+            icon: ArrowCircleUpIcon,
+          };
         } else {
           return null;
         }
@@ -38,9 +42,10 @@
 <script lang="ts">
   import { on } from 'svelte/events';
   import { i18n } from '#lib/i18n.js';
+  import { updatePlatform } from '#lib/platform/updates.js';
   import { checkForWebUpdate, webUpdateState } from '#lib/platform/web-updates.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
-  import Banner from '#lib/ui/primitives/Banner.svelte';
+  import AlertBanner from '#lib/ui/primitives/AlertBanner.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import type { Priority, PriorityProvider } from '#lib/features/sidebar/alerts.js';
   import ArrowCircleUpIcon from 'phosphor-svelte/lib/ArrowCircleUpIcon';
@@ -63,7 +68,7 @@
   }
 </script>
 
-<Banner icon={ArrowCircleUpIcon}>
+<AlertBanner icon={ArrowCircleUpIcon}>
   {#snippet title()}
     {i18n.t('settings.updateBannerTitle')}
   {/snippet}
@@ -74,8 +79,8 @@
     <Button variant="ghost" size="small" onclick={() => dismiss()}>
       {i18n.t('settings.updateBannerLater')}
     </Button>
-    <Button variant="primary" size="small" onclick={refresh}>
+    <Button variant="success" size="small" onclick={refresh}>
       {i18n.t('common.install')}
     </Button>
   {/snippet}
-</Banner>
+</AlertBanner>

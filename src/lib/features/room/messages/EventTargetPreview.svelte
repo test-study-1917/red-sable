@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
-  import ArrowBendUpLeftIcon from 'phosphor-svelte/lib/ArrowBendUpLeftIcon';
+  import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
 
   import type { MemberView, TimelineItemView } from '#src/generated/protocol';
 
@@ -14,6 +14,7 @@
   import { memberName, senderDisplayColors } from '../members/members.js';
   import { eventPreview, reactionKey } from '#lib/model/model.js';
   import { fallbackText } from './reply-fallback';
+  import { isCustomReaction, reactionText } from './reaction-emote-label.js';
   import { replyPreviewBody } from './reply-preview';
   import { hasSenderRoles, useSenderRoles } from '../members/sender-roles';
   import SenderName from '../members/SenderName.svelte';
@@ -39,7 +40,7 @@
     members = [],
     currentUserId = null,
     reply = false,
-    icon: Icon = ArrowBendUpLeftIcon,
+    icon: Icon = ReplyIcon,
     onJump,
     body,
   }: Props = $props();
@@ -83,7 +84,11 @@
       const key = reactionKey(content.content);
       return {
         sender: item.sender,
-        body: key ? t('timeline.replyToReaction', { key }) : t('timeline.redacted'),
+        body: key
+          ? t('timeline.replyToReaction', {
+              key: isCustomReaction(key) ? t('timeline.customEmote') : reactionText(key),
+            })
+          : t('timeline.redacted'),
       };
     }
     return { sender: item.sender, body: replyPreviewBody(content) || stateEventText(item, t) };
@@ -120,7 +125,9 @@
     onJump?.(eventId);
   }}
 >
-  {#if replyStyle !== 'connected'}<Icon class="target-icon" />{/if}
+  {#if replyStyle !== 'connected'}<Icon
+      class={['target-icon', { 'mirror-rtl': Icon === ReplyIcon }]}
+    />{/if}
   <span class={['target-copy', { wrap: body !== undefined }]}>
     <SenderName displayName={name} {colors} nameClass="target-name" compact />
     {#if body}{@render body()}{:else}<span>{preview?.body ?? ''}</span>{/if}
@@ -198,12 +205,12 @@
   }
 
   .target-connected::before {
-    border-left: var(--target-connector-width) solid var(--surface-on-container);
+    border-inline-start: var(--target-connector-width) solid var(--surface-on-container);
     border-radius: var(--radius) 0 0;
     border-top: var(--target-connector-width) solid var(--surface-on-container);
     content: '';
     height: calc(50% + var(--space-100));
-    left: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+    inset-inline-start: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
     opacity: var(--opacity-placeholder);
     pointer-events: none;
     position: absolute;
@@ -230,7 +237,7 @@
     background: var(--primary-main);
     bottom: 0;
     content: '';
-    left: 0;
+    inset-inline-start: 0;
     pointer-events: none;
     position: absolute;
     top: 0;

@@ -3,6 +3,7 @@ use serde::Deserialize as _;
 use serde_with::DeserializeAs;
 
 use super::content::raw_formatted_body;
+use super::media::spoiler_reason;
 
 /// Narrow so serde skips the rest of the event; a whole-event `Value`
 /// materialises every `formatted_body`.
@@ -15,6 +16,10 @@ pub(super) struct RawFields {
     pub(super) original_content: Option<serde_json::Value>,
     #[serde(skip)]
     pub(super) echo_formatted_body: Option<String>,
+    #[serde(skip)]
+    pub(super) echo_spoiler: Option<String>,
+    #[serde(skip)]
+    pub(super) echo_gallery_spoilers: Vec<Option<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -74,6 +79,26 @@ impl RawFields {
 
     pub(super) fn formatted_body(&self) -> Option<&str> {
         raw_formatted_body(self.message()).or(self.echo_formatted_body.as_deref())
+    }
+
+    pub(super) fn external_url(&self) -> Option<String> {
+        self.message()?
+            .get("external_url")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    pub(super) fn spoiler_reason(&self) -> Option<String> {
+        spoiler_reason(self.message()).or_else(|| self.echo_spoiler.clone())
+    }
+
+    pub(super) fn gallery_spoiler_reason(&self, index: usize) -> Option<String> {
+        let item = self
+            .content
+            .as_ref()
+            .and_then(|content| content.get("itemtypes"))
+            .and_then(|items| items.get(index));
+        spoiler_reason(item).or_else(|| self.echo_gallery_spoilers.get(index).cloned().flatten())
     }
 
     pub(super) fn redacted_by(&self) -> Option<String> {

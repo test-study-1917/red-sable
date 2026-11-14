@@ -1,3 +1,5 @@
+import { isScalar, isSeq, parseDocument, visit } from 'yaml';
+
 function usageError(message) {
   console.error(message);
   process.exit(1);
@@ -29,18 +31,45 @@ export function assertSubstituted(manifest) {
   if (leftover) throw new Error(`Unsubstituted placeholder left in the manifest: ${leftover[0]}`);
 }
 
+export function renderSources(template, arches, sourceType) {
+  for (const [arch, values] of Object.entries(arches)) {
+    const suffix = arch.toUpperCase();
+    template = template
+      .replaceAll(`@SHA256_${suffix}@`, values?.sha ?? '')
+      .replaceAll(`@SIZE_${suffix}@`, String(values?.size ?? 0));
+  }
+  const document = parseDocument(template);
+  if (document.errors.length) throw document.errors[0];
+  const removed = new Set();
+  visit(document, {
+    Map(_, source) {
+      if (source.get('type') !== sourceType) return;
+      const onlyArches = source.get('only-arches');
+      if (!isSeq(onlyArches) || !onlyArches.items.length) return;
+      onlyArches.items = onlyArches.items.filter((item) => {
+        if (!isScalar(item) || arches[item.value] !== null) return true;
+        removed.add(item.value);
+        return false;
+      });
+      if (!onlyArches.items.length) return visit.REMOVE;
+    },
+  });
+  for (const [arch, values] of Object.entries(arches)) {
+    if (!values && !removed.has(arch)) {
+      throw new Error(`Could not find the ${arch} ${sourceType} source to drop.`);
+    }
+  }
+  const manifest = document.toString({ lineWidth: 0 });
+  assertSubstituted(manifest);
+  return manifest;
+}
+
 const flavors = {
-  tauri: {
-    stable: ['packaging/flatpak', 'moe.sable.client'],
-  },
-  electron: {
-    stable: ['packaging/flatpak/electron', 'moe.sable.next.electron'],
-    nightly: ['packaging/flatpak/electron/nightly', 'moe.sable.next.electron.Nightly'],
-  },
+  stable: ['packaging/flatpak', 'moe.sable.client'],
+  nightly: ['packaging/flatpak/electron/nightly', 'moe.sable.next.electron.Nightly'],
 };
 
-export function flatpakFlavor(argv, channel) {
-  const electron = argv.includes('--electron');
-  const [dir, id] = flavors[electron ? 'electron' : 'tauri'][channel];
-  return { args: argv.filter((arg) => arg !== '--electron'), dir, id };
+export function flatpakTarget(channel) {
+  const [dir, id] = flavors[channel];
+  return { dir, id };
 }

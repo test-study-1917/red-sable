@@ -49,6 +49,8 @@ export type AvatarEditView = { kind: "keep" } | { kind: "clear" } | { kind: "url
 /**  Encrypted in the webview with the account data key in hand. */
 { kind: "encrypted"; file: unknown };
 
+export type BadgeModeView = "all" | "mentions" | "quiet";
+
 export type BookmarkView = {
 	bookmark_id: string,
 	room_id: string,
@@ -103,6 +105,12 @@ export type BotCommandParameter = {
 	default_value: ArgumentValue | null,
 	/**  `moe.sable.flag`: the option name the bot's own parser expects. */
 	flag: string | null,
+};
+
+export type BridgeView = {
+	/**  `protocol.displayname`, or `protocol.id` when the bridge gives no name. */
+	network: string,
+	avatar_url: string | null,
 };
 
 export type BrightnessView = "light" | "dark";
@@ -182,6 +190,11 @@ export type CallSupportView = {
 	can_join: boolean,
 };
 
+export type ChildOrderOverride = {
+	parent_id: string,
+	children: SpaceChildEdge[],
+};
+
 export type ComposerContent = {
 	body: string,
 	formatted_body: string | null,
@@ -194,7 +207,7 @@ export type ComposerMentions = {
 };
 
 /**  A mention or emote picked from a suggestion rather than typed. */
-export type ComposerPill = { kind: "mention"; user_id: string; name: string; via: string[] } | { kind: "emote"; shortcode: string; url: string; body: string | null };
+export type ComposerPill = { kind: "mention"; user_id: string; name: string; via: string[] } | { kind: "emote"; shortcode: string; url: string; body: string | null } | { kind: "image"; src: string; alt: string; title: string };
 
 /**
  *  Held in a shown notification's data and read back by the next push for the
@@ -207,26 +220,34 @@ export type ConversationLine = {
 };
 
 /**  Pushed, unsolicited. Never a reply to a command. */
-export type CoreEvent = ({ type: "account_lock_changed"; account_id: string; locked: boolean }) & { avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | {
+export type CoreEvent =
+/**  A failure the core logged under `log_id`, for whoever reports errors. */
+({ type: "failure"; log_id: string; context: string; report: ErrorReportView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "rtc"; session_id: string; purpose: RtcPurpose; sender: boolean; signal: RtcSignal }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender_name?: never; session?: never; sharing?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "account_lock_changed"; account_id: string; locked: boolean }) & { avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | {
 	type: "sync_status",
-} & SyncStatus | ({ type: "session_ended"; reason: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "session_tokens_refreshed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
+} & SyncStatus | ({ type: "session_ended"; reason: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "session_tokens_refreshed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
 /**  One batch is one render, so it stays batched all the way to the UI. */
-({ type: "room_list_diff"; subscription: SubscriptionId; diffs: VectorDiff<RoomListItemView>[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "timeline_diff"; subscription: SubscriptionId; diffs: VectorDiff<TimelineItemView>[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "timeline_pagination"; subscription: SubscriptionId; loading: boolean; reached_start: boolean }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "timeline_aggregations"; subscription: SubscriptionId; items: TimelineItemView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } |
+({ type: "room_list_diff"; subscription: SubscriptionId; diffs: VectorDiff<RoomListItemView>[];
+/**  Built from the rows after `diffs`. */
+sections: RoomSectionsUpdate | null }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "timeline_diff"; subscription: SubscriptionId; diffs: VectorDiff<TimelineItemView>[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "threads_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "timeline_pagination"; subscription: SubscriptionId; loading: boolean; reached_start: boolean }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "timeline_aggregations"; subscription: SubscriptionId; items: TimelineItemView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; total?: never; user_id?: never; user_ids?: never } |
 /**
  *  Our own user excluded. Absolute, so an empty list replaces the previous
  *  one. Sent for every joined room, since a room list row shows it too.
  */
-({ type: "typing"; room_id: string; user_ids: string[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never } |
+({ type: "typing"; room_id: string; user_ids: string[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never } |
 /**  Pushed on every change, so the UI never polls to notice it is verified. */
-({ type: "encryption_status"; status: EncryptionStatusView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "key_backup_download"; download: KeyBackupDownloadView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "devices_changed"; devices: DeviceView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "search_coverage"; coverage: SearchCoverageView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "notification"; notification: NotificationView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "notification_settings_changed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "inbox_changed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "account_data_changed"; event_type: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "space_sidebar_changed"; items: SidebarItemView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
+({ type: "encryption_status"; status: EncryptionStatusView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "key_backup_download"; download: KeyBackupDownloadView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "devices_changed"; devices: DeviceView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
+/**  Fetched once per session start. `None` when the homeserver has no OAuth. */
+({ type: "oauth_metadata"; metadata: OAuthMetadataView | null }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "search_coverage"; coverage: SearchCoverageView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "search_sharing"; sharing: SearchSharingView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "notification"; notification: NotificationView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "notification_settings_changed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "inbox_changed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "account_data_changed"; event_type: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "personas_changed" }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "space_sidebar_changed"; items: SidebarItemView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
 /**  A calendar entry, an answer or a redaction arrived in a calendar room. */
-({ type: "room_widgets_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "widget_room_event"; event: unknown }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "widget_to_device"; event: unknown; encrypted: boolean }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "calendar_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "room_cosmetics_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "profile_changed"; room_id: string; user_id: string; display_name: string | null; avatar_url: string | null }) & { account_id?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_ids?: never } |
+({ type: "room_widgets_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "widget_room_event"; event: unknown }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "widget_to_device"; event: unknown; encrypted: boolean }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "calendar_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "room_cosmetics_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "nicknames_changed"; user_ids: string[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never } | ({ type: "profile_changed"; room_id: string; user_id: string; display_name: string | null; avatar_url: string | null }) & { account_id?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_ids?: never } |
 /**  A member event of any kind arrived: join, leave, kick, ban, invite or a profile change. */
-({ type: "members_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "bot_commands_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "image_packs_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
+({ type: "members_changed"; room_id: string;
+/**  The member as of this event. `None` asks for a full reload. */
+member: MemberView | null }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "bot_commands_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "image_packs_changed"; room_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } |
 /**  An incoming request arrives unsolicited. There is no other prompt. */
-({ type: "verification"; user_id: string; flow_id: string; state: VerificationView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_ids?: never } | ({ type: "qr_login"; grant: boolean; progress: QrLoginProgressView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_encryption_key"; session: CallSessionId; identity: string; key_index: number; key: string; own: boolean; backend_id: string | null }) & { account_id?: never; avatar_url?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; items?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_backends"; session: CallSessionId; revision: number; publisher_id: string; backends: CallBackendView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; reached_start?: never; reason?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_signaling_error"; session: CallSessionId; stage: CallSignalingStage; fatal: boolean }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; source?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_members"; session: CallSessionId; members: CallMemberView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "incoming_call"; room_id: string; notification_event_id: string; sender: string; sender_name: string | null; room_name: string | null; ring: boolean; has_video: boolean; expires_at_ms: number }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; fatal?: never; flow_id?: never; grant?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "incoming_call_ended"; notification_event_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "media_progress"; source: string; current: number; total: number }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; user_id?: never; user_ids?: never } |
+({ type: "verification"; user_id: string; flow_id: string; state: VerificationView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_ids?: never } | ({ type: "qr_login"; grant: boolean; progress: QrLoginProgressView }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_encryption_key"; session: CallSessionId; identity: string; key_index: number; key: string; own: boolean; backend_id: string | null }) & { account_id?: never; avatar_url?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; items?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_backends"; session: CallSessionId; revision: number; publisher_id: string; backends: CallBackendView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_signaling_error"; session: CallSessionId; stage: CallSignalingStage; fatal: boolean }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session_id?: never; sharing?: never; signal?: never; source?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "call_members"; session: CallSessionId; members: CallMemberView[] }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "incoming_call"; room_id: string; notification_event_id: string; sender: string; sender_name: string | null; room_name: string | null; ring: boolean; has_video: boolean; expires_at_ms: number }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; fatal?: never; flow_id?: never; grant?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; sections?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "incoming_call_ended"; notification_event_id: string }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; total?: never; user_id?: never; user_ids?: never } | ({ type: "media_progress"; source: string; current: number; total: number }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; last_active_ago?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; presence?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; stage?: never; state?: never; status?: never; status_message?: never; subscription?: never; user_id?: never; user_ids?: never } |
 /**  Never arrives on a homeserver with presence disabled. */
-({ type: "presence"; user_id: string; presence: PresenceView; status_message: string | null; last_active_ago: number | null }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; loading?: never; locked?: never; members?: never; notification?: never; notification_event_id?: never; own?: never; progress?: never; publisher_id?: never; reached_start?: never; reason?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sender?: never; sender_name?: never; session?: never; source?: never; stage?: never; state?: never; status?: never; subscription?: never; total?: never; user_ids?: never };
+({ type: "presence"; user_id: string; presence: PresenceView; status_message: string | null; last_active_ago: number | null }) & { account_id?: never; avatar_url?: never; backend_id?: never; backends?: never; context?: never; coverage?: never; current?: never; devices?: never; diffs?: never; display_name?: never; download?: never; encrypted?: never; event?: never; event_type?: never; expires_at_ms?: never; fatal?: never; flow_id?: never; grant?: never; has_video?: never; identity?: never; items?: never; key?: never; key_index?: never; loading?: never; locked?: never; log_id?: never; member?: never; members?: never; metadata?: never; notification?: never; notification_event_id?: never; own?: never; progress?: never; publisher_id?: never; purpose?: never; reached_start?: never; reason?: never; report?: never; revision?: never; ring?: never; room_id?: never; room_name?: never; sections?: never; sender?: never; sender_name?: never; session?: never; session_id?: never; sharing?: never; signal?: never; source?: never; stage?: never; state?: never; status?: never; subscription?: never; total?: never; user_ids?: never };
 
 export type CreateJoinRuleView = "public" | "invite" | "knock" | "restricted" | "knock_restricted";
 
@@ -234,6 +255,15 @@ export type DefaultNotificationModesView = {
 	direct: NotificationModeView,
 	group: NotificationModeView,
 };
+
+export type DehydratedDeviceView = "unsupported" | "disabled" | "active" | "needs_recovery_key";
+
+export type Description = {
+	type: DescriptionType,
+	sdp: string,
+};
+
+export type DescriptionType = "offer" | "answer";
 
 export type DeviceView = {
 	device_id: string,
@@ -252,7 +282,7 @@ export type DeviceView = {
 	last_seen_ip: string | null,
 };
 
-export type DiagnosticPushView = { kind: "no_pusher" } | { kind: "no_gateway" } | { kind: "rejected" } | { kind: "sent"; event_id: string; accepted: boolean | null };
+export type DiagnosticPushView = { kind: "no_pusher" } | { kind: "no_gateway" } | { kind: "refused" } | { kind: "rejected" } | { kind: "unforwarded" } | { kind: "sent"; event_id: string; accepted: boolean | null };
 
 export type DirectoryRoomType = "rooms" | "spaces";
 
@@ -265,6 +295,13 @@ export type DisplayNameChangeView = {
 	new: string | null,
 };
 
+export type DmSpaceLink = {
+	room_id: string,
+	space_ids: string[],
+};
+
+export type DropInstruction = "above" | "below" | "into";
+
 export type EditVersionView = {
 	event_id: string,
 	timestamp: number,
@@ -276,6 +313,21 @@ export type EmojiView = {
 	symbol: string,
 	/**  English, from the spec's table. */
 	description: string,
+};
+
+export type EmoteCell = ({ emoji: string }) & { image?: never } | ({ image: PackImageView }) & { emoji?: never };
+
+export type EmoteRecents = {
+	images: PackImageView[],
+	cells: EmoteCell[],
+};
+
+export type EmoteRecentsInput = {
+	recent: string[],
+	frequent: string[],
+	images: PackImageView[],
+	unicode: boolean,
+	reactions: boolean,
 };
 
 export type EncryptionStatusView = {
@@ -294,6 +346,20 @@ export type EncryptionStatusView = {
 	account_data_key: boolean,
 };
 
+export type ErrorFrameView = {
+	message: string,
+	location: string | null,
+	/**  The error's `Debug` output, which names the variant and its fields. */
+	debug: string | null,
+};
+
+export type ErrorReportView = {
+	frames: ErrorFrameView[],
+	http: HttpFailureView | null,
+	/**  The `tracing` spans the failure happened in, innermost first. */
+	span_trace: string | null,
+};
+
 /**  What the event dialog edits, with its start already read as local wall time. */
 export type EventDraft = {
 	title: string,
@@ -307,7 +373,7 @@ export type EventDraft = {
 	until: string | null,
 };
 
-export type EventNotificationView = "membership" | "reactions" | "edits" | "notices" | "invites" | "calls";
+export type EventNotificationView = "membership" | "reactions" | "edits" | "notices" | "invites" | "calls" | "rtc_user" | "rtc_room";
 
 export type EventNotificationsView = {
 	membership: boolean | null,
@@ -316,6 +382,8 @@ export type EventNotificationsView = {
 	notices: boolean | null,
 	invites: boolean | null,
 	calls: boolean | null,
+	rtc_user: boolean | null,
+	rtc_room: boolean | null,
 };
 
 export type EventPreview = {
@@ -344,6 +412,7 @@ export type GalleryAttachmentView = {
 	filename: string,
 	mime: string,
 	info: AttachmentInfoView | null,
+	spoiler: boolean,
 };
 
 export type GalleryItemView = { kind: "image"; filename: string; caption: string | null; source: string; mime: string | null; width: number | null; height: number | null; size: number | null; blurhash: string | null; thumbnail: string | null; spoiler: string | null } | { kind: "video"; filename: string; caption: string | null; source: string; mime: string | null; width: number | null; height: number | null; blurhash: string | null; thumbnail: string | null; spoiler: string | null } | { kind: "audio"; filename: string; caption: string | null; source: string; mime: string | null; duration_ms: number | null; waveform: number[] | null } | { kind: "file"; filename: string; caption: string | null; source: string; mime: string | null; size: number | null };
@@ -403,6 +472,22 @@ export type HomeserverSoftwareView = {
 	version: string | null,
 };
 
+export type HttpFailureView = {
+	status: number | null,
+	errcode: string | null,
+	message: string | null,
+	/**  A body that was not a standard Matrix error. */
+	body: string | null,
+	/**  Without its query, which can carry tokens. */
+	url: string | null,
+};
+
+export type IceCandidate = {
+	candidate: string,
+	sdpMid: string | null,
+	sdpMLineIndex: number | null,
+};
+
 export type IdentityResetStep = { step: "done"; recovery_key: string } | { step: "password" } | { step: "approve"; url: string };
 
 export type ImagePackOriginView = "account" | "room" | "global" | "space";
@@ -440,7 +525,7 @@ export type ImageSourcePackView = {
 
 export type ImageUsageView = "emoticon" | "sticker";
 
-export type InboxFilter = "all" | "mentions" | "direct";
+export type InboxFilter = "all" | "mentions" | "direct" | "threads";
 
 export type InboxItemView = {
 	room_id: string,
@@ -453,6 +538,8 @@ export type InboxItemView = {
 	is_direct: boolean,
 	encrypted: boolean,
 	read: boolean,
+	thread_root: string | null,
+	reply: boolean,
 	kind: string,
 	jump_event_id: string,
 	reaction_key: string | null,
@@ -482,6 +569,12 @@ export type JoinCandidate = {
 	room: HierarchyRoomView,
 	via: string[],
 	parent_id: string,
+};
+
+export type JoinRequestRoomView = {
+	room_id: string,
+	members: MemberView[],
+	permissions: RoomPermissionsView,
 };
 
 /**
@@ -526,6 +619,12 @@ export type LatestEventView = {
 	sending: boolean,
 	event_id: string | null,
 };
+
+/**
+ *  What a drag picked up or landed on: a space, possibly inside a folder, or a
+ *  whole folder.
+ */
+export type LayoutRef = { kind: "space"; room_id: string; folder_id: string | null } | { kind: "folder"; folder_id: string };
 
 export type LiteralValue = boolean | number | string | RoomReference;
 
@@ -574,6 +673,9 @@ export type MemberView = {
 	user_id: string,
 	display_name: string | null,
 	avatar_url: string | null,
+	/**  For mentions and anything else that leaves this device. */
+	real_name: string | null,
+	real_avatar_url: string | null,
 	power_level: number,
 	membership: MembershipView,
 	member_ts: number | null,
@@ -604,6 +706,13 @@ export type MentionRuleView = "room" | "user" | "display_name" | "username";
 export type MentionView = "none" | "silent" | "loud";
 
 export type MessageKind = "text" | "emote" | "notice";
+
+export type MessageShieldCode = "authenticity_not_guaranteed" | "unknown_device" | "unsigned_device" | "unverified_identity" | "verification_violation" | "mismatched_sender" | "sent_in_clear";
+
+export type MessageShieldView = {
+	code: MessageShieldCode,
+	critical: boolean,
+};
 
 export type MfmColor = {
 	raw: string,
@@ -657,6 +766,12 @@ export type NotificationView = {
 	body: string,
 	mention: boolean,
 	noisy: boolean | null,
+};
+
+/**  The account management part of the homeserver's OAuth 2.0 metadata (MSC4191). */
+export type OAuthMetadataView = {
+	account_management_uri: string | null,
+	account_management_actions_supported: string[],
 };
 
 export type OpenIdTokenView = {
@@ -759,6 +874,14 @@ export type PerMessageProfileView = {
 	 *  cannot read the profile.
 	 */
 	has_fallback: boolean,
+	/**  A (hopefully) short biography of this PMP (overrides extended profile) */
+	biography: string | null,
+	/**  A profile banner for this PMP (overrides extended profile) */
+	banner_url: string | null,
+	/**  Animal identity stuff (overrides extended profile) */
+	is_animal: string | null,
+	has_animal: string | null,
+	animal_need: string | null,
 };
 
 export type PermissionGroup = {
@@ -782,6 +905,7 @@ export type PersonaCatalogView = {
 	personas: PersonaView[],
 	account: PersonaSelectionView | null,
 	rooms: { [key in string]: PersonaSelectionView },
+	account_rooms: string[],
 	disabled_rooms: string[],
 };
 
@@ -791,10 +915,16 @@ export type PersonaSelectionView = {
 	valid_until: number | null,
 };
 
+/**  Left as a struct so we can add more things, eg tags in the future. */
+export type PersonaSortFlagsView = {
+	hidden: boolean,
+};
+
 export type PersonaTriggerView = {
 	prefix: string | null,
 	suffix: string | null,
 	keep_trigger: boolean,
+	alternate_avatar_id: string | null,
 };
 
 export type PersonaView = {
@@ -808,6 +938,12 @@ export type PersonaView = {
 	pluralkit: PluralkitImportView | null,
 	last_used: number | null,
 	alternate_avatars: PersonaAlternateAvatarView[] | null,
+	biography: string | null,
+	banner_url: string | null,
+	is_animal: string | null,
+	has_animal: string | null,
+	animal_need: string | null,
+	sort_flags: PersonaSortFlagsView | null,
 };
 
 export type PinReadStateView = {
@@ -844,6 +980,46 @@ export type PollView = {
 	edited: boolean,
 };
 
+export type PostAuthorView = {
+	name: string | null,
+	handle: string | null,
+	avatar: string | null,
+	url: string | null,
+};
+
+export type PostMediaKindView = "image" | "video" | "gif";
+
+export type PostMediaView = {
+	kind: PostMediaKindView,
+	/**  `None` for a bundled video, which plays by fetching the link again. */
+	source: string | null,
+	poster: string | null,
+	mime: string | null,
+	width: number | null,
+	height: number | null,
+	alt: string | null,
+};
+
+export type PostSensitivityView = "graphic" | "inappropriate" | "spoiler";
+
+export type PostStatsView = {
+	replies: number | null,
+	reposts: number | null,
+	likes: number | null,
+};
+
+export type PostView = {
+	url: string | null,
+	author: PostAuthorView,
+	text: string | null,
+	created_at: number | null,
+	media: PostMediaView[],
+	stats: PostStatsView | null,
+	sensitivity: PostSensitivityView | null,
+	sensitivity_reason: string | null,
+	quote: PostView | null,
+};
+
 export type PowerLevelAction = "invite" | "kick" | "ban" | "redact";
 
 /**
@@ -865,7 +1041,36 @@ export type PredecessorRoomView = {
 	via: string[],
 };
 
-export type PresenceView = "online" | "offline" | "unavailable";
+/**  A missing or unknown value is `forbid`. */
+export type PresenceHintView = "suggest" | "forbid";
+
+export type PresenceOverrideView = {
+	state: PresenceView | null,
+	status_message: string | null,
+};
+
+export type PresencePromptView = { kind: "user"; user_id: string } | { kind: "room"; room_id: string };
+
+export type PresenceSharingEdit = { kind: "share_locally"; enabled: boolean } |
+/**  `None` drops the user from the map. */
+{ kind: "user"; user_id: string; sharing: PresenceUserSharingView | null } | { kind: "room"; room_id: string; allowed: boolean } | { kind: "server"; server: string; denied: boolean };
+
+/**  Without `m.presence.sharing` a supporting server shares with nobody. */
+export type PresenceSharingView = {
+	hint_event_type: string,
+	configured: boolean,
+	share_locally: boolean,
+	allowed_users: string[],
+	denied_users: string[],
+	allowed_rooms: string[],
+	denied_servers: string[],
+	prompted_users: string[],
+	prompted_rooms: string[],
+};
+
+export type PresenceUserSharingView = "allow" | "deny";
+
+export type PresenceView = "online" | "offline" | "unavailable" | "busy";
 
 export type PrimitiveType = "string" | "integer" | "boolean" | "user_id" | "server_name" | "room_alias" | "room_id" | "event_id";
 
@@ -894,6 +1099,8 @@ export type ProfileView = {
 	user_id: string,
 	display_name: string | null,
 	avatar_url: string | null,
+	real_name: string | null,
+	real_avatar_url: string | null,
 	/**  Sanitised display HTML, safe to inject as-is. */
 	bio: string | null,
 	hero_color: string | null,
@@ -1055,6 +1262,7 @@ export type RegisteredPusherView = {
 	/**  Some pusher kinds validate through a handshake; absent elsewhere. */
 	activated: boolean | null,
 	gateway: string | null,
+	endpoint: string | null,
 };
 
 export type RegistrationFlowsView = {
@@ -1113,6 +1321,11 @@ export type RoomAttachmentView = {
 	content: RoomAttachmentContentView,
 };
 
+export type RoomBadgeView = {
+	room_id: string,
+	counts: RoomUnreadView,
+};
+
 export type RoomCosmeticsView = {
 	space_id: string | null,
 	users: SenderCosmeticsView[],
@@ -1142,7 +1355,12 @@ export type RoomListItemView = {
 	canonical_alias: string | null,
 	name: string | null,
 	topic: string | null,
+	/**  The topic's `text/html` representation, sanitised. */
+	topic_html: string | null,
 	avatar_url: string | null,
+	/**  The name, alias or id, or the nickname of a one-to-one room's other person. */
+	display_name: string,
+	display_avatar_url: string | null,
 	is_direct: boolean,
 	direct_targets: string[],
 	join_rule: RoomJoinRuleView,
@@ -1164,6 +1382,8 @@ export type RoomListItemView = {
 	supports_knock_restricted: boolean,
 	/**  Already sorted by `order`, then the child event's age. */
 	space_children: SpaceChildEdge[],
+	/**  The network a bridge relays this room from, per its `m.bridge` state. */
+	bridge: BridgeView | null,
 	unread: number,
 	notifying: number,
 	highlight: number,
@@ -1174,8 +1394,20 @@ export type RoomListItemView = {
 	latest_event: LatestEventView | null,
 };
 
+export type RoomListOptionsView = {
+	room_sort: RoomSortView,
+	direct_sort: RoomSortView,
+	ungrouped_favourites: string[],
+	subspace_depth: number,
+	badge_default_direct: BadgeModeView,
+	badge_default_group: BadgeModeView,
+	/**  A quiet space quiets everything under it. */
+	quiet_rooms: string[],
+};
+
 export type RoomOpenView = {
 	permissions: RoomPermissionsView,
+	power_levels: RoomPowerLevelsView,
 	power_level_tags: { [key in string]: PowerLevelTagView },
 	widgets: RoomStateEventView[],
 	pinned_event_ids: string[],
@@ -1228,6 +1460,8 @@ export type RoomPreviewView = {
 	canonical_alias: string | null,
 	name: string | null,
 	topic: string | null,
+	/**  The topic's `text/html` representation, sanitised. */
+	topic_html: string | null,
 	avatar_url: string | null,
 	room_kind: RoomKind | null,
 	/**  `null` when the server did not say. */
@@ -1246,6 +1480,31 @@ export type RoomReference = {
 };
 
 export type RoomReferenceKind = "room_id" | "event_id";
+
+/**  `key` is `home`, `unspaced`, `direct` or a space's room id. */
+export type RoomSectionView = {
+	key: string,
+	/**  Empty when the section does not group its favourites. */
+	favourites: string[],
+	/**  For a space, only its own rooms. */
+	rooms: string[],
+	subspaces: SpaceTreeNodeView[],
+	calendars: string[],
+	invites: string[],
+	unread: RoomUnreadView,
+	unread_rooms: string[],
+	descendants: string[],
+};
+
+/**  Changed sections only. `badges` and `quiet_rooms` are whole when present. */
+export type RoomSectionsUpdate = {
+	sections: RoomSectionView[],
+	removed: string[],
+	badges: RoomBadgeView[] | null,
+	quiet_rooms: string[] | null,
+};
+
+export type RoomSortView = "recent" | "name-asc" | "name-desc";
 
 export type RoomStateEventView = {
 	state_key: string,
@@ -1276,12 +1535,10 @@ export type RoomVersionsView = {
 };
 
 /**
- *  Stable serialized codes. Source chains, inputs and bodies stay native-side
- *  and are logged there, so nothing leaks across the wire. The last four words
- *  match the platform ports, so a core failure and a capability failure read
- *  alike.
+ *  Stable serialized codes. The last four words match the platform ports, so a
+ *  core failure and a capability failure read alike.
  */
-export type RpcError = { code: "not_logged_in" } | { code: "unknown_subscription" } | { code: "unknown_call" } | { code: "no_call_focus" } | { code: "invalid_pagination_direction" } | { code: "unknown_room" } | { code: "unknown_homeserver" } | { code: "unknown_local_echo" } |
+export type RpcCode = { code: "not_logged_in" } | { code: "unknown_subscription" } | { code: "unknown_call" } | { code: "no_call_focus" } | { code: "invalid_pagination_direction" } | { code: "unknown_room" } | { code: "unknown_homeserver" } | { code: "unknown_local_echo" } |
 /**
  *  `stages` are the `m.login.*` types offered. With `m.login.password` the
  *  command can be retried carrying one, otherwise the user must finish on
@@ -1289,7 +1546,7 @@ export type RpcError = { code: "not_logged_in" } | { code: "unknown_subscription
  */
 { code: "interactive_auth_required"; stages: string[] } | { code: "unknown_verification" } |
 /**  A scanned code that is not a Matrix verification code. */
-{ code: "invalid_verification_code" } | { code: "invalid_media" } |
+{ code: "invalid_verification_code" } | { code: "invalid_media" } | { code: "message_too_large" } |
 /**  A poll needs a question and between 1 and 20 answers. */
 { code: "invalid_poll" } | { code: "invalid_location" } | { code: "invalid_key_export" } | { code: "encrypted_schedule_unsupported" } | { code: "delayed_events_unsupported" } | { code: "sliding_sync_unsupported" } | { code: "account_locked" } | { code: "account_suspended" } |
 /**  MSC2545 allows `[a-zA-Z0-9-_]`, at most 100 bytes, each once per pack. */
@@ -1298,6 +1555,8 @@ export type RpcError = { code: "not_logged_in" } | { code: "unknown_subscription
 { code: "invalid_backup" } |
 /**  Not an `http` or `https` URL. */
 { code: "invalid_url" } |
+/**  Matrix JSON integers must fit in ±(2^53 - 1). */
+{ code: "integer_out_of_range" } |
 /**  A search filter naming something that is not a room or user id. */
 { code: "invalid_search_filter" } |
 /**
@@ -1305,18 +1564,34 @@ export type RpcError = { code: "not_logged_in" } | { code: "unknown_subscription
  *  what the other devices stored.
  */
 { code: "document_locked" } |
+/**  A key backup this device cannot unlock is already on the server. */
+{ code: "backup_exists" } |
+/**  Secret storage no longer matches the account's identity. */
+{ code: "key_storage_out_of_sync" } |
 /**  Static: safe to hide UI. */
 { code: "unsupported" } |
 /**  Retryable: keep UI. */
 { code: "unavailable" } |
+/**  The server answered 404: asking again will not find it. */
+{ code: "media_not_found" } |
+/**  The homeserver answered 404: asking again will not find it. */
+{ code: "not_found" } |
 /**  The media's server keeps failing; asking again before this is pointless. */
 { code: "media_server_unavailable"; retry_after_ms: number } |
 /**  Refused, recoverable by user action. */
-{ code: "denied" } | { code: "rate_limited"; retry_after_ms: number | null } | { code: "registration_unavailable" } | { code: "username_taken" } | { code: "invalid_username" } | { code: "invalid_email" } | { code: "unknown_email" } | { code: "email_verification_failed" } | { code: "weak_password" } | { code: "registration_stage_failed"; stage: string } |
+{ code: "denied" } | { code: "banned"; reason: string | null } | { code: "rate_limited"; retry_after_ms: number | null } | { code: "registration_unavailable" } | { code: "username_taken" } | { code: "invalid_username" } | { code: "invalid_email" } | { code: "unknown_email" } | { code: "email_verification_failed" } | { code: "weak_password" } | { code: "registration_stage_failed"; stage: string } |
 /**  The homeserver advertises OAuth endpoints that cannot be reached. */
 { code: "auth_provider_unreachable" } |
-/**  Detail is in the core's log under `log_id`. */
+/**  Also in the core's log under `log_id`. */
 { code: "failed"; log_id: string };
+
+/**
+ *  What a command rejects with. The UI acts on the code, the report is the
+ *  detail of the error the code came from, for the console and Sentry.
+ */
+export type RpcError = {
+	report?: ErrorReportView | null,
+} & RpcCode;
 
 export type RsvpPeople = {
 	accepted: string[],
@@ -1335,6 +1610,10 @@ export type RsvpTally = {
 };
 
 export type RtcLivekitEndpoint = "get_token" | "delegate_delayed_leave";
+
+export type RtcPurpose = "search_sharing";
+
+export type RtcSignal = { kind: "open" } | { kind: "negotiate"; description: Description } | { kind: "candidate"; candidate: IceCandidate } | { kind: "close" };
 
 export type RtcTransportSource = "endpoint" | "well_known" | "none";
 
@@ -1436,11 +1715,42 @@ export type SearchMetricsView = {
 	last_request_ms: number | null,
 	average_request_ms: number | null,
 	running_ms: number | null,
+	sharing: SearchSharingView,
 };
 
 export type SearchOperator = "in" | "space" | "from" | "mentions" | "has" | "before" | "after" | "during" | "on" | "with" | "is" | "pinned" | "regex";
 
 export type SearchOrder = "rank" | "recent" | "oldest";
+
+export type SearchPeerCandidateStatus = "waiting" | "busy" | "trying" | "failed" | "done";
+
+export type SearchPeerCandidateView = {
+	device_id: string,
+	name: string | null,
+	documents: number,
+	complete_rooms: number,
+	status: SearchPeerCandidateStatus,
+};
+
+export type SearchPeerCopyView = {
+	device_id: string,
+	name: string | null,
+	at_ms: number,
+	rooms: number,
+};
+
+export type SearchPeerDeviceView = {
+	device_id: string,
+	name: string | null,
+};
+
+export type SearchPeerOutcome = "completed" | "no_devices" | "no_answer" | "nothing_to_copy" | "failed" | "interrupted";
+
+export type SearchPeerPause = "offline" | "metered" | "background";
+
+export type SearchPeerState = "off" | "idle" | "discovering" |
+/**  The device with the most history is busy with another copy. */
+"waiting" | "connecting" | "receiving" | "sending";
 
 export type SearchPerson = {
 	user_id: string,
@@ -1457,6 +1767,21 @@ export type SearchRoom = {
 	is_direct: boolean,
 	direct_targets: string[],
 	space_children: SpaceChildEdge[],
+};
+
+export type SearchSharingView = {
+	state: SearchPeerState,
+	pause: SearchPeerPause | null,
+	outcome: SearchPeerOutcome | null,
+	peer: SearchPeerDeviceView | null,
+	/**  Rooms copied by the current or last receiving attempt. */
+	transferred_rooms: number,
+	/**  Total rooms to transfer during the current or last receiving attempt. */
+	total_rooms: number,
+	last_copy: SearchPeerCopyView | null,
+	automatic: boolean,
+	asked: number,
+	candidates: SearchPeerCandidateView[],
 };
 
 /**
@@ -1478,6 +1803,18 @@ export type SearchTuning = {
 	batch: number,
 	base_events: number,
 	max_events: number,
+};
+
+/**
+ *  What the sections depend on besides the rooms. `loaded: None` treats every
+ *  level as described; `keep_empty` names subspaces shown even without rooms.
+ */
+export type SectionInputs = {
+	loaded: string[] | null,
+	failed: string[],
+	keep_empty: string[],
+	joined: string[],
+	invited: string[],
 };
 
 export type SendAttachmentRequest = {
@@ -1530,7 +1867,7 @@ export type SessionInfo = {
 
 export type ShareHistoryView = "shared" | "unencrypted" | "no_cross_signing" | "history_not_shared";
 
-export type SidebarItemView = { kind: "space"; room_id: string } | { kind: "folder"; id: string; name: string | null; content: string[] };
+export type SidebarItemView = { kind: "space"; room_id: string } | { kind: "folder"; id: string; name: string | null; icon: string | null; content: string[] };
 
 export type SignOutSafetyView = {
 	encryption: EncryptionStatusView,
@@ -1586,10 +1923,22 @@ export type SpaceHierarchyRoomView = {
 	children: SpaceChildEdge[],
 };
 
+export type SpaceNotificationView = {
+	space_id: string,
+	mode: NotificationModeView,
+};
+
+export type SpaceNotificationsView = {
+	spaces: SpaceNotificationView[],
+	exempt_rooms: string[],
+};
+
 export type SpaceParentView = {
 	room_id: string,
 	via: string[],
 };
+
+export type SpaceTreeNodeView = { kind: "room"; room_id: string; key: string; depth: number } | { kind: "category"; room_id: string; key: string; depth: number; children: SpaceTreeNodeView[] } | { kind: "link"; room_id: string; key: string; depth: number };
 
 export type SsoIdentityProviderView = {
 	id: string,
@@ -1612,6 +1961,12 @@ export type StatusView = {
 };
 
 export type SubscriptionId = number;
+
+export type SuggestedOverride = {
+	parent_id: string,
+	room_id: string,
+	suggested: boolean,
+};
 
 export type SyncStatus = { state: "offline" } | { state: "syncing" } | { state: "live" } | { state: "error"; message: string };
 
@@ -1650,21 +2005,21 @@ export type TimelineItemContentView = { kind: "message";
 body: string;
 /**  Sanitised display HTML, safe to inject as-is. */
 html: string;
-/**  `m.emote`, which reads as an action by the sender rather than speech. */
-emote: boolean; notice: boolean; edited: boolean;
+/**  An emote reads as an action by the sender rather than speech. */
+msgtype: MessageKind; edited: boolean;
 /**
  *  Drawn larger, 1 to 4, when the message is nothing but emoji or
  *  inline emotes.
  */
 jumbo: number | null } | { kind: "image"; filename: string; caption: string | null;
 /**  Sanitised display HTML for a formatted caption, when present. */
-html: string | null; source: string; mime: string | null; width: number | null; height: number | null; size: number | null; blurhash: string | null; thumbnail: string | null; spoiler: string | null; animated: boolean | null } | { kind: "video"; filename: string; caption: string | null;
+html: string | null; source: string; external_url: string | null; mime: string | null; width: number | null; height: number | null; size: number | null; blurhash: string | null; thumbnail: string | null; spoiler: string | null; animated: boolean | null } | { kind: "video"; filename: string; caption: string | null;
 /**  Sanitised display HTML for a formatted caption, when present. */
-html: string | null; source: string; mime: string | null; width: number | null; height: number | null; blurhash: string | null; thumbnail: string | null; spoiler: string | null; playback: VideoPlaybackView | null } | { kind: "audio"; filename: string; caption: string | null;
+html: string | null; source: string; external_url: string | null; mime: string | null; width: number | null; height: number | null; blurhash: string | null; thumbnail: string | null; spoiler: string | null; playback: VideoPlaybackView | null } | { kind: "audio"; filename: string; caption: string | null;
 /**  Sanitised display HTML for a formatted caption, when present. */
-html: string | null; source: string; mime: string | null; duration_ms: number | null; waveform: number[] | null; voice: boolean; metadata: AudioMetadataView | null } | { kind: "file"; filename: string; caption: string | null;
+html: string | null; source: string; external_url: string | null; mime: string | null; duration_ms: number | null; waveform: number[] | null; voice: boolean; metadata: AudioMetadataView | null } | { kind: "file"; filename: string; caption: string | null;
 /**  Sanitised display HTML for a formatted caption, when present. */
-html: string | null; source: string; mime: string | null; size: number | null } | { kind: "sticker"; body: string; source: string; mime: string | null; width: number | null; height: number | null } |
+html: string | null; source: string; external_url: string | null; mime: string | null; size: number | null } | { kind: "sticker"; body: string; source: string; mime: string | null; width: number | null; height: number | null } |
 /**
  *  The coordinates are absent for a `geo:` URI we cannot read; `geo_uri` is
  *  passed through as sent either way.
@@ -1771,6 +2126,7 @@ export type TimelineItemView = {
 	mention: MentionView,
 	forwarded: ForwardedView | null,
 	forum_title: string | null,
+	shield: MessageShieldView | null,
 };
 
 export type TimelineReadDiagnostics = {
@@ -1818,6 +2174,7 @@ export type UrlPreviewVideoView = {
 	mime: string | null,
 	width: number | null,
 	height: number | null,
+	gif: boolean,
 };
 
 export type UrlPreviewView = {
@@ -1833,6 +2190,7 @@ export type UrlPreviewView = {
 	theme_color: string | null,
 	card: string | null,
 	author_name: string | null,
+	post: PostView | null,
 };
 
 export type UserDeviceView = {
@@ -1847,6 +2205,9 @@ export type UserDirectoryEntryView = {
 	user_id: string,
 	display_name: string | null,
 	avatar_url: string | null,
+	/**  For widgets and anything else that leaves this device. */
+	real_name: string | null,
+	real_avatar_url: string | null,
 };
 
 export type UserSecurityView = {
@@ -1940,6 +2301,9 @@ export type ZonedInstant = {
 /** The core's methods by domain. */
 export type Rpc = {
   account: {
+    setReadReceipts: (params: {
+	public: boolean,
+}) => Promise<null>;
     userProfile: (params: {
 	user_id: string,
 }) => Promise<ProfileView>;
@@ -1949,6 +2313,7 @@ export type Rpc = {
 	mutual_rooms: MutualRoomView[],
 	ignored: boolean,
 }>;
+    wellKnown: (params?: Record<string, never>) => Promise<unknown | null>;
     dataTypes: (params?: Record<string, never>) => Promise<string[]>;
     data: (params: {
 	event_type: string,
@@ -2001,9 +2366,20 @@ export type Rpc = {
 	presence: PresenceView,
 	status_message?: string | null,
 }) => Promise<null>;
+    setDeviceActivity: (params: {
+	active: boolean,
+}) => Promise<null>;
     fetchPresence: (params: {
 	user_ids: string[],
 }) => Promise<null>;
+    presenceSharing: (params?: Record<string, never>) => Promise<PresenceSharingView | null>;
+    editPresenceSharing: (params: {
+	edit: PresenceSharingEdit,
+}) => Promise<PresenceSharingView>;
+    presenceOverride: (params?: Record<string, never>) => Promise<PresenceOverrideView | null>;
+    setPresenceOverride: (params: {
+	override: PresenceOverrideView,
+}) => Promise<PresenceOverrideView>;
     searchUserDirectory: (params: {
 	term: string,
 	limit?: number | null,
@@ -2029,6 +2405,24 @@ export type Rpc = {
     setMediaPreviewConfig: (params: {
 	config: MediaPreviewConfigView,
 }) => Promise<MediaPreviewConfigView>;
+    setRoomMediaPreviews: (params: {
+	room_id: string,
+	media_previews: MediaPreviewsView | null,
+}) => Promise<MediaPreviewConfigView>;
+    dmSpaces: (params?: Record<string, never>) => Promise<DmSpaceLink[]>;
+    setDmSpaces: (params: {
+	room_id: string,
+	space_ids: string[],
+}) => Promise<DmSpaceLink[]>;
+    spaceNotifications: (params?: Record<string, never>) => Promise<SpaceNotificationsView>;
+    setSpaceNotification: (params: {
+	space_id: string,
+	mode?: NotificationModeView | null,
+}) => Promise<SpaceNotificationsView>;
+    setSpaceNotificationExempt: (params: {
+	room_id: string,
+	exempt: boolean,
+}) => Promise<SpaceNotificationsView>;
     profileOverrides: (params?: Record<string, never>) => Promise<ProfileOverridesView>;
     setProfileOverride: (params: {
 	user_id: string,
@@ -2038,14 +2432,12 @@ export type Rpc = {
 }) => Promise<ProfileOverridesView>;
   };
   auth: {
-    discoverHomeserver: (params: {
-	server_name: string,
-}) => Promise<string>;
     login: (params: {
 	reauth_account_id?: string | null,
 	homeserver: string,
 	identifier: LoginIdentifier,
 	password: string,
+	device_display_name?: string | null,
 }) => Promise<string>;
     loginFlows: (params: {
 	homeserver: string,
@@ -2059,6 +2451,7 @@ export type Rpc = {
 	password: string,
 	registration_email?: string | null,
 	registration_token: string | null,
+	device_display_name?: string | null,
 }) => Promise<RegistrationResultView>;
     requestRegistrationEmail: (params: {
 	email: string,
@@ -2089,6 +2482,7 @@ export type Rpc = {
 	homeserver: string,
 	redirect_uri: string,
 	intent: AuthIntent,
+	device_display_name?: string | null,
 }) => Promise<string>;
     completeOidcLogin: (params: {
 	callback_url: string,
@@ -2102,6 +2496,7 @@ export type Rpc = {
 }) => Promise<string>;
     completeSsoLogin: (params: {
 	callback_url: string,
+	device_display_name?: string | null,
 }) => Promise<string>;
     startQrLogin: (params: {
 	homeserver?: string | null,
@@ -2188,9 +2583,6 @@ export type Rpc = {
     signOutSafety: (params?: Record<string, never>) => Promise<SignOutSafetyView>;
     devices: (params?: Record<string, never>) => Promise<{
 	devices: DeviceView[],
-	account_management: boolean,
-	/**  Signed in with OAuth, which is what linking a device by QR code needs. */
-	oauth: boolean,
 }>;
     userSecurity: (params: {
 	user_id: string,
@@ -2201,6 +2593,8 @@ export type Rpc = {
     enableRecovery: (params: {
 	/**  A passphrase to unlock the key with. The key is returned either way. */
 	passphrase?: string | null,
+	/**  Deletes the unreadable server backup and the history it holds. */
+	replace_backup?: boolean,
 }) => Promise<string>;
     resetRecoveryKey: (params: {
 	passphrase?: string | null,
@@ -2236,6 +2630,10 @@ export type Rpc = {
 	room_id: string,
 	user_id: string,
 }) => Promise<ShareHistoryView>;
+    dehydratedDevice: (params?: Record<string, never>) => Promise<DehydratedDeviceView>;
+    setDehydratedDevice: (params: {
+	enabled: boolean,
+}) => Promise<DehydratedDeviceView>;
     requestVerification: (params: {
 	user_id: string,
 	device_id?: string | null,
@@ -2280,6 +2678,14 @@ export type Rpc = {
 	room_id: string,
 	memberships?: MembershipView[],
 }) => Promise<MemberView[]>;
+    joinRequests: (params?: Record<string, never>) => Promise<{
+	rooms: JoinRequestRoomView[],
+	failed: boolean,
+}>;
+    member: (params: {
+	room_id: string,
+	user_id: string,
+}) => Promise<MemberView | null>;
     permissions: (params: {
 	room_id: string,
 }) => Promise<RoomPermissionsView>;
@@ -2561,12 +2967,21 @@ export type Rpc = {
 }) => Promise<null>;
     urlPreview: (params: {
 	url: string,
+	client?: boolean,
 	service?: string | null,
+	tunnel?: boolean,
 }) => Promise<UrlPreviewView | null>;
     reactionShortcodes: (params: {
 	room_id: string,
 	event_id: string,
 }) => Promise<ReactionShortcodeView[]>;
+    frequentReactions: (params: {
+	legacy?: unknown | null,
+	recent?: string[],
+}) => Promise<string[]>;
+    rememberEmoji: (params: {
+	key: string,
+}) => Promise<null>;
     setTyping: (params: {
 	room_id: string,
 	typing: boolean,
@@ -2607,6 +3022,10 @@ export type Rpc = {
 	/**  `null` drops the room's own rules so it follows the default again. */
 	mode?: NotificationModeView | null,
 }) => Promise<null>;
+    setRoomsNotificationMode: (params: {
+	room_ids: string[],
+	mode?: NotificationModeView | null,
+}) => Promise<null>;
     setDefaultMode: (params: {
 	direct: boolean,
 	mode: NotificationModeView,
@@ -2627,29 +3046,45 @@ export type Rpc = {
 	include_read: boolean,
 	limit: number,
 	before_ts?: number | null,
+	room_id?: string | null,
+	query?: string | null,
 }) => Promise<{
 	items: InboxItemView[],
 	has_more: boolean,
 }>;
     backfillInbox: (params: {
 	include_read: boolean,
+	room_id?: string | null,
 }) => Promise<{
 	recorded: number,
 	has_more: boolean,
 }>;
     markNotificationSeen: (params: { event_id: string }) => Promise<null>;
-    setContent: (params: {
-	visible: boolean,
-	encrypted: boolean,
+    setOptions: (params: {
+	enabled: boolean,
+	content: boolean,
+	encrypted_content: boolean,
+	sounds: boolean,
+	notify_once: boolean,
 }) => Promise<null>;
-    setSounds: (params: {
+    pushRules: (params?: Record<string, never>) => Promise<unknown>;
+    setPushRuleEnabled: (params: {
+	kind: string,
+	rule_id: string,
 	enabled: boolean,
 }) => Promise<null>;
-    setNotifyOnce: (params: {
-	enabled: boolean,
+    setPushRuleActions: (params: {
+	kind: string,
+	rule_id: string,
+	actions: unknown[],
 }) => Promise<null>;
-    setEnabled: (params: {
-	enabled: boolean,
+    addPushRule: (params: {
+	kind: string,
+	rule: unknown,
+}) => Promise<null>;
+    deletePushRule: (params: {
+	kind: string,
+	rule_id: string,
 }) => Promise<null>;
   };
   packs: {
@@ -2694,6 +3129,7 @@ export type Rpc = {
     list: (params?: Record<string, never>) => Promise<PersonaCatalogView>;
     save: (params: {
 	persona: PersonaView,
+	base_persona: PersonaView,
 	previous_id?: string | null,
 }) => Promise<PersonaView[]>;
     remove: (params: {
@@ -2709,6 +3145,9 @@ export type Rpc = {
 	valid_until?: number | null,
 }) => Promise<null>;
     disableRoom: (params: {
+	room_id: string,
+}) => Promise<null>;
+    accountRoom: (params: {
 	room_id: string,
 }) => Promise<null>;
     backup: (params?: Record<string, never>) => Promise<string>;
@@ -2735,9 +3174,6 @@ export type Rpc = {
     pingGateway: (params: {
 	url: string,
 }) => Promise<boolean | null>;
-    discoverGateway: (params: {
-	endpoint: string,
-}) => Promise<string | null>;
     sendDiagnostic: (params: {
 	pushkey: string,
 	app_id: string,
@@ -2787,6 +3223,13 @@ export type Rpc = {
     setMemberListThreshold: (params: {
 	room_id: string,
 	always_listed_from?: number | null,
+}) => Promise<null>;
+    presenceHint: (params: {
+	room_id: string,
+}) => Promise<PresenceHintView>;
+    setPresenceHint: (params: {
+	room_id: string,
+	hint: PresenceHintView,
 }) => Promise<null>;
     updateServerAcl: (params: {
 	room_id: string,
@@ -2858,6 +3301,13 @@ export type Rpc = {
     open: (params: {
 	room_id: string,
 }) => Promise<RoomOpenView>;
+    presencePrompt: (params: {
+	room_id: string,
+}) => Promise<PresencePromptView | null>;
+    answerPresencePrompt: (params: {
+	prompt: PresencePromptView,
+	share: boolean,
+}) => Promise<null>;
     listItem: (params: {
 	room_id: string,
 }) => Promise<RoomListItemView>;
@@ -2908,6 +3358,8 @@ export type Rpc = {
     createDm: (params: {
 	user_id: string,
 	encrypted?: boolean | null,
+	/**  Whether a DM created because none matched is encrypted, when `encrypted` leaves it open. */
+	encrypt_new: boolean,
 }) => Promise<string>;
     versions: (params?: Record<string, never>) => Promise<RoomVersionsView>;
     upgrade: (params: {
@@ -2986,6 +3438,15 @@ export type Rpc = {
 	space_id?: string | null,
 }) => Promise<RoomCosmeticsView>;
   };
+  rtc: {
+    signal: (params: {
+	session_id: string,
+	signal: RtcSignal,
+}) => Promise<null>;
+    close: (params: {
+	session_id: string,
+}) => Promise<null>;
+  };
   search: {
     messages: (params: {
 	query: string,
@@ -3001,6 +3462,9 @@ export type Rpc = {
 }>;
     coverage: (params?: Record<string, never>) => Promise<SearchCoverageView>;
     metrics: (params?: Record<string, never>) => Promise<SearchMetricsView>;
+    peerStart: (params?: Record<string, never>) => Promise<null>;
+    peerFind: (params?: Record<string, never>) => Promise<null>;
+    peerReset: (params?: Record<string, never>) => Promise<null>;
   };
   session: {
     restore: (params?: Record<string, never>) => Promise<SessionInfo | null>;
@@ -3017,6 +3481,7 @@ export type Rpc = {
 	homeserver: string,
 	server: HomeserverSoftwareView | null,
 }>;
+    oauthMetadata: (params?: Record<string, never>) => Promise<OAuthMetadataView | null>;
     requestOpenIdToken: (params?: Record<string, never>) => Promise<{
 	access_token: string,
 	matrix_server_name: string,
@@ -3028,11 +3493,18 @@ export type Rpc = {
     serverFeatures: (params?: Record<string, never>) => Promise<string[]>;
     delayedEventsSupported: (params?: Record<string, never>) => Promise<boolean>;
     setSearchOptions: (params: {
+	sharing: boolean,
 	disk_budget_mb: number,
 	crawler: boolean,
 	unmetered_only: boolean,
 	server_search: boolean,
 	tuning: SearchTuning,
+}) => Promise<null>;
+    setNetworkConditions: (params: {
+	available: boolean,
+	unmetered: boolean,
+}) => Promise<null>;
+    setAppInForeground: (params: {
 	foreground: boolean,
 }) => Promise<null>;
     setReadRoom: (params: {
@@ -3057,11 +3529,13 @@ export type Rpc = {
 	space_id: string,
 	room_id: string,
 	order?: string | null,
+	via?: string[] | null,
 }) => Promise<null>;
     setChildSuggested: (params: {
 	space_id: string,
 	room_id: string,
 	suggested: boolean,
+	via?: string[] | null,
 }) => Promise<null>;
     hierarchy: (params: {
 	space_id: string,
@@ -3079,6 +3553,10 @@ export type Rpc = {
     setSidebar: (params: {
 	items: SidebarItemView[],
 }) => Promise<null>;
+    setAvatarOverride: (params: {
+	room_id: string,
+	url: string | null,
+}) => Promise<null>;
     roomHasSpaceParent: (params: {
 	room_id: string,
 }) => Promise<boolean>;
@@ -3087,10 +3565,15 @@ export type Rpc = {
 }) => Promise<SpaceParentView[]>;
   };
   timeline: {
-    subscribeRoomList: (params?: Record<string, never>) => Promise<{
+    subscribeRoomList: (params: {
+	options?: RoomListOptionsView,
+}) => Promise<{
 	subscription: SubscriptionId,
 	rooms: RoomListItemView[],
 }>;
+    setRoomListOptions: (params: {
+	options: RoomListOptionsView,
+}) => Promise<null>;
     subscribe: (params: {
 	room_id: string,
 	focus?: TimelineFocusView,
@@ -3156,6 +3639,7 @@ export type Rpc = {
 	source: string,
 	encrypted: boolean,
 	original: string | null,
+	encryption: string | null,
 }>;
     editHistory: (params: {
 	room_id: string,
@@ -3164,7 +3648,6 @@ export type Rpc = {
     markRead: (params: {
 	room_id: string,
 	event_id?: string | null,
-	private_receipt?: boolean,
 	thread_root?: string | null,
 	subscription?: SubscriptionId | null,
 	fully_read?: boolean,
@@ -3181,14 +3664,9 @@ export type Rpc = {
 	room_id: string,
 }) => Promise<string | null>;
     unreadDiagnostics: (params: {
+	thread_roots?: string[],
 	room_id: string,
 }) => Promise<UnreadDiagnosticsView>;
-    retryDecryption: (params: {
-	room_id: string,
-	session_id: string,
-	sender: string,
-	thread_root?: string | null,
-}) => Promise<null>;
     roomEventRelations: (params: {
 	room_id: string,
 	event_id: string,
@@ -3255,8 +3733,10 @@ export type RpcResult<M extends RpcMethod> = Awaited<ReturnType<M>>;
 
 /** Each method by its wire name, for code that speaks the wire format. */
 export type RpcMethods = {
+  'account.set_read_receipts': Rpc['account']['setReadReceipts'];
   'account.user_profile': Rpc['account']['userProfile'];
   'account.user_relations': Rpc['account']['userRelations'];
+  'account.well_known': Rpc['account']['wellKnown'];
   'account.data_types': Rpc['account']['dataTypes'];
   'account.data': Rpc['account']['data'];
   'account.set_data': Rpc['account']['setData'];
@@ -3274,7 +3754,12 @@ export type RpcMethods = {
   'account.report_user': Rpc['account']['reportUser'];
   'account.deactivate_account': Rpc['account']['deactivateAccount'];
   'account.set_presence': Rpc['account']['setPresence'];
+  'account.set_device_activity': Rpc['account']['setDeviceActivity'];
   'account.fetch_presence': Rpc['account']['fetchPresence'];
+  'account.presence_sharing': Rpc['account']['presenceSharing'];
+  'account.edit_presence_sharing': Rpc['account']['editPresenceSharing'];
+  'account.presence_override': Rpc['account']['presenceOverride'];
+  'account.set_presence_override': Rpc['account']['setPresenceOverride'];
   'account.search_user_directory': Rpc['account']['searchUserDirectory'];
   'account.dismissed_invites': Rpc['account']['dismissedInvites'];
   'account.set_invite_dismissed': Rpc['account']['setInviteDismissed'];
@@ -3282,9 +3767,14 @@ export type RpcMethods = {
   'account.set_bookmark': Rpc['account']['setBookmark'];
   'account.media_preview_config': Rpc['account']['mediaPreviewConfig'];
   'account.set_media_preview_config': Rpc['account']['setMediaPreviewConfig'];
+  'account.set_room_media_previews': Rpc['account']['setRoomMediaPreviews'];
+  'account.dm_spaces': Rpc['account']['dmSpaces'];
+  'account.set_dm_spaces': Rpc['account']['setDmSpaces'];
+  'account.space_notifications': Rpc['account']['spaceNotifications'];
+  'account.set_space_notification': Rpc['account']['setSpaceNotification'];
+  'account.set_space_notification_exempt': Rpc['account']['setSpaceNotificationExempt'];
   'account.profile_overrides': Rpc['account']['profileOverrides'];
   'account.set_profile_override': Rpc['account']['setProfileOverride'];
-  'auth.discover_homeserver': Rpc['auth']['discoverHomeserver'];
   'auth.login': Rpc['auth']['login'];
   'auth.login_flows': Rpc['auth']['loginFlows'];
   'auth.registration_flows': Rpc['auth']['registrationFlows'];
@@ -3334,6 +3824,8 @@ export type RpcMethods = {
   'encryption.rename_device': Rpc['encryption']['renameDevice'];
   'encryption.discard_room_key': Rpc['encryption']['discardRoomKey'];
   'encryption.share_history': Rpc['encryption']['shareHistory'];
+  'encryption.dehydrated_device': Rpc['encryption']['dehydratedDevice'];
+  'encryption.set_dehydrated_device': Rpc['encryption']['setDehydratedDevice'];
   'encryption.request_verification': Rpc['encryption']['requestVerification'];
   'encryption.withdraw_verification': Rpc['encryption']['withdrawVerification'];
   'encryption.set_device_blocked': Rpc['encryption']['setDeviceBlocked'];
@@ -3343,6 +3835,8 @@ export type RpcMethods = {
   'encryption.confirm_verification': Rpc['encryption']['confirmVerification'];
   'encryption.cancel_verification': Rpc['encryption']['cancelVerification'];
   'members.list': Rpc['members']['list'];
+  'members.join_requests': Rpc['members']['joinRequests'];
+  'members.member': Rpc['members']['member'];
   'members.permissions': Rpc['members']['permissions'];
   'members.power_levels': Rpc['members']['powerLevels'];
   'members.set_power_level': Rpc['members']['setPowerLevel'];
@@ -3387,6 +3881,8 @@ export type RpcMethods = {
   'messages.send_gesture': Rpc['messages']['sendGesture'];
   'messages.url_preview': Rpc['messages']['urlPreview'];
   'messages.reaction_shortcodes': Rpc['messages']['reactionShortcodes'];
+  'messages.frequent_reactions': Rpc['messages']['frequentReactions'];
+  'messages.remember_emoji': Rpc['messages']['rememberEmoji'];
   'messages.set_typing': Rpc['messages']['setTyping'];
   'messages.media_config': Rpc['messages']['mediaConfig'];
   'notifications.settings': Rpc['notifications']['settings'];
@@ -3401,6 +3897,7 @@ export type RpcMethods = {
   'notifications.remove_keyword': Rpc['notifications']['removeKeyword'];
   'notifications.set_keyword_mode': Rpc['notifications']['setKeywordMode'];
   'notifications.set_room_notification_mode': Rpc['notifications']['setRoomNotificationMode'];
+  'notifications.set_rooms_notification_mode': Rpc['notifications']['setRoomsNotificationMode'];
   'notifications.set_default_mode': Rpc['notifications']['setDefaultMode'];
   'notifications.set_mention_notifications': Rpc['notifications']['setMentionNotifications'];
   'notifications.set_event_notification': Rpc['notifications']['setEventNotification'];
@@ -3408,10 +3905,12 @@ export type RpcMethods = {
   'notifications.inbox': Rpc['notifications']['inbox'];
   'notifications.backfill_inbox': Rpc['notifications']['backfillInbox'];
   'notifications.mark_notification_seen': Rpc['notifications']['markNotificationSeen'];
-  'notifications.set_content': Rpc['notifications']['setContent'];
-  'notifications.set_sounds': Rpc['notifications']['setSounds'];
-  'notifications.set_notify_once': Rpc['notifications']['setNotifyOnce'];
-  'notifications.set_enabled': Rpc['notifications']['setEnabled'];
+  'notifications.set_options': Rpc['notifications']['setOptions'];
+  'notifications.push_rules': Rpc['notifications']['pushRules'];
+  'notifications.set_push_rule_enabled': Rpc['notifications']['setPushRuleEnabled'];
+  'notifications.set_push_rule_actions': Rpc['notifications']['setPushRuleActions'];
+  'notifications.add_push_rule': Rpc['notifications']['addPushRule'];
+  'notifications.delete_push_rule': Rpc['notifications']['deletePushRule'];
   'packs.list': Rpc['packs']['list'];
   'packs.list_all': Rpc['packs']['listAll'];
   'packs.save': Rpc['packs']['save'];
@@ -3428,6 +3927,7 @@ export type RpcMethods = {
   'personas.reorder': Rpc['personas']['reorder'];
   'personas.set_selection': Rpc['personas']['setSelection'];
   'personas.disable_room': Rpc['personas']['disableRoom'];
+  'personas.account_room': Rpc['personas']['accountRoom'];
   'personas.backup': Rpc['personas']['backup'];
   'personas.check_backup': Rpc['personas']['checkBackup'];
   'personas.restore_backup': Rpc['personas']['restoreBackup'];
@@ -3437,7 +3937,6 @@ export type RpcMethods = {
   'push.set_web_pusher': Rpc['push']['setWebPusher'];
   'push.web_pushers': Rpc['push']['webPushers'];
   'push.ping_gateway': Rpc['push']['pingGateway'];
-  'push.discover_gateway': Rpc['push']['discoverGateway'];
   'push.send_diagnostic': Rpc['push']['sendDiagnostic'];
   'push.ack_web_pusher': Rpc['push']['ackWebPusher'];
   'room_state.set_name': Rpc['room_state']['setName'];
@@ -3451,6 +3950,8 @@ export type RpcMethods = {
   'room_state.set_banner': Rpc['room_state']['setBanner'];
   'room_state.member_list_threshold': Rpc['room_state']['memberListThreshold'];
   'room_state.set_member_list_threshold': Rpc['room_state']['setMemberListThreshold'];
+  'room_state.presence_hint': Rpc['room_state']['presenceHint'];
+  'room_state.set_presence_hint': Rpc['room_state']['setPresenceHint'];
   'room_state.update_server_acl': Rpc['room_state']['updateServerAcl'];
   'room_state.abbreviations': Rpc['room_state']['abbreviations'];
   'room_state.set_abbreviations': Rpc['room_state']['setAbbreviations'];
@@ -3467,6 +3968,8 @@ export type RpcMethods = {
   'room_state.remove_widget': Rpc['room_state']['removeWidget'];
   'room_state.bot_commands': Rpc['room_state']['botCommands'];
   'rooms.open': Rpc['rooms']['open'];
+  'rooms.presence_prompt': Rpc['rooms']['presencePrompt'];
+  'rooms.answer_presence_prompt': Rpc['rooms']['answerPresencePrompt'];
   'rooms.list_item': Rpc['rooms']['listItem'];
   'rooms.preview': Rpc['rooms']['preview'];
   'rooms.join': Rpc['rooms']['join'];
@@ -3492,9 +3995,14 @@ export type RpcMethods = {
   'rooms.set_tag': Rpc['rooms']['setTag'];
   'rooms.attachments': Rpc['rooms']['attachments'];
   'rooms.cosmetics': Rpc['rooms']['cosmetics'];
+  'rtc.signal': Rpc['rtc']['signal'];
+  'rtc.close': Rpc['rtc']['close'];
   'search.messages': Rpc['search']['messages'];
   'search.coverage': Rpc['search']['coverage'];
   'search.metrics': Rpc['search']['metrics'];
+  'search.peer_start': Rpc['search']['peerStart'];
+  'search.peer_find': Rpc['search']['peerFind'];
+  'search.peer_reset': Rpc['search']['peerReset'];
   'session.restore': Rpc['session']['restore'];
   'session.list_accounts': Rpc['session']['listAccounts'];
   'session.switch_account': Rpc['session']['switchAccount'];
@@ -3502,6 +4010,7 @@ export type RpcMethods = {
   'session.logout': Rpc['session']['logout'];
   'session.reset_local_cache': Rpc['session']['resetLocalCache'];
   'session.homeserver_info': Rpc['session']['homeserverInfo'];
+  'session.oauth_metadata': Rpc['session']['oauthMetadata'];
   'session.request_open_id_token': Rpc['session']['requestOpenIdToken'];
   'session.access_token': Rpc['session']['accessToken'];
   'session.open_id_token': Rpc['session']['openIdToken'];
@@ -3509,6 +4018,8 @@ export type RpcMethods = {
   'session.server_features': Rpc['session']['serverFeatures'];
   'session.delayed_events_supported': Rpc['session']['delayedEventsSupported'];
   'session.set_search_options': Rpc['session']['setSearchOptions'];
+  'session.set_network_conditions': Rpc['session']['setNetworkConditions'];
+  'session.set_app_in_foreground': Rpc['session']['setAppInForeground'];
   'session.set_read_room': Rpc['session']['setReadRoom'];
   'session.integration_manager_url': Rpc['session']['integrationManagerUrl'];
   'session.integration_manager_terms': Rpc['session']['integrationManagerTerms'];
@@ -3521,9 +4032,11 @@ export type RpcMethods = {
   'spaces.remove': Rpc['spaces']['remove'];
   'spaces.sidebar': Rpc['spaces']['sidebar'];
   'spaces.set_sidebar': Rpc['spaces']['setSidebar'];
+  'spaces.set_avatar_override': Rpc['spaces']['setAvatarOverride'];
   'spaces.room_has_space_parent': Rpc['spaces']['roomHasSpaceParent'];
   'spaces.unjoined_space_parents': Rpc['spaces']['unjoinedSpaceParents'];
   'timeline.subscribe_room_list': Rpc['timeline']['subscribeRoomList'];
+  'timeline.set_room_list_options': Rpc['timeline']['setRoomListOptions'];
   'timeline.subscribe': Rpc['timeline']['subscribe'];
   'timeline.unsubscribe': Rpc['timeline']['unsubscribe'];
   'timeline.warm_rooms': Rpc['timeline']['warmRooms'];
@@ -3540,7 +4053,6 @@ export type RpcMethods = {
   'timeline.mark_unread': Rpc['timeline']['markUnread'];
   'timeline.read_marker': Rpc['timeline']['readMarker'];
   'timeline.unread_diagnostics': Rpc['timeline']['unreadDiagnostics'];
-  'timeline.retry_decryption': Rpc['timeline']['retryDecryption'];
   'timeline.room_event_relations': Rpc['timeline']['roomEventRelations'];
   'timeline.pinned_events': Rpc['timeline']['pinnedEvents'];
   'timeline.set_pinned': Rpc['timeline']['setPinned'];
@@ -3560,8 +4072,10 @@ export type RpcCall = (method: keyof RpcMethods, params: unknown) => Promise<unk
 export function createRpc(call: RpcCall): Rpc {
   return {
     account: {
+      setReadReceipts: (params) => call('account.set_read_receipts', params) as ReturnType<Rpc['account']['setReadReceipts']>,
       userProfile: (params) => call('account.user_profile', params) as ReturnType<Rpc['account']['userProfile']>,
       userRelations: (params) => call('account.user_relations', params) as ReturnType<Rpc['account']['userRelations']>,
+      wellKnown: (params = {}) => call('account.well_known', params) as ReturnType<Rpc['account']['wellKnown']>,
       dataTypes: (params = {}) => call('account.data_types', params) as ReturnType<Rpc['account']['dataTypes']>,
       data: (params) => call('account.data', params) as ReturnType<Rpc['account']['data']>,
       setData: (params) => call('account.set_data', params) as ReturnType<Rpc['account']['setData']>,
@@ -3579,7 +4093,12 @@ export function createRpc(call: RpcCall): Rpc {
       reportUser: (params) => call('account.report_user', params) as ReturnType<Rpc['account']['reportUser']>,
       deactivateAccount: (params) => call('account.deactivate_account', params) as ReturnType<Rpc['account']['deactivateAccount']>,
       setPresence: (params) => call('account.set_presence', params) as ReturnType<Rpc['account']['setPresence']>,
+      setDeviceActivity: (params) => call('account.set_device_activity', params) as ReturnType<Rpc['account']['setDeviceActivity']>,
       fetchPresence: (params) => call('account.fetch_presence', params) as ReturnType<Rpc['account']['fetchPresence']>,
+      presenceSharing: (params = {}) => call('account.presence_sharing', params) as ReturnType<Rpc['account']['presenceSharing']>,
+      editPresenceSharing: (params) => call('account.edit_presence_sharing', params) as ReturnType<Rpc['account']['editPresenceSharing']>,
+      presenceOverride: (params = {}) => call('account.presence_override', params) as ReturnType<Rpc['account']['presenceOverride']>,
+      setPresenceOverride: (params) => call('account.set_presence_override', params) as ReturnType<Rpc['account']['setPresenceOverride']>,
       searchUserDirectory: (params) => call('account.search_user_directory', params) as ReturnType<Rpc['account']['searchUserDirectory']>,
       dismissedInvites: (params = {}) => call('account.dismissed_invites', params) as ReturnType<Rpc['account']['dismissedInvites']>,
       setInviteDismissed: (params) => call('account.set_invite_dismissed', params) as ReturnType<Rpc['account']['setInviteDismissed']>,
@@ -3587,11 +4106,16 @@ export function createRpc(call: RpcCall): Rpc {
       setBookmark: (params) => call('account.set_bookmark', params) as ReturnType<Rpc['account']['setBookmark']>,
       mediaPreviewConfig: (params) => call('account.media_preview_config', params) as ReturnType<Rpc['account']['mediaPreviewConfig']>,
       setMediaPreviewConfig: (params) => call('account.set_media_preview_config', params) as ReturnType<Rpc['account']['setMediaPreviewConfig']>,
+      setRoomMediaPreviews: (params) => call('account.set_room_media_previews', params) as ReturnType<Rpc['account']['setRoomMediaPreviews']>,
+      dmSpaces: (params = {}) => call('account.dm_spaces', params) as ReturnType<Rpc['account']['dmSpaces']>,
+      setDmSpaces: (params) => call('account.set_dm_spaces', params) as ReturnType<Rpc['account']['setDmSpaces']>,
+      spaceNotifications: (params = {}) => call('account.space_notifications', params) as ReturnType<Rpc['account']['spaceNotifications']>,
+      setSpaceNotification: (params) => call('account.set_space_notification', params) as ReturnType<Rpc['account']['setSpaceNotification']>,
+      setSpaceNotificationExempt: (params) => call('account.set_space_notification_exempt', params) as ReturnType<Rpc['account']['setSpaceNotificationExempt']>,
       profileOverrides: (params = {}) => call('account.profile_overrides', params) as ReturnType<Rpc['account']['profileOverrides']>,
       setProfileOverride: (params) => call('account.set_profile_override', params) as ReturnType<Rpc['account']['setProfileOverride']>,
     },
     auth: {
-      discoverHomeserver: (params) => call('auth.discover_homeserver', params) as ReturnType<Rpc['auth']['discoverHomeserver']>,
       login: (params) => call('auth.login', params) as ReturnType<Rpc['auth']['login']>,
       loginFlows: (params) => call('auth.login_flows', params) as ReturnType<Rpc['auth']['loginFlows']>,
       registrationFlows: (params) => call('auth.registration_flows', params) as ReturnType<Rpc['auth']['registrationFlows']>,
@@ -3647,6 +4171,8 @@ export function createRpc(call: RpcCall): Rpc {
       renameDevice: (params) => call('encryption.rename_device', params) as ReturnType<Rpc['encryption']['renameDevice']>,
       discardRoomKey: (params) => call('encryption.discard_room_key', params) as ReturnType<Rpc['encryption']['discardRoomKey']>,
       shareHistory: (params) => call('encryption.share_history', params) as ReturnType<Rpc['encryption']['shareHistory']>,
+      dehydratedDevice: (params = {}) => call('encryption.dehydrated_device', params) as ReturnType<Rpc['encryption']['dehydratedDevice']>,
+      setDehydratedDevice: (params) => call('encryption.set_dehydrated_device', params) as ReturnType<Rpc['encryption']['setDehydratedDevice']>,
       requestVerification: (params) => call('encryption.request_verification', params) as ReturnType<Rpc['encryption']['requestVerification']>,
       withdrawVerification: (params) => call('encryption.withdraw_verification', params) as ReturnType<Rpc['encryption']['withdrawVerification']>,
       setDeviceBlocked: (params) => call('encryption.set_device_blocked', params) as ReturnType<Rpc['encryption']['setDeviceBlocked']>,
@@ -3658,6 +4184,8 @@ export function createRpc(call: RpcCall): Rpc {
     },
     members: {
       list: (params) => call('members.list', params) as ReturnType<Rpc['members']['list']>,
+      joinRequests: (params = {}) => call('members.join_requests', params) as ReturnType<Rpc['members']['joinRequests']>,
+      member: (params) => call('members.member', params) as ReturnType<Rpc['members']['member']>,
       permissions: (params) => call('members.permissions', params) as ReturnType<Rpc['members']['permissions']>,
       powerLevels: (params) => call('members.power_levels', params) as ReturnType<Rpc['members']['powerLevels']>,
       setPowerLevel: (params) => call('members.set_power_level', params) as ReturnType<Rpc['members']['setPowerLevel']>,
@@ -3704,6 +4232,8 @@ export function createRpc(call: RpcCall): Rpc {
       sendGesture: (params) => call('messages.send_gesture', params) as ReturnType<Rpc['messages']['sendGesture']>,
       urlPreview: (params) => call('messages.url_preview', params) as ReturnType<Rpc['messages']['urlPreview']>,
       reactionShortcodes: (params) => call('messages.reaction_shortcodes', params) as ReturnType<Rpc['messages']['reactionShortcodes']>,
+      frequentReactions: (params) => call('messages.frequent_reactions', params) as ReturnType<Rpc['messages']['frequentReactions']>,
+      rememberEmoji: (params) => call('messages.remember_emoji', params) as ReturnType<Rpc['messages']['rememberEmoji']>,
       setTyping: (params) => call('messages.set_typing', params) as ReturnType<Rpc['messages']['setTyping']>,
       mediaConfig: (params = {}) => call('messages.media_config', params) as ReturnType<Rpc['messages']['mediaConfig']>,
     },
@@ -3720,6 +4250,7 @@ export function createRpc(call: RpcCall): Rpc {
       removeKeyword: (params) => call('notifications.remove_keyword', params) as ReturnType<Rpc['notifications']['removeKeyword']>,
       setKeywordMode: (params) => call('notifications.set_keyword_mode', params) as ReturnType<Rpc['notifications']['setKeywordMode']>,
       setRoomNotificationMode: (params) => call('notifications.set_room_notification_mode', params) as ReturnType<Rpc['notifications']['setRoomNotificationMode']>,
+      setRoomsNotificationMode: (params) => call('notifications.set_rooms_notification_mode', params) as ReturnType<Rpc['notifications']['setRoomsNotificationMode']>,
       setDefaultMode: (params) => call('notifications.set_default_mode', params) as ReturnType<Rpc['notifications']['setDefaultMode']>,
       setMentionNotifications: (params) => call('notifications.set_mention_notifications', params) as ReturnType<Rpc['notifications']['setMentionNotifications']>,
       setEventNotification: (params) => call('notifications.set_event_notification', params) as ReturnType<Rpc['notifications']['setEventNotification']>,
@@ -3727,10 +4258,12 @@ export function createRpc(call: RpcCall): Rpc {
       inbox: (params) => call('notifications.inbox', params) as ReturnType<Rpc['notifications']['inbox']>,
       backfillInbox: (params) => call('notifications.backfill_inbox', params) as ReturnType<Rpc['notifications']['backfillInbox']>,
       markNotificationSeen: (params) => call('notifications.mark_notification_seen', params) as ReturnType<Rpc['notifications']['markNotificationSeen']>,
-      setContent: (params) => call('notifications.set_content', params) as ReturnType<Rpc['notifications']['setContent']>,
-      setSounds: (params) => call('notifications.set_sounds', params) as ReturnType<Rpc['notifications']['setSounds']>,
-      setNotifyOnce: (params) => call('notifications.set_notify_once', params) as ReturnType<Rpc['notifications']['setNotifyOnce']>,
-      setEnabled: (params) => call('notifications.set_enabled', params) as ReturnType<Rpc['notifications']['setEnabled']>,
+      setOptions: (params) => call('notifications.set_options', params) as ReturnType<Rpc['notifications']['setOptions']>,
+      pushRules: (params = {}) => call('notifications.push_rules', params) as ReturnType<Rpc['notifications']['pushRules']>,
+      setPushRuleEnabled: (params) => call('notifications.set_push_rule_enabled', params) as ReturnType<Rpc['notifications']['setPushRuleEnabled']>,
+      setPushRuleActions: (params) => call('notifications.set_push_rule_actions', params) as ReturnType<Rpc['notifications']['setPushRuleActions']>,
+      addPushRule: (params) => call('notifications.add_push_rule', params) as ReturnType<Rpc['notifications']['addPushRule']>,
+      deletePushRule: (params) => call('notifications.delete_push_rule', params) as ReturnType<Rpc['notifications']['deletePushRule']>,
     },
     packs: {
       list: (params) => call('packs.list', params) as ReturnType<Rpc['packs']['list']>,
@@ -3751,6 +4284,7 @@ export function createRpc(call: RpcCall): Rpc {
       reorder: (params) => call('personas.reorder', params) as ReturnType<Rpc['personas']['reorder']>,
       setSelection: (params) => call('personas.set_selection', params) as ReturnType<Rpc['personas']['setSelection']>,
       disableRoom: (params) => call('personas.disable_room', params) as ReturnType<Rpc['personas']['disableRoom']>,
+      accountRoom: (params) => call('personas.account_room', params) as ReturnType<Rpc['personas']['accountRoom']>,
       backup: (params = {}) => call('personas.backup', params) as ReturnType<Rpc['personas']['backup']>,
       checkBackup: (params) => call('personas.check_backup', params) as ReturnType<Rpc['personas']['checkBackup']>,
       restoreBackup: (params) => call('personas.restore_backup', params) as ReturnType<Rpc['personas']['restoreBackup']>,
@@ -3762,7 +4296,6 @@ export function createRpc(call: RpcCall): Rpc {
       setWebPusher: (params) => call('push.set_web_pusher', params) as ReturnType<Rpc['push']['setWebPusher']>,
       webPushers: (params = {}) => call('push.web_pushers', params) as ReturnType<Rpc['push']['webPushers']>,
       pingGateway: (params) => call('push.ping_gateway', params) as ReturnType<Rpc['push']['pingGateway']>,
-      discoverGateway: (params) => call('push.discover_gateway', params) as ReturnType<Rpc['push']['discoverGateway']>,
       sendDiagnostic: (params) => call('push.send_diagnostic', params) as ReturnType<Rpc['push']['sendDiagnostic']>,
       ackWebPusher: (params) => call('push.ack_web_pusher', params) as ReturnType<Rpc['push']['ackWebPusher']>,
     },
@@ -3778,6 +4311,8 @@ export function createRpc(call: RpcCall): Rpc {
       setBanner: (params) => call('room_state.set_banner', params) as ReturnType<Rpc['room_state']['setBanner']>,
       memberListThreshold: (params) => call('room_state.member_list_threshold', params) as ReturnType<Rpc['room_state']['memberListThreshold']>,
       setMemberListThreshold: (params) => call('room_state.set_member_list_threshold', params) as ReturnType<Rpc['room_state']['setMemberListThreshold']>,
+      presenceHint: (params) => call('room_state.presence_hint', params) as ReturnType<Rpc['room_state']['presenceHint']>,
+      setPresenceHint: (params) => call('room_state.set_presence_hint', params) as ReturnType<Rpc['room_state']['setPresenceHint']>,
       updateServerAcl: (params) => call('room_state.update_server_acl', params) as ReturnType<Rpc['room_state']['updateServerAcl']>,
       abbreviations: (params) => call('room_state.abbreviations', params) as ReturnType<Rpc['room_state']['abbreviations']>,
       setAbbreviations: (params) => call('room_state.set_abbreviations', params) as ReturnType<Rpc['room_state']['setAbbreviations']>,
@@ -3796,6 +4331,8 @@ export function createRpc(call: RpcCall): Rpc {
     },
     rooms: {
       open: (params) => call('rooms.open', params) as ReturnType<Rpc['rooms']['open']>,
+      presencePrompt: (params) => call('rooms.presence_prompt', params) as ReturnType<Rpc['rooms']['presencePrompt']>,
+      answerPresencePrompt: (params) => call('rooms.answer_presence_prompt', params) as ReturnType<Rpc['rooms']['answerPresencePrompt']>,
       listItem: (params) => call('rooms.list_item', params) as ReturnType<Rpc['rooms']['listItem']>,
       preview: (params) => call('rooms.preview', params) as ReturnType<Rpc['rooms']['preview']>,
       join: (params) => call('rooms.join', params) as ReturnType<Rpc['rooms']['join']>,
@@ -3822,10 +4359,17 @@ export function createRpc(call: RpcCall): Rpc {
       attachments: (params) => call('rooms.attachments', params) as ReturnType<Rpc['rooms']['attachments']>,
       cosmetics: (params) => call('rooms.cosmetics', params) as ReturnType<Rpc['rooms']['cosmetics']>,
     },
+    rtc: {
+      signal: (params) => call('rtc.signal', params) as ReturnType<Rpc['rtc']['signal']>,
+      close: (params) => call('rtc.close', params) as ReturnType<Rpc['rtc']['close']>,
+    },
     search: {
       messages: (params) => call('search.messages', params) as ReturnType<Rpc['search']['messages']>,
       coverage: (params = {}) => call('search.coverage', params) as ReturnType<Rpc['search']['coverage']>,
       metrics: (params = {}) => call('search.metrics', params) as ReturnType<Rpc['search']['metrics']>,
+      peerStart: (params = {}) => call('search.peer_start', params) as ReturnType<Rpc['search']['peerStart']>,
+      peerFind: (params = {}) => call('search.peer_find', params) as ReturnType<Rpc['search']['peerFind']>,
+      peerReset: (params = {}) => call('search.peer_reset', params) as ReturnType<Rpc['search']['peerReset']>,
     },
     session: {
       restore: (params = {}) => call('session.restore', params) as ReturnType<Rpc['session']['restore']>,
@@ -3835,6 +4379,7 @@ export function createRpc(call: RpcCall): Rpc {
       logout: (params = {}) => call('session.logout', params) as ReturnType<Rpc['session']['logout']>,
       resetLocalCache: (params = {}) => call('session.reset_local_cache', params) as ReturnType<Rpc['session']['resetLocalCache']>,
       homeserverInfo: (params = {}) => call('session.homeserver_info', params) as ReturnType<Rpc['session']['homeserverInfo']>,
+      oauthMetadata: (params = {}) => call('session.oauth_metadata', params) as ReturnType<Rpc['session']['oauthMetadata']>,
       requestOpenIdToken: (params = {}) => call('session.request_open_id_token', params) as ReturnType<Rpc['session']['requestOpenIdToken']>,
       accessToken: (params = {}) => call('session.access_token', params) as ReturnType<Rpc['session']['accessToken']>,
       openIdToken: (params = {}) => call('session.open_id_token', params) as ReturnType<Rpc['session']['openIdToken']>,
@@ -3842,6 +4387,8 @@ export function createRpc(call: RpcCall): Rpc {
       serverFeatures: (params = {}) => call('session.server_features', params) as ReturnType<Rpc['session']['serverFeatures']>,
       delayedEventsSupported: (params = {}) => call('session.delayed_events_supported', params) as ReturnType<Rpc['session']['delayedEventsSupported']>,
       setSearchOptions: (params) => call('session.set_search_options', params) as ReturnType<Rpc['session']['setSearchOptions']>,
+      setNetworkConditions: (params) => call('session.set_network_conditions', params) as ReturnType<Rpc['session']['setNetworkConditions']>,
+      setAppInForeground: (params) => call('session.set_app_in_foreground', params) as ReturnType<Rpc['session']['setAppInForeground']>,
       setReadRoom: (params) => call('session.set_read_room', params) as ReturnType<Rpc['session']['setReadRoom']>,
       integrationManagerUrl: (params) => call('session.integration_manager_url', params) as ReturnType<Rpc['session']['integrationManagerUrl']>,
       integrationManagerTerms: (params = {}) => call('session.integration_manager_terms', params) as ReturnType<Rpc['session']['integrationManagerTerms']>,
@@ -3856,11 +4403,13 @@ export function createRpc(call: RpcCall): Rpc {
       remove: (params) => call('spaces.remove', params) as ReturnType<Rpc['spaces']['remove']>,
       sidebar: (params = {}) => call('spaces.sidebar', params) as ReturnType<Rpc['spaces']['sidebar']>,
       setSidebar: (params) => call('spaces.set_sidebar', params) as ReturnType<Rpc['spaces']['setSidebar']>,
+      setAvatarOverride: (params) => call('spaces.set_avatar_override', params) as ReturnType<Rpc['spaces']['setAvatarOverride']>,
       roomHasSpaceParent: (params) => call('spaces.room_has_space_parent', params) as ReturnType<Rpc['spaces']['roomHasSpaceParent']>,
       unjoinedSpaceParents: (params) => call('spaces.unjoined_space_parents', params) as ReturnType<Rpc['spaces']['unjoinedSpaceParents']>,
     },
     timeline: {
-      subscribeRoomList: (params = {}) => call('timeline.subscribe_room_list', params) as ReturnType<Rpc['timeline']['subscribeRoomList']>,
+      subscribeRoomList: (params) => call('timeline.subscribe_room_list', params) as ReturnType<Rpc['timeline']['subscribeRoomList']>,
+      setRoomListOptions: (params) => call('timeline.set_room_list_options', params) as ReturnType<Rpc['timeline']['setRoomListOptions']>,
       subscribe: (params) => call('timeline.subscribe', params) as ReturnType<Rpc['timeline']['subscribe']>,
       unsubscribe: (params) => call('timeline.unsubscribe', params) as ReturnType<Rpc['timeline']['unsubscribe']>,
       warmRooms: (params) => call('timeline.warm_rooms', params) as ReturnType<Rpc['timeline']['warmRooms']>,
@@ -3877,7 +4426,6 @@ export function createRpc(call: RpcCall): Rpc {
       markUnread: (params) => call('timeline.mark_unread', params) as ReturnType<Rpc['timeline']['markUnread']>,
       readMarker: (params) => call('timeline.read_marker', params) as ReturnType<Rpc['timeline']['readMarker']>,
       unreadDiagnostics: (params) => call('timeline.unread_diagnostics', params) as ReturnType<Rpc['timeline']['unreadDiagnostics']>,
-      retryDecryption: (params) => call('timeline.retry_decryption', params) as ReturnType<Rpc['timeline']['retryDecryption']>,
       roomEventRelations: (params) => call('timeline.room_event_relations', params) as ReturnType<Rpc['timeline']['roomEventRelations']>,
       pinnedEvents: (params) => call('timeline.pinned_events', params) as ReturnType<Rpc['timeline']['pinnedEvents']>,
       setPinned: (params) => call('timeline.set_pinned', params) as ReturnType<Rpc['timeline']['setPinned']>,

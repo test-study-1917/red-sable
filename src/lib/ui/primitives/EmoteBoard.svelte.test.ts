@@ -48,7 +48,7 @@ vi.mock('#lib/emoji/load-packs.js', () => ({
 }));
 
 import { core } from '#lib/core/__mocks__/context.js';
-import { rememberEmote, writeRecent } from '#lib/emoji/recent-packs.svelte.js';
+import { rememberSticker, writeRecentStickers } from '#lib/emoji/recent-packs.svelte.js';
 
 import EmoteBoard from './EmoteBoard.svelte';
 
@@ -61,6 +61,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  writeRecentStickers([]);
+  core.rpc.messages.frequentReactions.mockResolvedValue([]);
+  core.rpc.messages.rememberEmoji.mockClear();
   core.fetchMedia.mockReset();
   vi.restoreAllMocks();
 });
@@ -95,7 +98,7 @@ test('previews a search result on hover', async () => {
 
 test('previews a recent sticker on hover', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
-  rememberEmote('wave', 'sticker');
+  rememberSticker('mxc://example.org/wave');
   const { findAllByRole, container } = render(EmoteBoard, {
     props: { roomId: '!room:example.org', tab: 'sticker', onPick: vi.fn() },
   });
@@ -108,7 +111,7 @@ test('previews a recent sticker on hover', async () => {
 
 test('previews a recent emote on focus', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
-  rememberEmote('wave', 'emoticon');
+  core.rpc.messages.frequentReactions.mockResolvedValue(['mxc://example.org/wave']);
   const { findAllByRole, container } = render(EmoteBoard, {
     props: { roomId: '!room:example.org', unicode: true, onPick: vi.fn() },
   });
@@ -120,7 +123,6 @@ test('previews a recent emote on focus', async () => {
 });
 
 async function mountSearching(onPick = vi.fn()) {
-  writeRecent([]);
   core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   const view = render(EmoteBoard, { props: { roomId: '!room:example.org', onPick } });
   const search = await view.findByRole('searchbox');
@@ -216,10 +218,16 @@ test('enter picks the selected emote and closes', async () => {
     'emoticon',
     false
   );
+  expect(core.rpc.messages.rememberEmoji).toHaveBeenCalledWith({ key: 'mxc://example.org/wink' });
 });
 
 test('shift+enter picks the selected emote and keeps the board open', async () => {
-  const { search, onPick } = await mountSearching();
+  const editor = document.body.appendChild(document.createElement('button'));
+  const { search, onPick } = await mountSearching(
+    vi.fn(() => {
+      editor.focus();
+    })
+  );
 
   await fireEvent.keyDown(search, { key: 'Enter', shiftKey: true });
 
@@ -228,10 +236,12 @@ test('shift+enter picks the selected emote and keeps the board open', async () =
     'emoticon',
     true
   );
+  await tick();
+  expect(search).toHaveFocus();
+  editor.remove();
 });
 
 test('enter reacts with the typed text over a matching emote', async () => {
-  writeRecent([]);
   core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   const onPickUnicode = vi.fn();
   const view = render(EmoteBoard, {
@@ -254,7 +264,6 @@ test('enter reacts with the typed text over a matching emote', async () => {
 });
 
 test('announces what enter will react with', async () => {
-  writeRecent([]);
   core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
   const view = render(EmoteBoard, {
     props: {
@@ -275,4 +284,18 @@ test('announces what enter will react with', async () => {
   await fireEvent.keyDown(search, { key: 'ArrowRight' });
 
   expect(status?.textContent).not.toContain('React with');
+});
+
+test('the reaction picker uses the core ranking beyond six entries', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array([1]));
+  const keys = ['😂', '❤️', '👍', '✅', '🔥', '🎉', 'mxc://example.org/wave'];
+  core.rpc.messages.frequentReactions.mockResolvedValue(keys);
+  const view = render(EmoteBoard, {
+    props: { roomId: '!room:example.org', unicode: true, reactions: true, onPick: vi.fn() },
+  });
+  await vi.waitFor(() => {
+    const cells = view.container.querySelectorAll('[data-section="recent"] [role="gridcell"]');
+    expect(cells).toHaveLength(7);
+    expect(cells[6]).toHaveAttribute('aria-label', ':wave:');
+  });
 });

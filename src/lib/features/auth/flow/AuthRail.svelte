@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import { afterNavigate } from '$app/navigation';
   import { untrack, type Snippet } from 'svelte';
   import CaretLeftIcon from 'phosphor-svelte/lib/CaretLeftIcon';
@@ -6,12 +7,7 @@
   import { cubicOut } from 'svelte/easing';
   import { i18n } from '#lib/i18n.js';
   import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
-  import {
-    finishSwipeGesture,
-    startSwipeGesture,
-    updateSwipeGesture,
-    type SwipeGesture,
-  } from '#lib/ui/swipe-gesture.js';
+  import { HorizontalSwipe } from '#lib/ui/horizontal-swipe.svelte.js';
 
   interface Props {
     activeIndex: number;
@@ -35,10 +31,8 @@
   let leavingCard: HTMLElement | undefined;
   let scrollAnimation: number | undefined;
   let motionReadyFrame: number | undefined;
-  let isDragging = $state(false);
-  let swipeGesture: SwipeGesture | undefined;
+  const swipe = new HorizontalSwipe();
   let swipeStartScroll = 0;
-  let swipeOffset = 0;
 
   function focusCard(card: HTMLElement): void {
     const content = card.querySelector<HTMLElement>('.card-content');
@@ -100,12 +94,12 @@
   }
 
   function handleScroll(): void {
-    if (isDragging || isNavigating || swipeGesture) return;
+    if (isNavigating || swipe.active) return;
     const rail = railElement;
     if (rail) {
       const [min, max] = scrollBounds(rail);
       if (rail.scrollLeft < min - 1 || rail.scrollLeft > max + 1) {
-        rail.scrollLeft = Math.max(min, Math.min(max, rail.scrollLeft));
+        rail.scrollLeft = clamp(rail.scrollLeft, min, max);
         return;
       }
     }
@@ -131,44 +125,32 @@
     if (!rail || isNavigating) return;
     if (!(event.target instanceof Element) || !event.target.closest('.auth-card')) return;
 
-    const gesture = startSwipeGesture(event, 0);
-    if (!gesture) return;
+    if (!swipe.start(event)) return;
 
     window.clearTimeout(scrollTimer);
     window.cancelAnimationFrame(scrollAnimation ?? 0);
     scrollAnimation = undefined;
     isNavigating = false;
-    swipeGesture = gesture;
     swipeStartScroll = rail.scrollLeft;
-    swipeOffset = 0;
   }
 
   function handleTouchMove(event: TouchEvent): void {
     const rail = railElement;
-    const gesture = swipeGesture;
-    if (!rail || !gesture) return;
+    if (!rail) return;
 
-    const update = updateSwipeGesture(gesture, event);
-    if (!update || update.mode !== 'horizontal') return;
+    const offset = swipe.move(event);
+    if (offset === undefined) return;
 
-    isDragging = true;
-    swipeOffset = update.distanceX;
     const [min, max] = scrollBounds(rail);
-    rail.scrollLeft = Math.max(min, Math.min(max, swipeStartScroll - swipeOffset));
+    rail.scrollLeft = clamp(swipeStartScroll - offset, min, max);
   }
 
   function finishTouchGesture(cancelled: boolean): void {
     const rail = railElement;
-    const gesture = swipeGesture;
-    if (!rail || !gesture) return;
+    if (!rail) return;
 
-    swipeGesture = undefined;
-    const wasDragging = isDragging;
-    const result = finishSwipeGesture(gesture, swipeOffset, cancelled);
-    isDragging = false;
-    swipeOffset = 0;
-
-    if (!wasDragging) return;
+    const result = swipe.finish(cancelled);
+    if (!result) return;
     if (!result.handled) {
       settleToCard(activeIndex);
       return;
@@ -207,7 +189,7 @@
 
   function keepActiveCardCentred(rail: HTMLDivElement): () => void {
     const observer = new ResizeObserver(() => {
-      if (isDragging || isNavigating || swipeGesture) return;
+      if (isNavigating || swipe.active) return;
       const card = cardElements(rail)[untrack(() => activeIndex)] as HTMLElement | undefined;
       if (card) rail.scrollLeft = cardTarget(rail, card);
     });
@@ -281,7 +263,8 @@
     {@attach keepActiveCardCentred}
     class={[
       'rail',
-      { 'motion-ready': motionReady, 'is-navigating': isNavigating, 'is-dragging': isDragging },
+      'scrollbar-hidden',
+      { 'motion-ready': motionReady, 'is-navigating': isNavigating, 'is-dragging': swipe.dragging },
     ]}
     style:height={activeCardHeight === null
       ? undefined
@@ -301,14 +284,14 @@
     {@render children()}
   </div>
   {#if total > 1 && (canBack || canForward)}
-    <div class="mobile-nav" role="group" aria-label={i18n.t('auth.stageNavigation')}>
+    <div class="mobile-nav">
       {#if canBack}
         <button
           class="panel-nav previous"
           type="button"
           tabindex="0"
           onclick={onBack}
-          aria-label={i18n.t('common.back')}><CaretLeftIcon /></button
+          aria-label={i18n.t('common.back')}><CaretLeftIcon class="mirror-rtl" /></button
         >
       {/if}
       {#if canForward}
@@ -317,7 +300,7 @@
           type="button"
           tabindex="0"
           onclick={onForward}
-          aria-label={i18n.t('auth.next')}><CaretRightIcon /></button
+          aria-label={i18n.t('auth.next')}><CaretRightIcon class="mirror-rtl" /></button
         >
       {/if}
     </div>
@@ -344,9 +327,10 @@
   }
 
   .rail-shell {
-    --auth-card-width: min(24rem, calc(100vw - 3rem));
+    --auth-card-width: min(24rem, calc(100cqw - 2rem));
     --auth-rail-edge-fade: 1.5rem;
 
+    container-type: inline-size;
     isolation: isolate;
     min-width: 0;
     position: relative;
@@ -360,17 +344,17 @@
     inset-block: 0;
     pointer-events: none;
     position: absolute;
-    width: var(--auth-rail-edge-fade);
+    width: min(var(--auth-rail-edge-fade), max(0px, calc((100% - var(--auth-card-width)) / 2)));
     z-index: 3;
   }
 
   .rail-shell::before {
-    left: 0;
+    inset-inline-start: 0;
   }
 
   .rail-shell::after {
     background: linear-gradient(270deg, var(--bg-container), transparent);
-    right: 0;
+    inset-inline-end: 0;
   }
 
   .rail {
@@ -387,13 +371,8 @@
     position: relative;
     scroll-padding-inline: calc((100% - var(--auth-card-width)) / 2);
     scroll-snap-type: x proximity;
-    scrollbar-width: none;
     width: 100%;
     z-index: 1;
-  }
-
-  .rail::-webkit-scrollbar {
-    display: none;
   }
 
   .rail.is-navigating {
@@ -406,6 +385,7 @@
 
   .rail :global(.auth-card) {
     flex: 0 0 var(--auth-card-width);
+    min-width: 0;
     pointer-events: auto;
     position: relative;
     scroll-snap-align: center;
@@ -430,15 +410,16 @@
   .rail :global(.auth-card.removing) {
     opacity: 0;
     pointer-events: none;
-    transform: translateX(var(--space-200)) scale(var(--scale-subtle));
+    transform: translateX(calc(var(--space-200) * var(--inline-sign))) scale(var(--scale-subtle));
   }
 
   .rail :global(.auth-card.before) {
-    transform: translateX(calc(var(--space-150) * -1)) scale(var(--scale-subtle));
+    transform: translateX(calc(var(--space-150) * -1 * var(--inline-sign)))
+      scale(var(--scale-subtle));
   }
 
   .rail :global(.auth-card.after) {
-    transform: translateX(var(--space-150)) scale(var(--scale-subtle));
+    transform: translateX(calc(var(--space-150) * var(--inline-sign))) scale(var(--scale-subtle));
   }
 
   .rail :global(.auth-card.active) {
@@ -508,11 +489,11 @@
   }
 
   .panel-nav.previous {
-    left: calc(50vw - var(--auth-card-width) / 2 - 2.625rem);
+    inset-inline-start: max(0px, calc(50% - var(--auth-card-width) / 2 - 2.625rem));
   }
 
   .panel-nav.next {
-    right: calc(50vw - var(--auth-card-width) / 2 - 2.625rem);
+    inset-inline-end: max(0px, calc(50% - var(--auth-card-width) / 2 - 2.625rem));
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -541,11 +522,7 @@
     animation: none;
   }
 
-  @media (width <= 48rem) {
-    .rail-shell {
-      --auth-card-width: min(24rem, calc(100vw - 5rem));
-    }
-
+  @media (--compact-layout) {
     .rail {
       scroll-snap-type: x mandatory;
       touch-action: pan-y;

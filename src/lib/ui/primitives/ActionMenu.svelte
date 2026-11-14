@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { MediaQuery } from 'svelte/reactivity';
+  import { currentDirection, inlineSide } from '#lib/language.svelte.js';
   import { DropdownMenu } from 'bits-ui';
   import type { Snippet } from 'svelte';
 
   import { i18n } from '#lib/i18n.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   import BottomSheet from './BottomSheet.svelte';
   import { setActionMenuSurface } from './action-menu.js';
@@ -41,7 +42,7 @@
     children,
   }: Props = $props();
 
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   let sheet = $derived(!appLayout.current);
 
   setActionMenuSurface({
@@ -74,7 +75,7 @@
     </BottomSheet>
   {/if}
 {:else}
-  <DropdownMenu.Root bind:open {onOpenChange}>
+  <DropdownMenu.Root dir={currentDirection()} bind:open {onOpenChange}>
     {#if trigger}
       <DropdownMenu.Trigger>
         {#snippet child({ props })}{@render trigger({ props })}{/snippet}
@@ -82,13 +83,15 @@
     {/if}
     <DropdownMenu.Portal>
       <DropdownMenu.Content
+        dir={currentDirection()}
         class={['menu-surface', surfaceClass]}
         {...overlayLayer()}
         customAnchor={anchor}
         aria-label={label}
-        {side}
+        side={inlineSide(side)}
         {align}
         {sideOffset}
+        collisionPadding={collisionPadding()}
         {preventScroll}
       >
         <div class="menu-scroll-content" {@attach scrollHint}>

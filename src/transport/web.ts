@@ -1,30 +1,22 @@
 import * as Sentry from '@sentry/sveltekit';
 
 import type { CoreEvent } from '#src/generated/protocol';
-import type { WorkerMessage, WorkerRequest } from '#src/worker/protocol';
+import type { WasmDebugImage, WorkerMessage, WorkerRequest } from '#src/worker/protocol';
 import wasmVersion from '#src/generated/wasm/sable_wasm_version.js';
 import coreWorkerUrl from '../worker/core.worker.ts?sharedworker&url';
-import { CoreError, type Transport } from './index';
+import { CoreError, commandFailed, transportFailure, type Transport } from './index';
+import { createStallMonitor } from './stall-monitor';
+import { applyWasmDebugImage } from './wasm-debug';
 import { on } from 'svelte/events';
 import { recordDebugLog } from '../lib/observability/debug-log.svelte.js';
 import {
-  isReportableCoreWarning,
-  isUndecryptableToDevice,
-  isExpectedCoreFailure,
+  readCoreLine,
   wasmErrorFingerprint,
   wasmErrorTitle,
   wasmLogLevel,
 } from '../lib/observability/wasm-log.js';
 import { readText, writeText } from '../lib/platform/local-json.js';
 import { deleteAccountWebStorage, resetWebStorage } from '../lib/platform/session-storage.js';
-import { migrateV1 } from '#lib/migrations/v1/migration.js';
-
-const QUIET_COMMAND_FAILURES = new Set([
-  'media:unavailable',
-  'account.user_profile:unavailable',
-  'timeline.unsubscribe:denied',
-  'timeline.unsubscribe:unknown_subscription',
-]);
 
 const reportedCoreErrors = new Set<string>();
 
@@ -34,22 +26,15 @@ function isStorageFailure(line: string): boolean {
   );
 }
 
-function reportCoreError(line: string, onStorageFailure: () => void): void {
-  const storage = isStorageFailure(line);
-  if (storage) onStorageFailure();
-  if (isExpectedCoreFailure(line)) {
-    Sentry.addBreadcrumb({
-      category: 'core.sync',
-      level: 'warning',
-      message: wasmErrorTitle(line),
-    });
-    return;
-  }
+function reportCoreError(line: string): void {
   const fingerprint = wasmErrorFingerprint(line);
-  if (fingerprint === '' || reportedCoreErrors.has(fingerprint)) return;
-  reportedCoreErrors.add(fingerprint);
-  Sentry.captureException(Object.assign(new Error(wasmErrorTitle(line)), { name: 'CoreLog' }), {
-    level: storage ? 'warning' : 'error',
+  const title = wasmErrorTitle(line);
+  const seen =
+    wasmLogLevel(line) === 'warn' && line.includes('megolm_session=') ? title : fingerprint;
+  if (fingerprint === '' || reportedCoreErrors.has(seen)) return;
+  reportedCoreErrors.add(seen);
+  Sentry.captureException(Object.assign(new Error(title), { name: 'CoreLog' }), {
+    level: isStorageFailure(line) ? 'warning' : 'error',
     fingerprint: ['wasm-core-error', fingerprint],
     tags: { source: 'wasm-core' },
   });
@@ -175,100 +160,53 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
   const storageFailureListeners = new Set<() => void>();
   const supersededListeners = new Set<() => void>();
   const stallListeners = new Set<(stalled: boolean) => void>();
-  const overdue = new Set<number>();
-  let healthProbeTimer: ReturnType<typeof setTimeout> | undefined;
-  let stalled = false;
   let nextId = 1;
   let worker: CoreConnection | null = null;
   let debugLogs = false;
   let closed = false;
 
-  const stallAfterMs = 20_000;
-  const healthProbeTimeoutMs = 2_000;
-  const healthProbeIntervalMs = 5_000;
-
-  function reportStall(next: boolean): void {
-    if (stalled === next) return;
-    stalled = next;
-    if (next) {
-      Sentry.captureMessage('Core worker stopped responding', {
-        level: 'error',
-        fingerprint: ['wasm-core-stall'],
-        tags: { source: 'wasm-core' },
-        extra: { pendingRequests: pending.size },
-      });
-    }
-    for (const listener of stallListeners) listener(next);
-  }
-
-  function clearHealthProbe(): void {
-    if (healthProbeTimer !== undefined) clearTimeout(healthProbeTimer);
-    healthProbeTimer = undefined;
-  }
-
-  function scheduleHealthProbe(delay = 0): void {
-    if (closed || overdue.size === 0 || healthProbeTimer !== undefined) {
-      return;
-    }
-    healthProbeTimer = setTimeout(() => {
-      healthProbeTimer = undefined;
-      if (closed || overdue.size === 0) return;
-
+  const stalls = createStallMonitor(
+    () => {
+      if (closed) return;
       const id = nextId++;
       connect().port.postMessage({ id, ping: true });
-      healthProbeTimer = setTimeout(() => {
-        healthProbeTimer = undefined;
-        reportStall(true);
-        scheduleHealthProbe(healthProbeIntervalMs);
-      }, healthProbeTimeoutMs);
-    }, delay);
-  }
-
-  function setOverdue(id: number, isOverdue: boolean): void {
-    if (isOverdue) {
-      overdue.add(id);
-      scheduleHealthProbe();
-      return;
+    },
+    (stalled) => {
+      if (stalled) {
+        Sentry.captureMessage('Core worker stopped responding', {
+          level: 'error',
+          fingerprint: ['wasm-core-stall'],
+          tags: { source: 'wasm-core' },
+          extra: { pendingRequests: pending.size },
+        });
+      }
+      for (const listener of stallListeners) listener(stalled);
     }
-
-    overdue.delete(id);
-    if (overdue.size > 0) return;
-    clearHealthProbe();
-    reportStall(false);
-  }
-
-  function markWorkerResponsive(): void {
-    if (overdue.size === 0) return;
-    clearHealthProbe();
-    reportStall(false);
-    scheduleHealthProbe(healthProbeIntervalMs);
-  }
+  );
 
   function rejectPending(logId: string): void {
     const waiting = [...pending.values()];
     pending.clear();
     pendingCommands.clear();
     for (const { reject } of waiting) {
-      reject(new CoreError({ code: 'failed', log_id: logId }));
+      reject(new CoreError(transportFailure(logId)));
     }
   }
 
-  function handleCrash(message: string, stack?: string): void {
-    // A Rust panic crosses as a string and carries this file's stack; a worker
-    // JS failure brings its own. The fingerprint groups on the message.
+  function handleCrash(message: string, stack?: string, wasm?: WasmDebugImage): void {
+    // Rust panics differ only in their stack, so the fingerprint groups on the message.
     const error = new Error(message);
     if (stack) error.stack = stack;
-    Sentry.captureException(error, {
-      fingerprint: ['wasm-core-crash', message],
-      tags: { source: 'wasm-core' },
+    Sentry.captureException(error, (scope) => {
+      scope.setFingerprint(['wasm-core-crash', message]).setTag('source', 'wasm-core');
+      if (wasm) scope.addEventProcessor((event) => applyWasmDebugImage(event, wasm));
+      return scope;
     });
     console.error('[sable transport] core panicked', error);
     worker?.retire();
     worker?.port.close();
     worker = null;
-    clearHealthProbe();
-    overdue.clear();
-    reportStall(false);
+    stalls.reset();
     rejectPending(`core panicked: ${message}`);
     for (const listener of crashListeners) listener(message);
   }
@@ -278,9 +216,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
     closed = true;
     worker?.port.close();
     worker = null;
-    clearHealthProbe();
-    overdue.clear();
-    reportStall(false);
+    stalls.reset();
     rejectPending('core superseded by a newer tab');
     for (const listener of supersededListeners) listener();
   }
@@ -299,7 +235,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
 
     nextWorker.port.onmessage = (message: MessageEvent<WorkerMessage>) => {
       const data = message.data;
-      markWorkerResponsive();
+      stalls.responsive();
 
       if ('events' in data) {
         for (const event of data.events) {
@@ -308,16 +244,32 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
         return;
       }
 
+      if ('span' in data) {
+        const { name, startMs, durationMs } = data.span;
+        Sentry.startInactiveSpan({ name, op: 'core.task', startTime: startMs / 1_000 }).end(
+          (startMs + durationMs) / 1_000
+        );
+        return;
+      }
+
       if ('logs' in data) {
-        for (const line of data.logs) {
+        for (const raw of data.logs) {
+          const { text: line, reported } = readCoreLine(raw);
           const level = wasmLogLevel(line);
           recordDebugLog(level, level === 'error' ? 'error' : 'general', 'wasm', line.trim());
           if (line.includes('session tokens:')) {
             Sentry.addBreadcrumb({ category: 'core.session', level: 'info', message: line.trim() });
           }
-          if (level === 'error' || isUndecryptableToDevice(line) || isReportableCoreWarning(line)) {
-            reportCoreError(line, () => {
-              for (const listener of storageFailureListeners) listener();
+          if (level === 'info') continue;
+          if ((level === 'error' || reported) && isStorageFailure(line)) {
+            for (const listener of storageFailureListeners) listener();
+          }
+          if (reported) reportCoreError(line);
+          else {
+            Sentry.addBreadcrumb({
+              category: 'core.sync',
+              level: level === 'error' ? 'error' : 'warning',
+              message: wasmErrorTitle(line),
             });
           }
         }
@@ -325,7 +277,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
       }
 
       if ('panic' in data) {
-        handleCrash(data.panic.message, data.panic.stack);
+        handleCrash(data.panic.message, data.panic.stack, data.panic.wasm);
         return;
       }
 
@@ -347,10 +299,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
       } else if ('bytes' in data) waiting.resolve(data.bytes);
       else if ('uri' in data) waiting.resolve(data.uri);
       else {
-        if (!QUIET_COMMAND_FAILURES.has(`${String(command)}:${data.err.code}`)) {
-          console.warn('[sable transport] command failed', { command, ...data.err });
-        }
-        waiting.reject(new CoreError(data.err));
+        waiting.reject(commandFailed(data.err, command));
       }
     };
 
@@ -392,8 +341,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
     crashListeners.clear();
     supersededListeners.clear();
     stallListeners.clear();
-    clearHealthProbe();
-    overdue.clear();
+    stalls.reset();
     rejectPending(reason);
     worker?.port.postMessage(farewell);
     worker?.port.close();
@@ -405,9 +353,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
     transfers: Transferable[] = []
   ): Promise<T> {
     return (async () => {
-      const migration = migrateV1();
-      if (migration) await migration;
-      if (closed) throw new CoreError({ code: 'failed', log_id: 'transport closed' });
+      if (closed) throw new CoreError(transportFailure('transport closed'));
       const id = nextId++;
       const activeWorker = connect();
 
@@ -426,16 +372,10 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
                 reject(new Error('Timed out waiting for homeserver discovery'));
               }, 20_000)
             : undefined;
-        const stall =
-          'call' in request
-            ? setTimeout(() => {
-                setOverdue(id, true);
-              }, stallAfterMs)
-            : undefined;
+        const settled = 'call' in request ? stalls.watch() : undefined;
         const settle = () => {
           if (timeout !== undefined) clearTimeout(timeout);
-          if (stall !== undefined) clearTimeout(stall);
-          setOverdue(id, false);
+          settled?.();
         };
         pending.set(id, {
           resolve: (value) => {
@@ -455,7 +395,9 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
 
   return {
     call(method, params) {
-      return request<unknown>((id) => ({ id, call: { method, params } }));
+      return Sentry.startSpan({ name: method, op: 'rpc.core' }, () =>
+        request<unknown>((id) => ({ id, call: { method, params } }))
+      );
     },
 
     fetchMedia(source, width, height, background = false) {
@@ -474,6 +416,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
       filename,
       mime,
       bytes,
+      thumbnail,
       caption,
       formattedCaption,
       mentions,
@@ -493,6 +436,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
             filename,
             mime,
             bytes,
+            thumbnail: thumbnail ?? null,
             caption: caption ?? null,
             formattedCaption: formattedCaption ?? null,
             mentions: mentions ?? [],
@@ -505,7 +449,7 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
             spoiler: spoiler ?? false,
           },
         }),
-        [bytes.buffer]
+        [bytes.buffer, ...(thumbnail ? [thumbnail.bytes.buffer] : [])]
       );
     },
 
@@ -521,7 +465,10 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
       threadRoot,
       persona,
     }) {
-      const transfer = attachments.map((attachment) => attachment.bytes.buffer);
+      const transfer = attachments.flatMap(({ bytes, thumbnail }) => [
+        bytes.buffer,
+        ...(thumbnail ? [thumbnail.bytes.buffer] : []),
+      ]);
       await request<null>(
         (id) => ({
           id,
@@ -550,6 +497,13 @@ export function createWebTransport(open: () => CoreConnection = openSharedWorker
 
       // The worker only answers `uri: null` to `attachment`, which has no URI.
       return uri ?? '';
+    },
+
+    rtcData(sessionId, frame) {
+      return request<Uint8Array<ArrayBuffer>>(
+        (id) => ({ id, rtc: { sessionId, frame } }),
+        [frame.buffer]
+      );
     },
 
     setDebugLogs(enabled) {

@@ -1,6 +1,9 @@
+use sable_model::text::visible_name;
+
 use std::collections::BTreeSet;
 
 use matrix_sdk::ruma::UInt;
+use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::poll::start::PollKind;
 use matrix_sdk::ruma::events::room::message::{
     GalleryMessageEventContent, MessageType, RoomMessageEventContent,
@@ -13,21 +16,18 @@ use matrix_sdk_ui::timeline::{
 };
 use sable_model::jumbo;
 
-use crate::matrix_html::{
-    display_html, has_profile_fallback_html, strip_profile_fallback_body,
-    strip_profile_fallback_html,
-};
+use crate::matrix_html::{display_html, strip_profile_fallback_body, strip_profile_fallback_html};
 use crate::protocol::{
-    AvatarChangeView, DisplayNameChangeView, PerMessageProfileView, PollAnswerView, PollView,
-    TimelineItemContentView, UtdCauseView,
+    AvatarChangeView, DisplayNameChangeView, MessageKind, PerMessageProfileView, PollAnswerView,
+    PollView, TimelineItemContentView, UtdCauseView,
 };
 
 use super::media::{
     audio_duration_ms, audio_metadata, audio_waveform, caption_view, gallery_item, image_thumbnail,
-    media_source, spoiler_reason, video_playback, video_thumbnail,
+    media_source, video_playback, video_thumbnail,
 };
 use super::raw::RawFields;
-use super::state::{membership_change, membership_reason, state_change};
+use super::state::{membership_change, membership_reason, pinned_change, state_change};
 
 fn text_message(
     msgtype: &MessageType,
@@ -40,32 +40,24 @@ fn text_message(
         .as_ref()
         .and_then(|_| raw.formatted_body().map(ToOwned::to_owned))
         .or(formatted);
-    let known = formatted.as_deref().is_some_and(has_profile_fallback_html)
-        || profile.is_some_and(|profile| profile.has_fallback);
-    let body = strip_profile_fallback_body(
-        msgtype.body(),
-        profile.and_then(|profile| profile.display_name.as_deref()),
-        known,
-    );
-    // Runs without a parsed profile too: the marker alone is enough, and
-    // skipping it leaves the html naming a sender the body no longer does.
-    let formatted = formatted.map(|formatted| {
-        strip_profile_fallback_html(
-            &formatted,
-            profile.and_then(|profile| profile.display_name.as_deref()),
-            known,
-        )
-    });
+    let fallback = profile
+        .filter(|profile| profile.has_fallback)
+        .and_then(|profile| profile.display_name.as_deref());
+    let body = strip_profile_fallback_body(msgtype.body(), fallback);
+    let formatted = formatted.map(|formatted| strip_profile_fallback_html(&formatted, fallback));
     let html = display_html(&body, formatted.as_deref());
-    let emote = matches!(msgtype, MessageType::Emote(_));
-    let jumbo = (!emote)
+    let kind = match msgtype {
+        MessageType::Emote(_) => MessageKind::Emote,
+        MessageType::Notice(_) => MessageKind::Notice,
+        _ => MessageKind::Text,
+    };
+    let jumbo = (kind != MessageKind::Emote)
         .then(|| jumbo::emoji_level(&body).or_else(|| jumbo::emoticon_level(&html)))
         .flatten();
     TimelineItemContentView::Message {
         html,
         body,
-        emote,
-        notice: matches!(msgtype, MessageType::Notice(_)),
+        msgtype: kind,
         edited,
         jumbo,
     }
@@ -153,7 +145,7 @@ const fn utd_cause(message: &EncryptedMessage) -> UtdCauseView {
             UtdCauseView::WithheldForUnverifiedOrInsecureDevice
         }
         UtdCause::WithheldBySender => UtdCauseView::WithheldBySender,
-        UtdCause::Unknown => UtdCauseView::Unknown,
+        UtdCause::Unknown | UtdCause::Malformed => UtdCauseView::Unknown,
     }
 }
 
@@ -182,14 +174,7 @@ fn gallery_content(
             .itemtypes
             .iter()
             .enumerate()
-            .filter_map(|(index, item)| {
-                let raw = raw
-                    .content
-                    .as_ref()
-                    .and_then(|content| content.get("itemtypes"))
-                    .and_then(|items| items.get(index));
-                gallery_item(item, raw)
-            })
+            .filter_map(|(index, item)| gallery_item(item, raw.gallery_spoiler_reason(index)))
             .collect(),
     }
 }
@@ -211,13 +196,14 @@ fn message_type_content(
                 caption,
                 html: caption_html,
                 source: media_source(&image.source),
+                external_url: raw.external_url(),
                 mime: image.info.as_ref().and_then(|info| info.mimetype.clone()),
                 width: dimension(image.info.as_ref().and_then(|info| info.width)),
                 height: dimension(image.info.as_ref().and_then(|info| info.height)),
                 size: dimension(image.info.as_ref().and_then(|info| info.size)),
                 blurhash: image.info.as_ref().and_then(|info| info.blurhash.clone()),
                 thumbnail: image.info.as_deref().and_then(image_thumbnail),
-                spoiler: spoiler_reason(raw.message()),
+                spoiler: raw.spoiler_reason(),
                 animated: image.info.as_ref().and_then(|info| info.is_animated),
             }
         }
@@ -229,12 +215,13 @@ fn message_type_content(
                 caption,
                 html: caption_html,
                 source: media_source(&video.source),
+                external_url: raw.external_url(),
                 mime: video.info.as_ref().and_then(|info| info.mimetype.clone()),
                 width: dimension(video.info.as_ref().and_then(|info| info.width)),
                 height: dimension(video.info.as_ref().and_then(|info| info.height)),
                 blurhash: video.info.as_ref().and_then(|info| info.blurhash.clone()),
                 thumbnail: video.info.as_deref().and_then(video_thumbnail),
-                spoiler: spoiler_reason(raw.message()),
+                spoiler: raw.spoiler_reason(),
                 playback: video_playback(raw.message()),
             }
         }
@@ -246,6 +233,7 @@ fn message_type_content(
                 caption,
                 html: caption_html,
                 source: media_source(&audio.source),
+                external_url: raw.external_url(),
                 mime: audio.info.as_ref().and_then(|info| info.mimetype.clone()),
                 duration_ms: audio_duration_ms(audio),
                 waveform: audio_waveform(audio),
@@ -261,6 +249,7 @@ fn message_type_content(
                 caption,
                 html: caption_html,
                 source: media_source(&file.source),
+                external_url: raw.external_url(),
                 mime: file.info.as_ref().and_then(|info| info.mimetype.clone()),
                 size: file.info.as_ref().and_then(|info| info.size).map(u64::from),
             }
@@ -377,6 +366,32 @@ fn unparsed(event_type: &str, raw: &RawFields) -> TimelineItemContentView {
     }
 }
 
+fn unparsed_message_like(event_type: &str, raw: &RawFields) -> TimelineItemContentView {
+    // MSC4075 withdraws an invite with a content that holds only its sticky key.
+    let withdrawal = matches!(
+        event_type,
+        "m.rtc.invite" | "m.rtc.notification" | "org.matrix.msc4075.rtc.notification"
+    ) && raw
+        .content
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|content| {
+            !content.is_empty()
+                && content
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "sticky_key" | "msc4354_sticky_key"))
+        });
+    if withdrawal {
+        TimelineItemContentView::HiddenEvent {
+            event_type: event_type.to_owned(),
+            content: raw.content.clone(),
+            redacts: None,
+        }
+    } else {
+        unparsed(event_type, raw)
+    }
+}
+
 pub(super) fn content(
     content: &TimelineItemContent,
     profile: Option<&PerMessageProfileView>,
@@ -431,7 +446,7 @@ pub(super) fn content(
         TimelineItemContent::MembershipChange(change) => TimelineItemContentView::Membership {
             user_id: change.user_id().to_owned(),
             change: membership_change(change.change()),
-            display_name: change.display_name(),
+            display_name: change.display_name().and_then(visible_name),
             reason: membership_reason(change.content()),
         },
 
@@ -440,8 +455,8 @@ pub(super) fn content(
             display_name: change
                 .displayname_change()
                 .map(|change| DisplayNameChangeView {
-                    old: change.old.clone(),
-                    new: change.new.clone(),
+                    old: change.old.clone().and_then(visible_name),
+                    new: change.new.clone().and_then(visible_name),
                 }),
             avatar: change.avatar_url_change().map(|change| AvatarChangeView {
                 old: change.old.as_ref().map(ToString::to_string),
@@ -460,19 +475,22 @@ pub(super) fn content(
             TimelineItemContentView::CallInvite
         }
         TimelineItemContent::FailedToParseMessageLike { event_type, .. } => {
-            unparsed(&event_type.to_string(), raw)
+            unparsed_message_like(&event_type.to_string(), raw)
         }
         TimelineItemContent::FailedToParseState {
             event_type,
             state_key,
             ..
-        } if raw.content_stripped() => TimelineItemContentView::StateEvent {
-            event_type: event_type.to_string(),
-            state_key: state_key.clone(),
-            change: None,
-            content: raw.content.clone(),
-            prev_content: raw.prev_content().cloned(),
-        },
+        } if raw.content_stripped() || *event_type == StateEventType::RoomPinnedEvents => {
+            TimelineItemContentView::StateEvent {
+                event_type: event_type.to_string(),
+                state_key: state_key.clone(),
+                change: (!raw.content_stripped())
+                    .then(|| pinned_change(raw.content.as_ref(), raw.prev_content())),
+                content: raw.content.clone(),
+                prev_content: raw.prev_content().cloned(),
+            }
+        }
         TimelineItemContent::FailedToParseState { event_type, .. } => {
             unparsed(&event_type.to_string(), raw)
         }
@@ -500,8 +518,11 @@ pub(super) fn raw_formatted_body(content: Option<&serde_json::Value>) -> Option<
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     use serde_json::json;
 
+    use crate::protocol::TimelineVisibility;
     use crate::view::raw::RawFields;
 
     #[test]
@@ -559,6 +580,23 @@ mod tests {
         );
         let serialized = serde_json::to_value(view).unwrap();
         assert_eq!(serialized["kind"], "call_invite");
+    }
+
+    #[test]
+    fn an_invite_withdrawal_is_hidden_but_a_broken_notification_is_malformed() {
+        let view = |content| {
+            let raw = serde_json::from_value::<RawFields>(json!({ "content": content })).unwrap();
+            let unparsed = TimelineItemContent::FailedToParseMessageLike {
+                event_type: "org.matrix.msc4075.rtc.notification".into(),
+                error: Arc::new(serde_json::from_str::<u8>("x").unwrap_err()),
+            };
+            super::content(&unparsed, None, &raw, None)
+        };
+
+        let withdrawal = view(json!({ "msc4354_sticky_key": "m.call#ROOM" }));
+        assert_eq!(withdrawal.visibility(), TimelineVisibility::Hidden);
+        let broken = view(json!({ "msc4354_sticky_key": "m.call#ROOM", "lifetime": "soon" }));
+        assert_eq!(serde_json::to_value(broken).unwrap()["kind"], "malformed");
     }
 
     #[test]
@@ -623,7 +661,27 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(spoiler_reason(raw.message()).as_deref(), Some(""));
+        assert_eq!(raw.spoiler_reason().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn bridged_media_keeps_the_link_it_came_from() {
+        let content = json!({
+            "msgtype": "m.video",
+            "body": "https://www.instagram.com/reel/a/",
+            "filename": "reel.mp4",
+            "url": "mxc://example.org/reel",
+            "external_url": "https://www.instagram.com/reel/a/?id=1",
+        });
+        let raw = serde_json::from_value::<RawFields>(json!({ "content": content })).unwrap();
+        let msgtype = serde_json::from_value::<MessageType>(content).unwrap();
+        let serialized =
+            serde_json::to_value(message_type_content(&msgtype, false, None, &raw)).unwrap();
+
+        assert_eq!(
+            serialized["external_url"],
+            "https://www.instagram.com/reel/a/?id=1"
+        );
     }
 
     #[test]

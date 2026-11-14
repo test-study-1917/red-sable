@@ -22,6 +22,7 @@ import { Conversation } from './conversation.svelte';
 
 vi.mock('#lib/core/api/messages.svelte.js', () => ({ sendMessage: vi.fn(), editMessage: vi.fn() }));
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
+import { testPersona } from '#lib/personas/persona.ts';
 
 const ROOM = '!room:example.org';
 
@@ -59,6 +60,7 @@ function setup(
   const sendGesture = vi.fn(() => Promise.resolve());
   const toggleReaction = vi.fn(() => Promise.resolve());
   const urlPreview = vi.fn(() => Promise.resolve(null));
+  const setTyping = vi.fn((..._args: unknown[]) => Promise.resolve());
   const core = {
     session: { user_id: userId },
     media: {
@@ -77,6 +79,7 @@ function setup(
         sendGesture,
         react: toggleReaction,
         urlPreview,
+        setTyping,
       },
       account: {},
     },
@@ -87,6 +90,7 @@ function setup(
     disabledIn: () => false,
     select: () => Promise.resolve(),
     save: () => Promise.resolve(),
+    load: () => Promise.resolve(),
     ...store,
   };
   const personas = {
@@ -111,6 +115,7 @@ function setup(
     sendGesture,
     toggleReaction,
     urlPreview,
+    setTyping,
     timeline,
     conversation: new Conversation({
       core,
@@ -158,6 +163,21 @@ test('quick reactions resume live before choosing the latest message', async () 
     persona: null,
   });
   expect(fixture.sendMessage).not.toHaveBeenCalled();
+});
+
+test.each(['', '#alias:example.org', 'room'])(
+  'typing is not announced to %j, which is not a room id',
+  async (target) => {
+    const fixture = setup([], '@kris:example.org');
+    await fixture.conversation.setTyping(target, true);
+    expect(fixture.setTyping).not.toHaveBeenCalled();
+  }
+);
+
+test('typing is announced to a room id', async () => {
+  const fixture = setup([], '@kris:example.org');
+  await fixture.conversation.setTyping(ROOM, true);
+  expect(fixture.setTyping).toHaveBeenCalledWith({ room_id: ROOM, typing: true });
 });
 
 test('quick reactions do nothing in an empty room', async () => {
@@ -288,7 +308,7 @@ test('a reply notifies the author it answers', async () => {
   expect(sendMessage).toHaveBeenCalledWith(
     ROOM,
     'sure',
-    expect.objectContaining({ inReplyTo: '$one:example.org', silentReply: false })
+    expect.objectContaining({ in_reply_to: '$one:example.org', silent_reply: false })
   );
 });
 
@@ -334,7 +354,7 @@ test('muting the reply stops the mention', async () => {
   expect(sendMessage).toHaveBeenCalledWith(
     ROOM,
     'sure',
-    expect.objectContaining({ silentReply: true })
+    expect.objectContaining({ silent_reply: true })
   );
 });
 
@@ -368,7 +388,7 @@ test.each([
     );
     const { conversation } = fixture;
     const file = new File(['picture'], 'picture.png', { type: 'image/png' });
-    const mentions = { userIds: ['@bea:example.org'], room: false };
+    const mentions = { user_ids: ['@bea:example.org'], room: false };
 
     for (const kind of ['attachment', 'gallery', 'gif', 'location'] as const) {
       conversation.reply('$one:example.org');
@@ -440,6 +460,46 @@ test.each([
   }
 );
 
+test('a picked GIF is uploaded instead of linked when reuploading is on', async () => {
+  setPreference('reuploadGifs', true);
+  vi.spyOn(runtime, 'runtimeConfig').mockResolvedValue(
+    runtime.parseRuntimeConfig({
+      gifs: { proxyUrl: 'gifs.example' },
+      embeds: { serviceUrl: 'https://embeds.test' },
+    })
+  );
+  const fetched = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(new Response(new Uint8Array([71, 73, 70])));
+  const fixture = setup([], '@kris:example.org');
+  const gif = {
+    id: 'cat',
+    title: 'cat',
+    mediaUrl: 'https://media.tenor.com/abc123/cat.gif',
+    previewUrl: 'https://media.tenor.com/abc123/cat-tiny.gif',
+    width: 320,
+    height: 240,
+    size: 1000,
+    mimetype: 'image/gif',
+  };
+
+  await fixture.conversation.sendGif(ROOM, gif);
+  expect(fetched).toHaveBeenCalledWith(
+    'https://embeds.test/_soliditas/gifs/media?url=https%3A%2F%2Fmedia.tenor.com%2Fabc123%2Fcat.gif'
+  );
+  expect(fixture.sendGif).not.toHaveBeenCalled();
+  const [, file] = fixture.sendAttachment.mock.lastCall as unknown as [string, File];
+  expect([file.name, file.type, file.size]).toEqual(['cat.gif', 'image/gif', 3]);
+
+  await fixture.conversation.sendGif(ROOM, { ...gif, mediaUrl: 'mxc://example.org/already' });
+  expect(fixture.sendGif).toHaveBeenCalledTimes(1);
+
+  await expect(
+    fixture.conversation.sendGif(ROOM, { ...gif, mediaUrl: 'https://evil.example/cat.gif' })
+  ).rejects.toThrow();
+  expect(fetched).not.toHaveBeenCalledWith('https://evil.example/cat.gif', expect.anything());
+});
+
 test('a reply to a persona message names the persona', () => {
   const target = withRowFields({
     ...item('$one:example.org', '@ana:example.org'),
@@ -480,8 +540,7 @@ test('a reply keeps the target formatting for its composer preview', () => {
     kind: 'message',
     body: ':rotate:',
     html: '<img data-mx-emoticon src="mxc://example.org/rotate" alt=":rotate:">',
-    emote: false,
-    notice: false,
+    msgtype: 'text',
     edited: false,
     jumbo: null,
   };
@@ -501,8 +560,7 @@ test('a reply context uses rendered preview text', () => {
     kind: 'message',
     body: '**bold** and ``code ` tick``',
     html: '<strong>bold</strong> and <code>code ` tick</code>',
-    emote: false,
-    notice: false,
+    msgtype: 'text',
     edited: false,
     jumbo: null,
   };
@@ -538,7 +596,7 @@ test('a reply to an earlier version targets the edit and quotes its text', async
   expect(sendMessage).toHaveBeenCalledWith(
     ROOM,
     'typo',
-    expect.objectContaining({ inReplyTo: '$edit:example.org' })
+    expect.objectContaining({ in_reply_to: '$edit:example.org' })
   );
 });
 
@@ -555,7 +613,7 @@ test('editing a pending message uses its transaction ID', async () => {
     ROOM,
     null,
     'corrected',
-    expect.objectContaining({ transactionId: 'transaction-1' })
+    expect.objectContaining({ transaction_id: 'transaction-1' })
   );
 });
 
@@ -587,7 +645,7 @@ test('editing a file caption replaces the caption and keeps the attachment', asy
     ROOM,
     '$file',
     'the new code',
-    expect.objectContaining({ mediaCaption: true })
+    expect.objectContaining({ media_caption: true })
   );
 });
 
@@ -682,8 +740,7 @@ test('keeps an edited message kind and persona when returning to live drops its 
       kind: 'message',
       body: 'before',
       html: 'before',
-      emote: true,
-      notice: false,
+      msgtype: 'emote',
       edited: false,
       jumbo: null,
     },
@@ -725,7 +782,7 @@ test('a pending edit follows its stable timeline ID after sync drops the transac
     ROOM,
     '$sent',
     'corrected',
-    expect.objectContaining({ transactionId: null })
+    expect.objectContaining({ transaction_id: null })
   );
 });
 
@@ -754,7 +811,7 @@ test('an empty caption edit keeps the attachment', async () => {
     ROOM,
     '$image',
     '',
-    expect.objectContaining({ mediaCaption: true })
+    expect.objectContaining({ media_caption: true })
   );
 });
 
@@ -763,16 +820,10 @@ function proxying() {
   return setup([], '@kris:example.org', {
     personas: [
       {
+        ...testPersona,
         id: 'kris',
         display_name: 'Kris',
-        avatar_url: null,
-        pronouns: [],
-        color_on_light: null,
-        color_on_dark: null,
-        triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false }],
-        pluralkit: null,
-        last_used: null,
-        alternate_avatars: null,
+        triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false, alternate_avatar_id: null }],
       },
     ],
   });
@@ -818,16 +869,10 @@ test('messages containing only a persona trigger and whitespace are not sent', a
 test('personas off in a room ignore the selection and proxy triggers', async () => {
   setPreference('personaProxying', true);
   const kris = {
+    ...testPersona,
     id: 'kris',
     display_name: 'Kris',
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false }],
-    pluralkit: null,
-    last_used: null,
-    alternate_avatars: null,
+    triggers: [{ prefix: 'k:', suffix: null, keep_trigger: false, alternate_avatar_id: null }],
   };
   const select = vi.fn(() => Promise.resolve());
   const { conversation, sendMessage } = setup([], '@kris:example.org', {
@@ -859,6 +904,7 @@ function scheduling() {
     core,
     personas: {
       personas: [],
+      load: () => Promise.resolve(),
       selectionFor: () => null,
       associationFor: () => undefined,
     } as unknown as PersonaStore,
@@ -874,6 +920,7 @@ afterEach(() => {
   clearDrafts();
   setPreference('scheduleInEncryptedRooms', true);
   setPreference('personaProxying', false);
+  setPreference('reuploadGifs', false);
 });
 
 test('an encrypted room falls back to the local queue while the preference allows it', async () => {
@@ -912,6 +959,7 @@ function rescheduling(
     core,
     personas: {
       personas: [],
+      load: () => Promise.resolve(),
       selectionFor: () => null,
       associationFor: () => undefined,
     } as unknown as PersonaStore,
@@ -1085,45 +1133,45 @@ test('a dismissed link is not previewed and the dismissal is spent by the send',
   setPreference('encryptedUrlPreviews', true);
   const fixture = setup([], '@kris:example.org');
   fixture.conversation.dismissPreview('https://a.example/');
-  await fixture.conversation.sendMessage(ROOM, 'a b', LINKS);
+  await fixture.conversation.sendMessage(ROOM, 'https://a.example/ https://b.example/', LINKS);
 
   expect(fixture.urlPreview).toHaveBeenCalledTimes(1);
   expect(fixture.urlPreview).toHaveBeenCalledWith({ url: 'https://b.example/', service: null });
   expect(fixture.sendMessage.mock.calls[0]?.[2]).toMatchObject({
-    noLinkPreviews: false,
+    link_previews: [expect.objectContaining({ url: 'https://b.example/', title: null })],
+    no_link_previews: false,
   });
   expect(fixture.conversation.dismissedPreviews).toEqual([]);
 });
 
-test('dismissing every link sends an explicit opt-out', async () => {
+test.each([false, true])(
+  'dismissing every link sends an opt-out with generation=%s',
+  async (enabled) => {
+    setPreference('encryptedUrlPreviews', enabled);
+    const fixture = setup([], '@kris:example.org');
+    fixture.conversation.dismissPreview('https://a.example/');
+    fixture.conversation.dismissPreview('https://b.example/');
+    await fixture.conversation.sendMessage(ROOM, 'https://a.example/ https://b.example/', LINKS);
+
+    expect(fixture.urlPreview).not.toHaveBeenCalled();
+    expect(fixture.sendMessage.mock.calls[0]?.[2]).toMatchObject({
+      link_previews: [],
+      no_link_previews: true,
+    });
+  }
+);
+
+test('does not fetch previews for URLs absent from the body', async () => {
   setPreference('encryptedUrlPreviews', true);
   const fixture = setup([], '@kris:example.org');
-  fixture.conversation.dismissPreview('https://a.example/');
-  fixture.conversation.dismissPreview('https://b.example/');
   await fixture.conversation.sendMessage(ROOM, 'a b', LINKS);
-
   expect(fixture.urlPreview).not.toHaveBeenCalled();
-  expect(fixture.sendMessage.mock.calls[0]?.[2]).toMatchObject({
-    linkPreviews: [],
-    noLinkPreviews: true,
-  });
 });
 
 test.each([false, true])(
   'message types respect the selected PMP with room disabled=%s',
   async (disabled) => {
-    const persona = {
-      id: 'kris',
-      display_name: 'Kris',
-      avatar_url: null,
-      pronouns: [],
-      color_on_light: null,
-      color_on_dark: null,
-      triggers: [],
-      pluralkit: null,
-      last_used: null,
-      alternate_avatars: null,
-    };
+    const persona = testPersona;
     const h = setup([], '@kris:example.org', {
       personas: [persona],
       selectionFor: () => ({ persona_id: 'kris', valid_until: null, alternate_avatar_id: null }),

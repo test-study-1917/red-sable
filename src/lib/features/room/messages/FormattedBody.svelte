@@ -9,6 +9,7 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { isPlainClick } from '#lib/ui/plain-click.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { pixelatedImage } from '#lib/ui/pixelated.js';
@@ -67,6 +68,7 @@
   let link = $derived(
     definitionAnchor?.tagName === 'A' ? (definitionAnchor as HTMLAnchorElement) : null
   );
+  let emoteDescription = $derived(emote ? emoteAltDescription(emote) : null);
   let definition = $derived(
     definitionAnchor?.dataset.abbrDefinition ??
       (emote ? emoteShortcode(emote) : null) ??
@@ -218,6 +220,12 @@
   function emoteShortcode(image: HTMLImageElement): string | null {
     const label = (image.dataset.shortcode || image.alt).replace(/^:|:$/g, '');
     return label ? `:${label}:` : null;
+  }
+
+  function emoteAltDescription(image: HTMLImageElement): string | null {
+    const alt = image.alt.trim();
+    const bare = (label: string) => label.replace(/^:|:$/g, '');
+    return alt && bare(alt) !== bare(image.dataset.shortcode ?? '') ? alt : null;
   }
 
   async function renderMaths(elements: NodeListOf<HTMLElement>): Promise<void> {
@@ -611,7 +619,7 @@
     }
 
     const anchor = target.closest<HTMLAnchorElement>('a');
-    if (!anchor || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+    if (!anchor || !isPlainClick(event)) return;
     if (anchor.href.toLowerCase().startsWith('matrix:')) event.preventDefault();
     const link = parseMatrixLink(anchor.href);
     if (!link) return;
@@ -640,6 +648,7 @@
 
 <div
   class="formatted-body"
+  dir="auto"
   {@attach decorate(renderedHtml)}
   {@attach images(renderedHtml, imagesConcealed)}
   {@attach spoilerImages(renderedHtml, imagesConcealed)}
@@ -663,7 +672,7 @@
 {/if}
 
 {#snippet emoteCard()}
-  <EmoteCard label={definition}>
+  <EmoteCard label={definition} description={emoteDescription}>
     {#if emote?.src}
       <img class={{ pixelated: emote.classList.contains('pixelated') }} src={emote.src} alt="" />
     {/if}
@@ -698,6 +707,16 @@
   .formatted-body {
     /* Relative so inline code keeps its ratio inside a heading too. */
     --inline-code-scale: 0.9em;
+  }
+
+  .formatted-body,
+  .formatted-body :global(:is(p, li, blockquote, h1, h2, h3, h4, h5, h6, td, th)) {
+    unicode-bidi: plaintext;
+  }
+
+  /* WebKit aligns a plaintext li to the list's direction without this. */
+  .formatted-body :global(li) {
+    text-align: start;
   }
 
   .formatted-body,
@@ -757,6 +776,14 @@
 
   .formatted-body :global([data-plain-body]) {
     white-space: pre-wrap;
+  }
+
+  .formatted-body :global([data-emoji]) {
+    --emoji-size: 1.375em;
+
+    font-size: var(--emoji-size);
+    line-height: 0;
+    vertical-align: -0.2em;
   }
 
   .formatted-body :global(h1),
@@ -828,6 +855,10 @@
     text-decoration: underline;
   }
 
+  .formatted-body :global([data-mx-color] a) {
+    color: inherit;
+  }
+
   .formatted-body :global(a[data-matrix-link]),
   .formatted-body :global([data-mx-room-mention]),
   .formatted-body :global(a[data-settings-link]) {
@@ -874,9 +905,9 @@
   }
 
   .formatted-body :global(blockquote) {
-    border-left: calc(var(--border-width) * 2) solid var(--surface-var-container-line);
+    border-inline-start: calc(var(--border-width) * 2) solid var(--surface-var-container-line);
     margin: var(--space-100) 0;
-    padding-left: var(--space-200);
+    padding-inline-start: var(--space-200);
   }
 
   .formatted-body :global(code:not(pre code)) {
@@ -941,6 +972,7 @@
   /* An expanded block never scrolls vertically: a scroller there would swallow
      the wheel whenever the pointer crossed it, stalling the timeline. */
   .formatted-body :global(pre) {
+    direction: ltr;
     line-height: var(--code-line-height);
     margin: 0;
     overflow: auto hidden;
@@ -1056,7 +1088,7 @@
     border: var(--border-width) solid var(--surface-container-line);
     color: var(--surface-on-container);
     padding: var(--space-050) var(--space-150);
-    text-align: left;
+    text-align: start;
   }
 
   .formatted-body :global(th) {

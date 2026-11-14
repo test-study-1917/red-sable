@@ -129,7 +129,7 @@
   title={name}
   src={iframeUrl}
   allow="autoplay; camera; clipboard-read; clipboard-write; compute-pressure; display-capture; encrypted-media; fullscreen; hid; microphone; screen-wake-lock"
-  sandbox="allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads"
+  sandbox="allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-modals"
   {@attach widget}
 ></iframe>
 {:else}

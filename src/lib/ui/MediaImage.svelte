@@ -1,17 +1,22 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { devicePixelRatio } from 'svelte/reactivity/window';
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { windowActivity } from '#lib/platform/window-activity.js';
   import { decodeBlurhashPixels } from '#lib/ui/blurhash.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
+  import { mediaEvents } from '#lib/ui/media-events.js';
   import { dominantColor } from '#lib/ui/dominant-color.js';
   import { DEFAULT_FRAME_MS, openGifPlayback, type GifPlayback } from '#lib/ui/gif-frames.js';
   import { mediaProgress } from '#lib/ui/media-progress.svelte.js';
   import { pixelatedImage } from '#lib/ui/pixelated.js';
-  import { automaticMediaRetryDelay, mediaRetryDelay } from '#lib/ui/media-retry.js';
+  import { mediaFailureHold, mediaRetryDelay } from '#lib/ui/media-retry.js';
+  import { CoreError } from '#src/transport';
   import {
+    cachedMediaAnimated,
     cachedMediaType,
     cachedMediaUrl,
     discardMediaUrl,
@@ -19,19 +24,25 @@
     isEncryptedMedia,
     loadMediaUrl,
     mediaAspectRatio,
+    mediaUrlShown,
+    recoverMediaUrl,
     retryMediaUrl,
   } from '#lib/ui/media-url.js';
   import { animationsPaused, stillFrame } from '#lib/ui/still-frame.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
+  import '#lib/ui/media-size.css';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import ImageBrokenIcon from 'phosphor-svelte/lib/ImageBrokenIcon';
   import ImageSpoilerControl from './ImageSpoilerControl.svelte';
   import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
   import PlayIcon from 'phosphor-svelte/lib/PlayIcon';
+  import { sleep } from '#lib/sleep.js';
 
   const BLURHASH_DECODE_WIDTH = 32;
   const ORIENTATION_TOLERANCE = 0.05;
+  const RECONNECT_RETRY_SPREAD_MS = 3000;
+  const THUMBNAIL_MIN_SOURCE_BYTES = 1024 * 1024;
   const ANIMATED_MIMES = ['image/gif', 'image/apng', 'image/avif', 'image/webp'];
   const ANIMATED_EXTENSIONS = ['.gif', '.apng', '.avif', '.webp'];
 
@@ -54,9 +65,11 @@
     onloaded?: (url: string | null) => void;
     onfailed?: (source: string) => void;
     retryable?: boolean;
+    refreshOnResume?: boolean;
     uniform?: boolean;
     tint?: boolean;
     original?: boolean;
+    freeze?: boolean;
     pixelate?: boolean;
     autoplay?: boolean | null;
     emoticon?: boolean;
@@ -85,9 +98,11 @@
     onloaded,
     onfailed,
     retryable = false,
+    refreshOnResume = false,
     uniform = false,
     tint = false,
     original = false,
+    freeze = false,
     pixelate = true,
     autoplay = null,
     emoticon = false,
@@ -97,8 +112,23 @@
     spoilerName,
   }: Props = $props();
   const core = useCoreClient();
-  let outcome = $state.raw<{ key: string; url: string | null; undecodable?: true } | null>(null);
-  let backoff = $derived({ source, attempt: 0, forced: 0, manual: 0, automatic: 0, at: 0 });
+  let outcome = $state.raw<{
+    key: string;
+    url: string | null;
+    undecodable?: true;
+    missing?: true;
+  } | null>(null);
+  let backoff = $derived({
+    source,
+    attempt: 0,
+    forced: 0,
+    manual: 0,
+    automatic: 0,
+    wait: 0,
+    at: 0,
+  });
+  let resume = $derived({ source, count: 0 });
+  let hiddenAt: number | null = null;
   let attempt = $derived(backoff.attempt);
   let forced = $derived(backoff.forced);
   let clock = $state(Date.now());
@@ -139,8 +169,19 @@
   let servedSideways = $derived(
     sidewaysSource === source || sideways(mediaAspectRatio(core, source, width, height))
   );
+  let thumbnailWorthIt = $derived(
+    eventRatio === null ||
+      intrinsicWidth === null ||
+      intrinsicHeight === null ||
+      ((intrinsicWidth > width || intrinsicHeight > height) &&
+        ((devicePixelRatio.current ?? 1) <= 1 ||
+          size === null ||
+          size <= 0 ||
+          size > THUMBNAIL_MIN_SOURCE_BYTES))
+  );
   let asIs = $derived(
     original ||
+      !thumbnailWorthIt ||
       mime === 'image/svg+xml' ||
       animated ||
       servedSideways ||
@@ -159,7 +200,7 @@
   let requestedWidth = $derived(asIs ? 0 : width);
   let requestedHeight = $derived(asIs ? 0 : height);
   let requestKey = $derived(
-    `${String(attempt)}:${String(requestedWidth)}x${String(requestedHeight)}:${requested}`
+    `${String(attempt)}:${String(requestedWidth)}x${String(requestedHeight)}:${requested}:${String(resume.count)}`
   );
   let url = $derived(
     outcome?.key === requestKey
@@ -168,6 +209,7 @@
   );
   let failed = $derived(outcome?.key === requestKey && outcome.url === null);
   let undecodable = $derived(failed && outcome?.undecodable === true);
+  let permanent = $derived(undecodable || (failed && outcome?.missing === true));
   let retryingFailure = $derived(
     outcome !== null &&
       outcome.url === null &&
@@ -206,13 +248,27 @@
       imageLoaded &&
       cachedMediaType(core, requested, requestedWidth, requestedHeight) === 'image/svg+xml'
   );
-  let animatedGif = $derived(animatedHint !== false && (mime === 'image/gif' || named('.gif')));
-  let manualGif = $derived(animatedGif && !emoticon && !(autoplay ?? preferences.autoplayGifs));
+  let manualGif = $derived(animated && !emoticon && !(autoplay ?? preferences.autoplayGifs));
   let paused = $derived(
-    (animated || original) && (animationsPaused() || (emoticon && !preferences.autoplayStickers))
+    freeze ||
+      ((animated || original) &&
+        (animationsPaused() || (emoticon && !preferences.autoplayStickers)))
   );
-  let heldFrame = $derived(paused && imageLoaded && imageElement ? stillFrame(imageElement) : null);
-  let heldUrl = $derived(heldFrame ?? url);
+  let heldFrame = $state<{ url: string; still: string } | null>(null);
+  let heldUrl = $derived(paused && heldFrame && heldFrame.url === url ? heldFrame.still : url);
+  $effect(() => {
+    const image = imageElement;
+    const source = url;
+    if (!paused || !imageLoaded || !image || !source) return;
+    if (cachedMediaAnimated(core, requested, requestedWidth, requestedHeight) === false) return;
+    let current = true;
+    void stillFrame(image, source).then((still) => {
+      if (current && still) heldFrame = { url: source, still };
+    });
+    return () => {
+      current = false;
+    };
+  });
   let steppedGif = $derived(gifFrames !== null);
   let heldGif = $derived(manualGif && !gifPlaying && gifPreviewReady);
   let painted = $derived(manualGif ? gifPreviewReady : imageLoaded);
@@ -253,9 +309,42 @@
   });
 
   $effect(() => {
+    if (!refreshOnResume) return;
+    if (!windowActivity.visible) {
+      hiddenAt ??= Date.now();
+      return;
+    }
+    if (hiddenAt === null) return;
+    const elapsed = Date.now() - hiddenAt;
+    hiddenAt = null;
+    if (elapsed < 30_000) return;
+    untrack(() => {
+      resume = { ...resume, count: resume.count + 1 };
+      backoff = { ...backoff, attempt: 0, forced: 0, automatic: 0, at: 0 };
+    });
+  });
+
+  // A load that failed while offline, or before the session restored, would otherwise stay blank.
+  let syncWasLive = untrack(() => core.sync?.state === 'live');
+  $effect(() => {
+    const live = core.sync?.state === 'live';
+    const reconnected = live && !syncWasLive;
+    syncWasLive = live;
+    if (!reconnected) return;
+    const timer = setTimeout(() => {
+      if (!failed || permanent) return;
+      const next = backoff.attempt + 1;
+      backoff = { ...backoff, attempt: next, forced: next, automatic: 0, at: 0 };
+    }, Math.random() * RECONNECT_RETRY_SPREAD_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  });
+
+  $effect(() => {
     const current = backoff;
-    const delay = automaticMediaRetryDelay(current.automatic);
-    if (!failed || undecodable || delay === null) return;
+    if (!failed || permanent) return;
+    const delay = Math.max(mediaFailureHold(current.automatic), current.wait);
     const timeout = setTimeout(() => {
       backoff = { ...current, attempt: current.attempt + 1 };
     }, delay);
@@ -285,7 +374,8 @@
     const release = holdMediaUrl(core, requestSource, requestWidth, requestHeight);
     if (
       outcome?.key === key ||
-      cachedMediaUrl(core, requestSource, requestWidth, requestHeight) !== undefined
+      (resume.count === 0 &&
+        cachedMediaUrl(core, requestSource, requestWidth, requestHeight) !== undefined)
     ) {
       return release;
     }
@@ -296,7 +386,10 @@
        derived then warns `derived_inert`, so the callbacks only touch snapshots. */
     const previous = untrack(() => backoff);
     const canRetry = untrack(() => retryable);
-    const load = attempt > 0 && forced === attempt ? retryMediaUrl : loadMediaUrl;
+    const load =
+      (resume.count > 0 && attempt === 0) || (attempt > 0 && forced === attempt)
+        ? retryMediaUrl
+        : loadMediaUrl;
     void load(core, requestSource, requestWidth, requestHeight, mime)
       .then((nextUrl) => {
         if (!active) return;
@@ -305,11 +398,21 @@
         }
         outcome = { key, url: nextUrl };
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!active) return;
-        outcome = { key, url: null };
+        const detail = error instanceof CoreError ? error.detail : null;
+        outcome =
+          detail?.code === 'media_not_found'
+            ? { key, url: null, missing: true }
+            : { key, url: null };
         const automatic = previous.automatic + 1;
-        backoff = { ...previous, automatic, at: manualRetryDeadline(previous, canRetry) };
+        const wait = detail?.code === 'media_server_unavailable' ? detail.retry_after_ms : 0;
+        backoff = {
+          ...previous,
+          automatic,
+          wait,
+          at: manualRetryDeadline(previous, canRetry),
+        };
         onfailed?.(shownSource);
       });
 
@@ -321,9 +424,10 @@
 
   $effect(() => {
     if (!url || !manualGif) return;
+    const type = cachedMediaType(core, requested, requestedWidth, requestedHeight) || mime;
     let playback: GifPlayback | null = null;
     let active = true;
-    void openGifPlayback(url).then((opened) => {
+    void openGifPlayback(url, type || undefined).then((opened) => {
       if (!active || !opened) {
         opened?.close();
         return;
@@ -346,7 +450,7 @@
     const stopped = (): boolean => !running;
     const step = async (): Promise<void> => {
       while (!stopped()) {
-        await new Promise((resolve) => setTimeout(resolve, gifFrameMs));
+        await sleep(gifFrameMs);
         if (stopped()) return;
         await paintFrame(playback, (gifFrameIndex + 1) % playback.frameCount);
       }
@@ -446,16 +550,34 @@
   }
 
   function freezeFrame(): void {
+    mediaUrlShown(core, requested, requestedWidth, requestedHeight);
     backoff = { ...backoff, manual: 0, automatic: 0, at: 0 };
     previewUrl = drawFrame() ? url : null;
   }
 
   function imageShown(): void {
+    mediaUrlShown(core, requested, requestedWidth, requestedHeight);
     backoff = { ...backoff, manual: 0, automatic: 0, at: 0 };
     loadedUrl = url;
   }
 
   function brokenImage(): void {
+    const recovery =
+      url && recoverMediaUrl(core, requested, requestedWidth, requestedHeight, url, mime);
+    if (recovery) {
+      const key = requestKey;
+      const shownSource = source;
+      void recovery.then(
+        (nextUrl) => {
+          outcome = { key, url: nextUrl };
+        },
+        () => {
+          outcome = { key, url: null };
+          onfailed?.(shownSource);
+        }
+      );
+      return;
+    }
     if (url) discardMediaUrl(core, requested, requestedWidth, requestedHeight, url);
     if (!asIs) {
       undecodableThumbnail = source;
@@ -499,8 +621,7 @@
     {width}
     {height}
     aria-hidden={showCanvas ? 'true' : undefined}
-    onload={freezeFrame}
-    onerror={brokenImage}
+    {@attach mediaEvents({ load: freezeFrame, error: brokenImage })}
   />
 {/snippet}
 
@@ -508,8 +629,13 @@
   <img
     {...withoutTabindex(props)}
     bind:this={imageElement}
-    bind:clientWidth={renderedWidth}
-    bind:clientHeight={renderedHeight}
+    bind:borderBoxSize={
+      null,
+      (box: ResizeObserverSize[]) => {
+        renderedWidth = box[0]?.inlineSize ?? 0;
+        renderedHeight = box[0]?.blockSize ?? 0;
+      }
+    }
     class={['media-image-content', { tinted }]}
     style:background-color={plate ?? undefined}
     src={heldUrl}
@@ -517,8 +643,7 @@
     {width}
     {height}
     decoding="async"
-    onload={imageShown}
-    onerror={brokenImage}
+    {@attach mediaEvents({ load: imageShown, error: brokenImage })}
     {@attach (node) => {
       if (node instanceof HTMLImageElement && node.complete) loadedUrl = url;
     }}
@@ -729,7 +854,7 @@
     display: block;
     height: 100%;
     padding: 0;
-    text-align: left;
+    text-align: start;
     text-decoration: none;
     width: 100%;
   }
@@ -807,17 +932,6 @@
     position: absolute;
   }
 
-  .media-image-size {
-    background: var(--surface-container);
-    border-radius: var(--radius-pill);
-    bottom: var(--space-100);
-    color: var(--surface-on-container);
-    font-size: var(--font-size-small);
-    padding: var(--space-050) var(--space-100);
-    position: absolute;
-    right: var(--space-100);
-  }
-
   @container (max-width: 8rem) {
     .media-image-progress,
     .media-image-size {
@@ -860,6 +974,7 @@
     box-shadow: var(--shadow-float);
     color: var(--surface-on-container);
     display: flex;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
     left: 50%;
     padding: var(--space-200);
     position: absolute;
@@ -900,7 +1015,7 @@
     background: none;
     border: 0;
     padding: 0;
-    text-align: left;
+    text-align: start;
   }
 
   .media-image.interactive.gif {

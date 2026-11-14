@@ -5,9 +5,10 @@
   import type { PerMessageProfileView, PersonaView } from '#src/generated/protocol';
 
   import { i18n } from '#lib/i18n.js';
+  import { filterPersonas } from '#lib/personas/persona.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import ResponsiveDialog from '#lib/ui/primitives/ResponsiveDialog.svelte';
-  import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
   interface Props {
@@ -19,14 +20,7 @@
 
   let { open = $bindable(false), personas, current, onChoose }: Props = $props();
   let query = $state('');
-  let filteredPersonas = $derived.by(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return personas.filter(
-      (persona) =>
-        persona.display_name.toLocaleLowerCase().includes(needle) ||
-        persona.id.toLocaleLowerCase().includes(needle)
-    );
-  });
+  let filteredPersonas = $derived(filterPersonas(personas, query));
 
   function choose(persona: PersonaView | null): void {
     open = false;
@@ -36,14 +30,7 @@
 
 {#snippet content(desktop: boolean)}
   <h2>{i18n.t('timeline.reproxyMessage')}</h2>
-  <TextInput
-    bind:value={query}
-    class="reproxy-search"
-    type="search"
-    autocomplete="off"
-    placeholder={i18n.t('personas.search')}
-    aria-label={i18n.t('personas.search')}
-  />
+  <SearchField bind:value={query} class="reproxy-search" label={i18n.t('personas.search')} />
   <ul class={['reproxy-options', { dialog: desktop }]} {@attach scrollHint}>
     <li>
       <button
@@ -80,7 +67,7 @@
     {/each}
   </ul>
   {#if filteredPersonas.length === 0 && query.trim()}
-    <p class="reproxy-empty">{i18n.t('personas.noMatches')}</p>
+    <p class="empty-text reproxy-empty">{i18n.t('personas.noMatches')}</p>
   {/if}
 {/snippet}
 
@@ -127,7 +114,7 @@
     gap: var(--space-300);
     min-height: var(--control-height-500);
     padding: var(--space-200) var(--space-300);
-    text-align: left;
+    text-align: start;
     width: 100%;
   }
 
@@ -144,9 +131,6 @@
   }
 
   .reproxy-empty {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
-    margin: 0;
     padding: var(--space-200) var(--space-300);
   }
 </style>

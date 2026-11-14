@@ -6,13 +6,19 @@ import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
 import type { MessageActions } from './message-menu-items';
 
 export type MessageDialog =
-  | { kind: 'source'; source: string; encrypted: boolean; original: string | null }
+  | {
+      kind: 'source';
+      source: string;
+      encrypted: boolean;
+      original: string | null;
+      encryption: string | null;
+    }
   | { kind: 'edit-history'; versions: readonly EditVersionView[]; senderTimezone: string | null }
   | { kind: 'delete'; target: string }
   | { kind: 'reactions'; active: number }
   | { kind: 'react'; anchor: HTMLElement | CursorAnchor | null }
   | { kind: 'sheet'; actions: () => MessageActions }
-  | { kind: 'report' | 'forward' | 'steal' | 'reproxy' | 'receipts' };
+  | { kind: 'report' | 'meowlnir-ban' | 'forward' | 'steal' | 'reproxy' | 'receipts' };
 
 export type OpenMessageDialog = MessageDialog & { key: number; item: TimelineItemView };
 

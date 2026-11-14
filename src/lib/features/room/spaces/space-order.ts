@@ -1,3 +1,4 @@
+import { clamp } from '#lib/clamp.js';
 import type { DropEdge } from '#lib/ui/drag-list.js';
 
 const FIRST = 0x20;
@@ -34,35 +35,6 @@ export function orderBetween(before: string | null, after: string | null): strin
   }
 
   return null;
-}
-
-export function orderKeys(desired: readonly (string | null)[]): (string | null)[] {
-  const keys: (string | null)[] = [];
-  let previous: string | null = null;
-
-  for (const [index, current] of desired.entries()) {
-    const trailingUnordered = desired.slice(index).every((entry) => entry === null);
-    if (current === null && trailingUnordered && previous === null) {
-      keys.push(null);
-      continue;
-    }
-
-    if (current !== null && (previous === null || previous < current)) {
-      keys.push(current);
-      previous = current;
-      continue;
-    }
-
-    const nextFixed =
-      desired.slice(index + 1).find((entry) => entry !== null && entry > (previous ?? '')) ?? null;
-    const generated = orderBetween(previous, nextFixed);
-    if (generated === null) return renumber(desired.length);
-
-    keys.push(generated);
-    previous = generated;
-  }
-
-  return keys;
 }
 
 function renumber(count: number): string[] {
@@ -102,7 +74,7 @@ export function reorderChildren(
 
   const moved = [...children];
   const [entry] = moved.splice(from, 1);
-  const to = Math.max(0, Math.min(targetIndex, moved.length));
+  const to = clamp(targetIndex, 0, moved.length);
   moved.splice(to, 0, entry);
   if (to === from) return [];
 

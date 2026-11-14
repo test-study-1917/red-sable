@@ -32,7 +32,7 @@ export class TimelineUnread {
     if (this.#task) return this.#task;
     if (this.initialized && !this.failed) return Promise.resolve();
     if (!this.initialized) {
-      this.active = items.some((item) => item.content.kind === 'read_marker') || hasUnread;
+      this.active = hasUnread;
       this.#readEventId ??= readEventId;
     }
     this.initialized = true;
@@ -117,6 +117,16 @@ export class TimelineUnread {
       this.reached = true;
       this.background = false;
     }
+  }
+
+  markUnreadFrom(eventId: string, readEventId: string | null): void {
+    this.initialized = true;
+    this.failed = false;
+    this.#readEventId = readEventId;
+    this.firstEventId = eventId;
+    this.active = true;
+    this.reached = false;
+    this.background = false;
   }
 
   dismiss(): void {

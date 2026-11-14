@@ -7,10 +7,9 @@
   pnpm_12,
   pnpmConfigHook,
   nodejs_26,
-  wasm-bindgen-cli_0_2_129,
+  sable-wasm-bindgen-cli,
   binaryen,
   lld,
-  sable-deepfilternet-assets,
 }:
 
 let
@@ -26,25 +25,21 @@ stdenv.mkDerivation (finalAttrs: {
 
   cargoDeps = rustPlatform.fetchCargoVendor {
     inherit (finalAttrs) src;
-    hash = "sha256-EPsHym520FZQe0BAliVpSJLBK+NQo+SI+ukrI2UVbls=";
+    hash = "sha256-wb9vBqdbXCPjmVJ1MY4wNPE4BeWNLpOyhaLAVKCwHWc=";
   };
 
   pnpmDeps = fetchPnpmDeps {
     inherit (finalAttrs) pname version src;
     inherit pnpm;
     fetcherVersion = 4;
-    hash = "sha256-hnfwYDnOzXxx3E9Okpvu05GA3ZAksMNx2UTlRrjDh7I=";
+    hash = "sha256-TH0eBL0Ups2AxWi778oj7b1i9VJpNnk8hgMBKJMwyGU=";
   };
-
-  postPatch = ''
-    cp --no-preserve all -r ${sable-deepfilternet-assets} static/deepfilternet3
-  '';
 
   nativeBuildInputs = [
     pnpm
     (pnpmConfigHook.override { inherit pnpm; })
     nodejs_26
-    wasm-bindgen-cli_0_2_129
+    sable-wasm-bindgen-cli
     binaryen
     lld
     rustPlatform.rust.rustc
@@ -52,7 +47,11 @@ stdenv.mkDerivation (finalAttrs: {
     rustPlatform.cargoSetupHook
   ];
 
-  env.VITE_BUILD_HASH = src.shortRev or src.dirtyShortRev or "";
+  env = {
+    SABLE_FOSS = "1";
+    VITE_APP_VERSION = finalAttrs.version;
+    VITE_BUILD_HASH = src.shortRev or src.dirtyShortRev or "";
+  };
 
   buildPhase = ''
     runHook preBuild
