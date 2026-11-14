@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { serverNameOf } from '#lib/matrix-id.js';
   import type { RoomPowerLevelsView, RoomListItemView } from '#src/generated/protocol';
   import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
@@ -39,12 +40,12 @@
     return new Set();
   });
   let pendingRemoval = $state.raw<readonly string[]>([]);
-  let outcome = $state<'invalid' | 'failed' | null>(null);
+  let outcome = $state<'invalid' | 'foreign' | 'failed' | null>(null);
   let run = 0;
 
   let roomId = $derived(room?.room_id ?? null);
   let canEdit = $derived(canSendState(levels, ownPowerLevel, CANONICAL_EVENT_TYPE));
-  let server = $derived(core.session?.user_id.split(':').slice(1).join(':') ?? '');
+  let server = $derived(core.session ? serverNameOf(core.session.user_id) : '');
   let published = $derived([
     ...(canonical === null ? [] : [canonical]),
     ...alternatives.filter((alias) => alias !== canonical),
@@ -123,6 +124,10 @@
     if (!target || busy) return;
     if (alias === null) {
       outcome = 'invalid';
+      return;
+    }
+    if (serverNameOf(alias) !== server) {
+      outcome = 'foreign';
       return;
     }
 
@@ -330,6 +335,10 @@
     <div class="settings-form">
       {#if outcome === 'invalid'}
         <Alert variant="critical" role="alert">{i18n.t('room.addressesInvalid')}</Alert>
+      {:else if outcome === 'foreign'}
+        <Alert variant="critical" role="alert">
+          {i18n.t('room.addressesForeignServer', { server })}
+        </Alert>
       {:else if outcome === 'failed'}
         <Alert variant="critical" role="alert">{i18n.t('room.addressesFailed')}</Alert>
       {/if}

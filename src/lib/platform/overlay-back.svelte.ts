@@ -12,6 +12,7 @@ let pushed = 0;
 let pushing = 0;
 let queued = 0;
 let popped: Promise<void> = Promise.resolve();
+let released: number[] = [];
 const POP_FALLBACK_MS = 250;
 
 function popEntries(count: number): void {
@@ -36,6 +37,15 @@ function popEntries(count: number): void {
   });
 }
 
+function unwindReleased(): void {
+  let bottom = pushed;
+  while (released.includes(bottom)) bottom -= 1;
+  released = released.filter((depth) => depth < bottom);
+  if (bottom === pushed) return;
+  popEntries(pushed - bottom);
+  pushed = bottom;
+}
+
 export async function afterOverlayPops(): Promise<void> {
   await tick();
   await Promise.resolve();
@@ -56,6 +66,7 @@ async function pushEntry(depth: number): Promise<boolean> {
 
 export function holdOverlayBack(open: () => boolean, close: () => void): void {
   let held = $state(0);
+  let heldAt = '';
   let rearm: (() => void) | null = null;
 
   $effect(() => {
@@ -70,13 +81,16 @@ export function holdOverlayBack(open: () => boolean, close: () => void): void {
       if (queued > 0) {
         queued -= 1;
         held = taken;
+        heldAt = location.href;
         return;
       }
       pushing += 1;
       void pushEntry(taken).then((ok) => {
         if (!ok) pushed = taken - 1;
-        else if (mine) held = taken;
-        else popEntries(1);
+        else if (mine) {
+          held = taken;
+          heldAt = location.href;
+        } else popEntries(1);
       });
     };
     acquire();
@@ -97,17 +111,31 @@ export function holdOverlayBack(open: () => boolean, close: () => void): void {
         return;
       }
 
-      popEntries(pushed - depth + 1);
+      if (depth < pushed) {
+        released.push(depth);
+        return;
+      }
+      popEntries(1);
       pushed = depth - 1;
+      unwindReleased();
     };
   });
 
   $effect(() => {
     const current = overlayBackDepth(page.state);
-    if (pushing === 0 && current < pushed) pushed = current;
+    if (pushing === 0 && current < pushed) {
+      pushed = current;
+      unwindReleased();
+    }
     if (held > 0 && current < held) {
       held = 0;
       const restore = rearm;
+      // A route change also drops the entry, but leaves the overlay meant to stay up.
+      if (location.href !== heldAt) {
+        pushed = current;
+        restore?.();
+        return;
+      }
       leaveUnlessUnsaved(close, () => restore?.());
     }
   });

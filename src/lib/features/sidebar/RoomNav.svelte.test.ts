@@ -6,10 +6,18 @@ import { userEvent } from '@testing-library/user-event';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 
-import type { NotificationSettingsView, RoomListItemView } from '#src/generated/protocol';
+import type {
+  LatestEventView,
+  NotificationSettingsView,
+  RoomListItemView,
+  RoomSectionView,
+  RoomUnreadView,
+} from '#src/generated/protocol';
 
 import { roomNotifications, roomUnread } from '#lib/rooms/unread.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
+import { bannerChanged } from '#lib/features/room/room-banner.svelte.js';
+import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
 
 const roomsFixture = vi.hoisted(() => {
   const fixture = {
@@ -18,7 +26,22 @@ const roomsFixture = vi.hoisted(() => {
     byId: (roomId: string | null) => fixture.rooms.find((room) => room.room_id === roomId),
     notificationOverride: () => null,
     unreadFor: (room: RoomListItemView) => roomUnread(room),
-    badgeUnreadFor: (room: RoomListItemView) => roomUnread(room),
+    sections: new Map<string, RoomSectionView>(),
+    badges: new Map<string, RoomUnreadView>(),
+    section: (key: string): RoomSectionView =>
+      fixture.sections.get(key) ?? {
+        key,
+        favourites: [],
+        rooms: fixture.rooms.map((room) => room.room_id),
+        subspaces: [],
+        calendars: [],
+        invites: [],
+        unread: { unread: 0, notifying: 0, highlight: 0, marked: false },
+        unread_rooms: [],
+        descendants: [],
+      },
+    badgeUnreadFor: (room: RoomListItemView): RoomUnreadView =>
+      fixture.badges.get(room.room_id) ?? { unread: 0, notifying: 0, highlight: 0, marked: false },
     quietRoomIds: new Set<string>(),
     notificationsFor: (room: RoomListItemView) => roomNotifications(room),
   };
@@ -32,7 +55,7 @@ import { visit } from '#lib/test-support/app-state.js';
 vi.mock('#lib/core/context.js');
 
 import { core } from '#lib/core/__mocks__/context.js';
-import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { roomView } from '#lib/test-support/room-views.js';
 const notificationSettings =
   vi.fn<(params: { room_id: string }) => Promise<NotificationSettingsView>>();
 Object.assign(core.rpc.notifications, { settings: notificationSettings });
@@ -49,8 +72,6 @@ vi.mock('#lib/i18n.js', () => import('#lib/test-support/i18n.js'));
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useRoomList: () => roomsFixture,
-  roomLabel: (room: RoomListItemView) => room.name ?? room.canonical_alias ?? room.room_id,
-  roomAvatarUrl: (room: RoomListItemView) => room.avatar_url,
 }));
 const presenceFixture = vi.hoisted(() => ({
   entry: null as { statusMessage: string | null } | null,
@@ -60,43 +81,37 @@ vi.mock('#lib/rooms/presence.svelte.js', () => ({
   usePresenceStore: () => ({ get: () => presenceFixture.entry, peek: () => presenceFixture.entry }),
 }));
 
-import { setGroupsFavourites } from '#lib/rooms/favourite-grouping.svelte.js';
+import {
+  badgeView,
+  sectionView,
+  treeCategory,
+  treeLink,
+  treeRoom,
+} from '#lib/test-support/room-sections.js';
 import RoomNavHarness from './RoomNavHarness.test.svelte';
 
 const realObserver = globalThis.IntersectionObserver;
 
 function makeRoom(overrides: Partial<RoomListItemView>): RoomListItemView {
-  return withCounts({
-    room_id: '!room:example.org',
-    canonical_alias: null,
-    name: null,
-    topic: null,
-    avatar_url: null,
-    is_direct: false,
-    direct_targets: [],
-    join_rule: 'invite',
-    tags: [],
-    state: 'joined',
-    encrypted: null,
-    is_tombstoned: false,
-    call_participants: [],
-    screen_sharers: [],
-    room_kind: 'text',
+  return roomView({
     supports_knock: true,
     supports_restricted: true,
     supports_knock_restricted: true,
-    space_children: [],
-    unread: 0,
-    notifying: 0,
-    highlight: 0,
-    marked_unread: false,
-    latest_event: null,
     ...overrides,
   });
 }
 
-function latestAt(timestamp: number): RoomListItemView['latest_event'] {
-  return { sender: null, body: 'hi', timestamp, sending: false, event_id: null };
+function listSections(...sections: RoomSectionView[]): void {
+  roomsFixture.sections = new Map(sections.map((section) => [section.key, section]));
+}
+
+function listBadges(entries: Record<string, Partial<RoomUnreadView>>): void {
+  roomsFixture.badges = new Map(
+    Object.entries(entries).map(([id, counts]) => {
+      const { counts: full } = badgeView(id, counts);
+      return [id, full];
+    })
+  );
 }
 
 function roomNames(): string[] {
@@ -112,7 +127,7 @@ async function mountNav(props: Record<string, unknown> = {}) {
 }
 
 const user = userEvent.setup();
-const row = (name: string) => screen.getByRole('link', { name: new RegExp(`^${name}`) });
+const row = (name: string) => screen.getByRole('treeitem', { name: new RegExp(`^${name}`) });
 
 async function openMenu(name: string): Promise<void> {
   await user.pointer({ keys: '[MouseRight]', target: screen.getByText(name) });
@@ -120,7 +135,10 @@ async function openMenu(name: string): Promise<void> {
 
 beforeEach(() => {
   visit('/home', {});
+  core.session = { user_id: '@me:example.org' };
   roomsFixture.rooms = [];
+  roomsFixture.sections = new Map();
+  roomsFixture.badges = new Map();
   presenceFixture.entry = null;
   core.userProfile.mockReset();
   core.userProfile.mockRejectedValue(new Error('no profile'));
@@ -129,15 +147,21 @@ beforeEach(() => {
     can_invite: false,
     can_manage_children: false,
   } as RoomPermissionsView);
+  core.rpc.room_state.banner.mockReset();
+  core.rpc.room_state.banner.mockResolvedValue(null);
   notificationSettings.mockReset();
   notificationSettings.mockResolvedValue({ room: null, default: 'mentions' });
 });
 
 afterEach(() => {
+  mediaViewerState.close();
+  setPreference('showHome', false);
   setPreference('roomSort', 'recent');
   setPreference('directSort', 'recent');
   setPreference('showRoomIcon', 'always');
+  setPreference('voiceParticipantPlacement', 'both');
   setPreference('showDmTopics', true);
+  setPreference('messagePreviews', 'off');
   globalThis.IntersectionObserver = realObserver;
 });
 
@@ -180,6 +204,11 @@ test.each([
     : [target];
   if (isSpace) {
     visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+    listSections(
+      sectionView('!root:example.org', {
+        subspaces: [treeCategory(target.room_id, 0, [treeRoom(leaf.room_id, 1)])],
+      })
+    );
   }
   core.rpc.members.permissions.mockResolvedValue({
     can_invite: true,
@@ -231,6 +260,11 @@ test('a subspace context menu opens its lobby', async () => {
     }),
     makeRoom({ room_id: '!leaf:example.org', name: 'Leaf' }),
   ];
+  listSections(
+    sectionView('!root:example.org', {
+      subspaces: [treeCategory('!nested:example.org', 0, [treeRoom('!leaf:example.org', 1)])],
+    })
+  );
   const onNavigate = vi.fn();
   await mountNav({ onNavigate });
 
@@ -278,6 +312,18 @@ test('nests subspaces with thread lines and links past the depth limit to the lo
     makeRoom({ room_id: '!deepest:example.org', name: 'Deepest' }),
   ];
 
+  listSections(
+    sectionView('!root:example.org', {
+      subspaces: [
+        treeCategory('!one:example.org', 0, [
+          treeCategory('!two:example.org', 0, [
+            treeRoom('!deep:example.org', 1),
+            treeLink('!three:example.org', 1),
+          ]),
+        ]),
+      ],
+    })
+  );
   await mountNav();
   const deep = row('Deep');
   expect(deep.style.getPropertyValue('--room-depth')).toBe('1');
@@ -290,75 +336,90 @@ test('nests subspaces with thread lines and links past the depth limit to the lo
   expect(roomNames()).not.toContain('Deepest');
 });
 
-test('home lists every joined room, including the children of joined spaces', async () => {
+test('each page renders its section in the order the core lists it', async () => {
   roomsFixture.rooms = [
-    makeRoom({ room_id: '!plain:example.org', name: 'Plain' }),
-    makeRoom({ room_id: '!direct:example.org', name: 'Direct', is_direct: true }),
-    makeRoom({ room_id: '!space:example.org', name: 'Space', room_kind: 'space' }),
-    makeRoom({ room_id: '!child:example.org', name: 'Child' }),
-    makeRoom({
-      room_id: '!parent-space:example.org',
-      name: 'Parent space',
-      room_kind: 'space',
-      space_children: [
-        {
-          room_id: '!child:example.org',
-          via: [],
-          order: null,
-          origin_server_ts: 1,
-          suggested: false,
-        },
-      ],
-    }),
+    makeRoom({ room_id: '!a:example.org', name: 'A' }),
+    makeRoom({ room_id: '!b:example.org', name: 'B' }),
+    makeRoom({ room_id: '!c:example.org', name: 'C', is_direct: true }),
+    makeRoom({ room_id: '!d:example.org', name: 'D', is_direct: true }),
   ];
-
-  await mountNav();
-  expect(roomNames()).toEqual(['Plain', 'Direct', 'Child']);
-});
-
-test('home orders rooms by their latest event', async () => {
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!quiet:example.org', name: 'Quiet', latest_event: latestAt(10) }),
-    makeRoom({ room_id: '!silent:example.org', name: 'Silent' }),
-    makeRoom({ room_id: '!busy:example.org', name: 'Busy', latest_event: latestAt(30) }),
-  ];
-
-  await mountNav();
-  expect(roomNames()).toEqual(['Busy', 'Quiet', 'Silent']);
-});
-
-test('home and the direct page keep their own sort order', async () => {
-  setPreference('roomSort', 'name-asc');
-  setPreference('directSort', 'recent');
-  const dm = (id: string, name: string, at: number) =>
-    makeRoom({ room_id: id, name, is_direct: true, latest_event: latestAt(at) });
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!b:example.org', name: 'B', latest_event: latestAt(30) }),
-    makeRoom({ room_id: '!a:example.org', name: 'A', latest_event: latestAt(10) }),
-    dm('!y:example.org', 'Y', 10),
-    dm('!z:example.org', 'Z', 30),
-  ];
+  listSections(
+    sectionView('home', { rooms: ['!d:example.org', '!b:example.org', '!c:example.org'] }),
+    sectionView('unspaced', { rooms: ['!b:example.org', '!a:example.org'] }),
+    sectionView('direct', { rooms: ['!d:example.org', '!c:example.org'] })
+  );
 
   const home = await mountNav();
-  expect(roomNames()).toEqual(['A', 'B', 'Y', 'Z']);
+  expect(roomNames()).toEqual(['D', 'B', 'C']);
   home.unmount();
+
+  visit('/rooms');
+  const unspaced = await mountNav();
+  expect(roomNames()).toEqual(['B', 'A']);
+  unspaced.unmount();
 
   visit('/direct');
   await mountNav();
-  expect(roomNames()).toEqual(['Z', 'Y']);
+  expect(roomNames()).toEqual(['D', 'C']);
+});
+
+test('rows past the first screens render their details once they come near the viewport', async () => {
+  const callbacks = new Map<Element, IntersectionObserverCallback>();
+  globalThis.IntersectionObserver = class {
+    #callback: IntersectionObserverCallback;
+    disconnect = () => {};
+    unobserve = () => {};
+    takeRecords = () => [];
+    root = null;
+    rootMargin = '';
+    thresholds = [];
+    constructor(callback: IntersectionObserverCallback) {
+      this.#callback = callback;
+    }
+    observe(node: Element) {
+      callbacks.set(node, this.#callback);
+    }
+  } as unknown as typeof IntersectionObserver;
+  const ids = Array.from({ length: 60 }, (_, at) => `!r${String(at)}:example.org`);
+  roomsFixture.rooms = ids.map((roomId, at) =>
+    makeRoom({ room_id: roomId, name: `Room ${String(at)}` })
+  );
+  listSections(sectionView('unspaced', { rooms: ids }));
+  visit('/rooms');
+  await mountNav();
+
+  const near = document.querySelector<HTMLElement>('[data-row-key="!r0:example.org"]');
+  const far = document.querySelector<HTMLElement>('[data-row-key="!r59:example.org"]');
+  if (!near || !far) throw new Error('the rows were not rendered');
+  expect(document.querySelectorAll('[data-row-key] .room-name')).toHaveLength(60);
+  expect(near.querySelector('.room-options-slot')).not.toBeNull();
+  expect(far.querySelector('.room-options-slot')).toBeNull();
+
+  callbacks.get(far)?.(
+    [{ isIntersecting: true, target: far }] as unknown as IntersectionObserverEntry[],
+    null as never
+  );
+  await tick();
+
+  expect(far.querySelector('.room-options-slot')).not.toBeNull();
 });
 
 test('favourites sit in their own section above the rest of the list', async () => {
   roomsFixture.rooms = [
-    makeRoom({ room_id: '!busy:example.org', name: 'Busy', latest_event: latestAt(30) }),
+    makeRoom({ room_id: '!busy:example.org', name: 'Busy' }),
     makeRoom({
       room_id: '!starred:example.org',
       name: 'Starred',
       tags: ['favourite'],
-      latest_event: latestAt(10),
     }),
-    makeRoom({ room_id: '!quiet:example.org', name: 'Quiet', latest_event: latestAt(20) }),
+    makeRoom({ room_id: '!quiet:example.org', name: 'Quiet' }),
   ];
+  listSections(
+    sectionView('home', {
+      favourites: ['!starred:example.org'],
+      rooms: ['!busy:example.org', '!quiet:example.org'],
+    })
+  );
 
   await mountNav();
   const favourites = Array.from(
@@ -372,74 +433,47 @@ test('favourites sit in their own section above the rest of the list', async () 
   ).toEqual(['nav.favourites', 'nav.rooms']);
 });
 
-test('a view that stops grouping favourites keeps them in recency order', async () => {
-  visit('/rooms');
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!busy:example.org', name: 'Busy', latest_event: latestAt(30) }),
-    makeRoom({
-      room_id: '!starred:example.org',
-      name: 'Starred',
-      tags: ['favourite'],
-      latest_event: latestAt(10),
-    }),
-    makeRoom({ room_id: '!quiet:example.org', name: 'Quiet', latest_event: latestAt(20) }),
-  ];
-  setGroupsFavourites('unspaced', false);
-
-  await mountNav();
-  expect(document.querySelector('.room-list.favourites')).not.toBeInTheDocument();
-  expect(roomNames()).toEqual(['Busy', 'Quiet', 'Starred']);
-  setGroupsFavourites('unspaced', true);
-});
-
-test('a space lifts a favourite out of its subspace', async () => {
+test('a space lists the favourite the core lifted out of its subspace', async () => {
   visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
-  const edge = (roomId: string) => ({
-    room_id: roomId,
-    via: [],
-    order: null,
-    origin_server_ts: 1,
-    suggested: false,
-  });
   roomsFixture.rooms = [
-    makeRoom({
-      room_id: '!root:example.org',
-      name: 'Root',
-      room_kind: 'space',
-      space_children: [edge('!top:example.org'), edge('!nested:example.org')],
-    }),
-    makeRoom({
-      room_id: '!nested:example.org',
-      name: 'Nested',
-      room_kind: 'space',
-      space_children: [edge('!deep:example.org')],
-    }),
+    makeRoom({ room_id: '!root:example.org', name: 'Root', room_kind: 'space' }),
     makeRoom({ room_id: '!top:example.org', name: 'Top' }),
     makeRoom({ room_id: '!deep:example.org', name: 'Deep', tags: ['favourite'] }),
   ];
+  listSections(
+    sectionView('!root:example.org', {
+      favourites: ['!deep:example.org'],
+      rooms: ['!top:example.org'],
+    })
+  );
 
   await mountNav();
   expect(roomNames()).toEqual(['Deep', 'Top']);
   expect(row('Deep')).toHaveAttribute('href', '/space/!root%3Aexample.org/!deep%3Aexample.org');
 });
 
-test('home links a room to its own section', async () => {
+test('home links a room to its own section when enabled', async () => {
+  setPreference('showHome', true);
   roomsFixture.rooms = [makeRoom({ room_id: '!plain:example.org', name: 'Plain' })];
 
   await mountNav();
   expect(row('Plain')).toHaveAttribute('href', '/home/!plain%3Aexample.org');
 });
 
-test('a joined tombstoned room remains visible in the space that contains it', async () => {
-  visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+test('explore links rooms to their sections when Home is disabled', async () => {
+  visit('/explore');
+  setPreference('showHome', false);
   roomsFixture.rooms = [
+    makeRoom({ room_id: '!plain:example.org', name: 'Plain' }),
+    makeRoom({ room_id: '!dm:example.org', name: 'Chat', is_direct: true }),
+    makeRoom({ room_id: '!child:example.org', name: 'Child' }),
     makeRoom({
-      room_id: '!root:example.org',
-      name: 'Root',
+      room_id: '!space:example.org',
+      name: 'Space',
       room_kind: 'space',
       space_children: [
         {
-          room_id: '!old:example.org',
+          room_id: '!child:example.org',
           via: [],
           order: null,
           origin_server_ts: 1,
@@ -447,8 +481,27 @@ test('a joined tombstoned room remains visible in the space that contains it', a
         },
       ],
     }),
+  ];
+  listSections(
+    sectionView('home', {
+      rooms: ['!plain:example.org', '!dm:example.org', '!child:example.org'],
+    })
+  );
+
+  await mountNav();
+
+  expect(row('Plain')).toHaveAttribute('href', '/rooms/!plain%3Aexample.org');
+  expect(row('Chat')).toHaveAttribute('href', '/direct/!dm%3Aexample.org');
+  expect(row('Child')).toHaveAttribute('href', '/space/!space%3Aexample.org/!child%3Aexample.org');
+});
+
+test('a room listed by a space section links through that space', async () => {
+  visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!root:example.org', name: 'Root', room_kind: 'space' }),
     makeRoom({ room_id: '!old:example.org', name: 'Old room', is_tombstoned: true }),
   ];
+  listSections(sectionView('!root:example.org', { rooms: ['!old:example.org'] }));
 
   await mountNav();
 
@@ -489,10 +542,15 @@ test('expanded room disclosures do not use the active-route surface', async () =
     }),
     makeRoom({ room_id: '!room:example.org', name: 'Current room' }),
   ];
+  listSections(
+    sectionView('!root:example.org', {
+      subspaces: [treeCategory('!nested:example.org', 0, [treeRoom('!room:example.org', 1)])],
+    })
+  );
 
   await mountNav();
-  const current = screen.getAllByRole('link', { current: 'page' });
-  const expandedDisclosures = screen.getAllByRole('button', { expanded: true });
+  const current = screen.getAllByRole('treeitem', { current: 'page' });
+  const expandedDisclosures = screen.getAllByRole('treeitem', { expanded: true });
 
   expect(current).toHaveLength(1);
   expect(current[0]).toHaveClass('room-row', 'selection-current');
@@ -500,86 +558,6 @@ test('expanded room disclosures do not use the active-route surface', async () =
   expect(
     Array.from(expandedDisclosures).every((node) => !node.classList.contains('selection-open'))
   ).toBe(true);
-});
-
-test('home leaves out invited and knocked rooms', async () => {
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!joined:example.org', name: 'Joined' }),
-    makeRoom({ room_id: '!invited:example.org', name: 'Invited', state: 'invited' }),
-    makeRoom({ room_id: '!knocked:example.org', name: 'Knocked', state: 'knocked' }),
-  ];
-
-  await mountNav();
-  expect(roomNames()).toEqual(['Joined']);
-});
-
-test('the unspaced section leaves out rooms a joined space claims', async () => {
-  visit('/rooms');
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!loose:example.org', name: 'Loose' }),
-    makeRoom({ room_id: '!claimed:example.org', name: 'Claimed' }),
-    makeRoom({
-      room_id: '!space:example.org',
-      name: 'Space',
-      room_kind: 'space',
-      space_children: [
-        {
-          room_id: '!claimed:example.org',
-          via: [],
-          order: null,
-          origin_server_ts: 1,
-          suggested: false,
-        },
-      ],
-    }),
-  ];
-
-  await mountNav();
-  expect(roomNames()).toEqual(['Loose']);
-  expect(row('Loose')).toHaveAttribute('href', '/rooms/!loose%3Aexample.org');
-});
-
-test('a claim from a space that is not joined keeps the room in the unspaced section', async () => {
-  visit('/rooms');
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!claimed:example.org', name: 'Claimed' }),
-    makeRoom({
-      room_id: '!space:example.org',
-      name: 'Space',
-      room_kind: 'space',
-      state: 'invited',
-      space_children: [
-        {
-          room_id: '!claimed:example.org',
-          via: [],
-          order: null,
-          origin_server_ts: 1,
-          suggested: false,
-        },
-      ],
-    }),
-  ];
-
-  await mountNav();
-  expect(roomNames()).toEqual(['Claimed']);
-});
-
-test('direct page lists joined direct rooms only', async () => {
-  visit('/direct');
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!dm:example.org', name: 'DM', is_direct: true }),
-    makeRoom({
-      room_id: '!invited-dm:example.org',
-      name: 'Invited DM',
-      is_direct: true,
-      direct_targets: [],
-      state: 'invited',
-    }),
-    makeRoom({ room_id: '!plain:example.org', name: 'Plain' }),
-  ];
-
-  await mountNav();
-  expect(roomNames()).toEqual(['DM']);
 });
 
 test('direct page offers starting a chat and searching instead of creating or browsing rooms', async () => {
@@ -595,41 +573,22 @@ test('direct page offers starting a chat and searching instead of creating or br
   expect(document.querySelector('.empty-rooms p')?.textContent).toBe('nav.chatsEmpty');
 });
 
-test('does not show a badge for a muted room', async () => {
+test('a row shows the badge the core gives it and none otherwise', async () => {
   roomsFixture.rooms = [
-    makeRoom({
-      room_id: '!muted:example.org',
-      name: 'Muted',
-      unread: 3,
-      notification: { room: 'mute', default: 'all' },
-    }),
-  ];
-
-  await mountNav();
-  expect(row('Muted').querySelector('.unread-badge')).not.toBeInTheDocument();
-});
-
-test('a mentions-only room keeps its unread marker and badges its mentions', async () => {
-  roomsFixture.rooms = [
+    makeRoom({ room_id: '!silent:example.org', name: 'Silent', unread: 3 }),
     makeRoom({ room_id: '!quiet:example.org', name: 'Quiet', unread: 6 }),
     makeRoom({ room_id: '!pinged:example.org', name: 'Pinged', unread: 6, highlight: 2 }),
   ];
+  listBadges({
+    '!quiet:example.org': { unread: 6 },
+    '!pinged:example.org': { unread: 2, highlight: 2 },
+  });
 
   await mountNav();
+  expect(row('Silent').querySelector('.unread-badge')).not.toBeInTheDocument();
   expect(row('Quiet').querySelector('.unread-badge-dot')).toBeInTheDocument();
+  expect(row('Quiet').querySelector('.unread-badge-count')).not.toBeInTheDocument();
   expect(within(row('Pinged')).getByText('2')).toHaveClass('unread-badge-count');
-});
-
-test('counts mentions in the badge, and quiet traffic only dots', async () => {
-  roomsFixture.rooms = [
-    makeRoom({ room_id: '!mention:example.org', name: 'Mentioned', unread: 9, highlight: 2 }),
-    makeRoom({ room_id: '!plain:example.org', name: 'Plain', unread: 5 }),
-  ];
-
-  await mountNav();
-  expect(within(row('Mentioned')).getByText('2')).toHaveClass('unread-badge-count');
-  expect(row('Plain').querySelector('.unread-badge-count')).not.toBeInTheDocument();
-  expect(row('Plain').querySelector('.unread-badge-dot')).toBeInTheDocument();
 });
 
 test('message search from a space is scoped to that space', async () => {
@@ -685,8 +644,117 @@ test('a space list header shows the space banner above it', async () => {
   expect(core.rpc.room_state.banner).toHaveBeenCalledWith({ room_id: '!space:example.org' });
   expect(document.querySelector('.room-banner')).not.toBeNull();
   expect(document.querySelector('.room-nav-header')).toHaveClass('on-banner');
+});
+
+async function expectBanner(source: string, name: string): Promise<void> {
+  await user.click(await screen.findByRole('button', { name: `common.viewBanner:${name}` }));
+  expect(mediaViewerState.standaloneItem).toMatchObject({ source, filename: name });
+  mediaViewerState.close();
+}
+
+test.each([
+  ['prefers the room banner', 'room', 'space', 'room', 'General'],
+  ['falls back to the space banner', null, 'space', 'space', 'Design'],
+  ['shows a room banner when the space has none', 'room', null, 'room', 'General'],
+  ['hides the banner when neither room nor space has one', null, null, null, null],
+])('%s', async (_, roomBanner, spaceBanner, expected, name) => {
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!space:example.org', name: 'Design', room_kind: 'space' }),
+    makeRoom({
+      room_id: '!room:example.org',
+      name: 'General',
+      canonical_alias: '#general:example.org',
+    }),
+  ];
+  visit('/space/!space:example.org/%23general:example.org', {
+    spaceId: '!space:example.org',
+    roomId: '#general:example.org',
+  });
+  core.rpc.room_state.banner.mockImplementation(({ room_id }) => {
+    const banner = room_id === '!space:example.org' ? spaceBanner : roomBanner;
+    return Promise.resolve(banner === null ? null : `mxc://example.org/${banner}`);
+  });
+
+  await mountNav();
+  await tick();
+  await tick();
+
+  expect(core.rpc.room_state.banner).toHaveBeenCalledWith({ room_id: '!room:example.org' });
+  if (expected !== null) {
+    await expectBanner(`mxc://example.org/${expected}`, name);
+  } else {
+    expect(document.querySelector('.room-banner')).toBeNull();
+    expect(document.querySelector('.room-nav-header')).not.toHaveClass('on-banner');
+  }
+});
+
+test('room switches ignore late banner responses and reuse the space fallback', async () => {
+  const first = Promise.withResolvers<string | null>();
+  const revisit = Promise.withResolvers<string | null>();
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!space:example.org', name: 'Design', room_kind: 'space' }),
+    makeRoom({ room_id: '!first:example.org', name: 'First' }),
+    makeRoom({ room_id: '!second:example.org', name: 'Second' }),
+  ];
+  visit('/space/!space:example.org', { spaceId: '!space:example.org' });
+  core.rpc.room_state.banner.mockImplementation(({ room_id }) => {
+    if (room_id === '!space:example.org') return Promise.resolve('mxc://example.org/space');
+    return room_id === '!first:example.org' ? first.promise : Promise.resolve(null);
+  });
+
+  const view = await mountNav({ roomId: '!first:example.org' });
+  await expectBanner('mxc://example.org/space', 'Design');
+  await view.rerender({ roomId: '!second:example.org' });
+  first.resolve('mxc://example.org/stale');
+  await tick();
+  await tick();
+  await expectBanner('mxc://example.org/space', 'Design');
+
+  core.rpc.room_state.banner.mockImplementation(() => revisit.promise);
+  await view.rerender({ roomId: '!first:example.org' });
+  await expectBanner('mxc://example.org/space', 'Design');
+  revisit.resolve('mxc://example.org/current');
+  await expectBanner('mxc://example.org/current', 'First');
+  expect(
+    core.rpc.room_state.banner.mock.calls.filter(
+      ([params]) => params.room_id === '!space:example.org'
+    )
+  ).toHaveLength(1);
 
   core.rpc.room_state.banner.mockResolvedValue(null);
+  await view.rerender({ roomId: '!second:example.org' });
+  await expectBanner('mxc://example.org/space', 'Design');
+
+  await view.rerender({ roomId: undefined });
+  await expectBanner('mxc://example.org/space', 'Design');
+});
+
+test('refreshes a changed room banner and restores the space banner when it is removed', async () => {
+  let roomBanner: string | null = 'mxc://example.org/original';
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!space:example.org', name: 'Design', room_kind: 'space' }),
+    makeRoom({ room_id: '!room:example.org', name: 'General' }),
+  ];
+  visit('/space/!space:example.org/!room:example.org', {
+    spaceId: '!space:example.org',
+    roomId: '!room:example.org',
+  });
+  core.rpc.room_state.banner.mockImplementation(({ room_id }) =>
+    Promise.resolve(room_id === '!space:example.org' ? 'mxc://example.org/space' : roomBanner)
+  );
+
+  await mountNav();
+  await expectBanner('mxc://example.org/original', 'General');
+
+  roomBanner = 'mxc://example.org/replacement';
+  bannerChanged();
+  await tick();
+  await tick();
+  await expectBanner(roomBanner, 'General');
+
+  roomBanner = null;
+  bannerChanged();
+  await expectBanner('mxc://example.org/space', 'Design');
 });
 
 test('a space list header wears the space avatar when collapsed', async () => {
@@ -754,6 +822,7 @@ test('a collapsed row carries the unread badge of its room', async () => {
     makeRoom({ room_id: '!unread:example.org', name: 'Unread', unread: 4 }),
     makeRoom({ room_id: '!read:example.org', name: 'Read' }),
   ];
+  listBadges({ '!unread:example.org': { unread: 4 } });
 
   await mountNav({ collapsed: true });
   const rows = Array.from(document.querySelectorAll('.room-row'));
@@ -782,6 +851,7 @@ test('direct messages and unspaced rooms without an avatar show their initial', 
     makeRoom({ room_id: '!dm:example.org', name: 'alice', is_direct: true }),
     makeRoom({ room_id: '!room:example.org', name: 'Garden' }),
   ];
+  listSections(sectionView('unspaced', { rooms: ['!room:example.org'] }));
 
   const home = await mountNav({ collapsed: true });
   const homeIcons = Array.from(document.querySelectorAll('.room-row .room-avatar-icon'));
@@ -796,7 +866,7 @@ test('direct messages and unspaced rooms without an avatar show their initial', 
   expect(icon?.querySelector('svg')).toBeNull();
 });
 
-test('an active call in a text room shows the live count without the voice icon', async () => {
+test('an active call in a text room shows its participants and count in the room row', async () => {
   roomsFixture.rooms = [
     makeRoom({
       room_id: '!plain:example.org',
@@ -809,16 +879,18 @@ test('an active call in a text room shows the live count without the voice icon'
   expect(document.querySelector('.room-list .room-avatar-icon')?.classList.contains('voice')).toBe(
     false
   );
+  expect(row('Plain').querySelectorAll('.voice-face')).toHaveLength(1);
   expect(document.querySelector('.voice-live .status-badge')?.textContent).toBe('1');
 });
 
-test('a live voice room lists its call members', async () => {
+test('a live voice room shows each participant avatar once in the list beneath it', async () => {
+  setPreference('voiceParticipantPlacement', 'below');
   observeImmediately();
   core.userProfile.mockImplementation((userId: string) =>
     Promise.resolve({
       user_id: userId,
       display_name: userId === '@alice:example.org' ? 'Alice' : 'Bob',
-      avatar_url: null,
+      avatar_url: `https://example.org/avatars/${userId}.png`,
     })
   );
   roomsFixture.rooms = [
@@ -835,9 +907,49 @@ test('a live voice room lists its call members', async () => {
     expect(document.querySelector('.call-participant-list')?.textContent).toContain('Alice');
   });
 
-  expect(document.querySelectorAll('.call-participant-list .avatar-root')).toHaveLength(2);
-  expect(core.userProfile).toHaveBeenCalledWith('@alice:example.org');
-  expect(core.userProfile).toHaveBeenCalledWith('@bob:example.org');
+  const list = screen.getByRole('list', { name: 'nav.voiceLive:2' });
+  for (const name of ['Alice', 'Bob']) {
+    const avatarUrl = `https://example.org/avatars/@${name.toLowerCase()}:example.org.png`;
+    const avatar = within(list).getByRole('button', { name }).querySelector('img');
+    expect(avatar).toHaveAttribute('src', avatarUrl);
+    expect(document.querySelectorAll(`img[src="${avatarUrl}"]`)).toHaveLength(1);
+  }
+});
+
+test('switching the voice participant layout moves the avatars and keeps the full count', async () => {
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!voice:example.org',
+      name: 'Voice',
+      room_kind: 'voice',
+      call_participants: [
+        '@alice:example.org',
+        '@bob:example.org',
+        '@cam:example.org',
+        '@dee:example.org',
+      ],
+    }),
+  ];
+  await mountNav();
+
+  const defaultList = screen.getByRole('list', { name: 'nav.voiceLive:4' });
+  expect(within(defaultList).getAllByRole('button')).toHaveLength(4);
+  const defaultSummary = within(row('Voice')).getByRole('img', { name: 'nav.voiceLive:4' });
+  expect(defaultSummary.querySelectorAll('.voice-face')).toHaveLength(3);
+  expect(defaultSummary.querySelector('.status-badge')).toHaveTextContent('4');
+
+  setPreference('voiceParticipantPlacement', 'inline');
+  await tick();
+  expect(screen.queryByRole('list', { name: 'nav.voiceLive:4' })).toBeNull();
+  const summary = within(row('Voice')).getByRole('img', { name: 'nav.voiceLive:4' });
+  expect(summary.querySelectorAll('.voice-face')).toHaveLength(3);
+  expect(summary.querySelector('.status-badge')).toHaveTextContent('4');
+
+  setPreference('voiceParticipantPlacement', 'below');
+  await tick();
+  const list = screen.getByRole('list', { name: 'nav.voiceLive:4' });
+  expect(within(list).getAllByRole('button')).toHaveLength(4);
+  expect(row('Voice').querySelector('.voice-face')).toBeNull();
 });
 
 test('a participant sharing their screen is tagged live to people outside the call', async () => {
@@ -870,7 +982,7 @@ test('a participant sharing their screen is tagged live to people outside the ca
   });
 });
 
-test('a collapsed live voice room keeps participant avatars labelled', async () => {
+test('a collapsed live voice room keeps participants visible in all layouts', async () => {
   observeImmediately();
   core.userProfile.mockResolvedValue({ display_name: 'Alice', avatar_url: null });
   roomsFixture.rooms = [
@@ -888,6 +1000,18 @@ test('a collapsed live voice room keeps participant avatars labelled', async () 
       document.querySelector('.call-participant-list .avatar-root')?.getAttribute('aria-label')
     ).toBe('Alice');
   });
+  expect(screen.getByRole('treeitem', { name: 'Voice' }).querySelector('.voice-face')).toBeNull();
+
+  setPreference('voiceParticipantPlacement', 'inline');
+  await tick();
+  expect(screen.queryByRole('list', { name: 'nav.voiceLive:1' })).toBeNull();
+  const roomLink = screen.getByRole('treeitem', { name: 'Voice, nav.voiceLive:1' });
+  expect(roomLink.querySelector('.voice-face')).toBeInTheDocument();
+
+  setPreference('voiceParticipantPlacement', 'below');
+  await tick();
+  expect(screen.getByRole('list', { name: 'nav.voiceLive:1' })).toBeInTheDocument();
+  expect(screen.getByRole('treeitem', { name: 'Voice' }).querySelector('.voice-face')).toBeNull();
 });
 
 test('a user in a voice room on two devices is listed once per device', async () => {
@@ -952,6 +1076,38 @@ test('a DM row shows the peer status once its profile arrives', async () => {
   expect(roomTopics()).toEqual(['\u{1F680}Shipping']);
 });
 
+test('does not show our own or an arbitrary target status on a DM row', async () => {
+  visit('/direct');
+  presenceFixture.entry = { statusMessage: 'My status' };
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!self:example.org',
+      name: 'Self',
+      is_direct: true,
+      direct_targets: ['@me:example.org'],
+    }),
+    makeRoom({
+      room_id: '!group:example.org',
+      name: 'Group',
+      is_direct: true,
+      direct_targets: ['@alice:example.org', '@bob:example.org'],
+    }),
+  ];
+  await mountNav();
+  expect(roomTopics()).toEqual([]);
+});
+
+test('does not show a target status before the session is known', async () => {
+  visit('/direct');
+  core.session = null;
+  presenceFixture.entry = { statusMessage: 'My status' };
+  roomsFixture.rooms = [
+    makeRoom({ name: 'Chat', is_direct: true, direct_targets: ['@me:example.org'] }),
+  ];
+  await mountNav();
+  expect(roomTopics()).toEqual([]);
+});
+
 test('a DM row falls back to the peer presence message, and a topic still wins', async () => {
   visit('/direct');
   presenceFixture.entry = { statusMessage: 'In a meeting' };
@@ -1000,6 +1156,61 @@ test('a DM topic is hidden in favour of the peer status when topics are turned o
   expect(roomTopics()).toEqual(['In a meeting']);
 });
 
+test.each([
+  ['off', []],
+  ['direct', ['See you at noon']],
+  ['rooms', ['Deploy is green']],
+  ['all', ['See you at noon', 'Deploy is green']],
+] as const)(
+  'message previews set to %s show the latest message under the name',
+  async (mode, expected) => {
+    visit('/home');
+    setPreference('showHome', true);
+    setPreference('messagePreviews', mode);
+    roomsFixture.rooms = [
+      makeRoom({
+        room_id: '!dm:example.org',
+        name: 'Bob',
+        is_direct: true,
+        direct_targets: ['@bob:example.org'],
+        latest_event: latest('See you at noon', 2),
+      }),
+      makeRoom({
+        room_id: '!ops:example.org',
+        name: 'Ops',
+        latest_event: latest('Deploy is green', 1),
+      }),
+    ];
+    await mountNav();
+    await tick();
+
+    expect(roomTopics()).toEqual(expected);
+  }
+);
+
+test('a message preview replaces the DM topic', async () => {
+  visit('/direct');
+  setPreference('messagePreviews', 'direct');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!dm:example.org',
+      name: 'Bob',
+      topic: 'Ship logs',
+      is_direct: true,
+      direct_targets: ['@bob:example.org'],
+      latest_event: latest('See you at noon', 1),
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  expect(roomTopics()).toEqual(['See you at noon']);
+});
+
+function latest(body: string, timestamp: number): LatestEventView {
+  return { sender: '@bob:example.org', body, timestamp, sending: false, event_id: `$${timestamp}` };
+}
+
 test('hovering a collapsed room row shows its full name in a tooltip', async () => {
   roomsFixture.rooms = [
     makeRoom({ room_id: '!long:example.org', name: 'A very long room name that truncates' }),
@@ -1020,6 +1231,28 @@ test('hovering a collapsed room row shows its full name in a tooltip', async () 
   vi.useRealTimers();
 });
 
+test('hovering a room row with a published address shows the address in a tooltip', async () => {
+  visit('/rooms');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!lobby:example.org',
+      name: 'Lobby',
+      canonical_alias: '#lobby:example.org',
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  vi.useFakeTimers();
+  const hover = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
+  await hover.hover(row('Lobby'));
+  await vi.advanceTimersByTimeAsync(400);
+  await tick();
+
+  expect(document.querySelector('.tooltip')?.textContent.trim()).toBe('#lobby:example.org');
+  vi.useRealTimers();
+});
+
 test('a muted room marked unread by hand keeps its dot and no count', async () => {
   roomsFixture.rooms = [
     makeRoom({
@@ -1030,6 +1263,7 @@ test('a muted room marked unread by hand keeps its dot and no count', async () =
       notification: { room: 'mute', default: 'all' },
     }),
   ];
+  listBadges({ '!muted:example.org': { marked: true } });
 
   await mountNav();
   expect(row('Muted').querySelector('.unread-badge-dot')).toBeInTheDocument();
@@ -1045,6 +1279,10 @@ test('a room set to all messages badges its unread messages in green', async () 
     makeRoom({ room_id: '!loud:example.org', name: 'Loud', unread: 6, notifying: 6 }),
     makeRoom({ room_id: '!quiet:example.org', name: 'Quiet', unread: 6 }),
   ];
+  listBadges({
+    '!loud:example.org': { unread: 6, notifying: 6 },
+    '!quiet:example.org': { unread: 6 },
+  });
 
   await mountNav();
   expect(within(row('Loud')).getByText('6')).toHaveClass(
@@ -1067,6 +1305,11 @@ test('a room whose parent space we are not in offers to join it', async () => {
   await mountNav();
 
   await openMenu('Plain');
+  const joinSpace = await screen.findByRole('menuitem', { name: 'room.menuJoinSpace' });
+  await vi.waitFor(() => {
+    expect(joinSpace).not.toHaveAttribute('data-disabled');
+  });
+  await user.click(joinSpace);
   const join = await screen.findByRole('menuitem', {
     name: 'room.menuJoinParentSpace:Parent',
   });
@@ -1089,7 +1332,7 @@ test('a row options button opens the shared room menu and closes it again', asyn
   ];
   await mountNav();
 
-  const triggers = screen.getAllByRole('button', { name: 'room.menuLabel' });
+  const triggers = screen.getAllByLabelText('room.menuLabel');
   expect(triggers).toHaveLength(2);
   expect(screen.queryByRole('menu')).toBeNull();
 
@@ -1113,17 +1356,17 @@ test('a row options button opens the shared room menu and closes it again', asyn
 
 test('closing the rooms section hides read rows without unmounting them', async () => {
   roomsFixture.rooms = [
-    makeRoom({ room_id: '!read:example.org', name: 'Read', latest_event: latestAt(2) }),
+    makeRoom({ room_id: '!read:example.org', name: 'Read' }),
     makeRoom({
       room_id: '!unread:example.org',
       name: 'Unread',
       unread: 3,
-      latest_event: latestAt(1),
     }),
   ];
+  listBadges({ '!unread:example.org': { unread: 3 } });
   await mountNav();
   const readRow = row('Read');
-  const heading = screen.getByRole('button', { name: 'nav.rooms' });
+  const heading = screen.getByRole('treeitem', { name: 'nav.rooms' });
 
   await user.click(heading);
 
@@ -1135,4 +1378,136 @@ test('closing the rooms section hides read rows without unmounting them', async 
 
   expect(row('Read')).toBe(readRow);
   expect(readRow.closest('.room-row-wrap')).not.toHaveClass('closed-row');
+});
+
+test('the replaced rooms section collapses and stays collapsed', async () => {
+  visit('/rooms');
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!old:example.org', name: 'Old room', is_tombstoned: true }),
+  ];
+
+  const nav = await mountNav();
+  const heading = screen.getByRole('button', { name: 'room.replacedTitle 1' });
+  expect(heading).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByText('Old room', { selector: '.replaced-name' })).toBeInTheDocument();
+
+  await user.click(heading);
+  expect(heading).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.queryByText('Old room', { selector: '.replaced-name' })).toBeNull();
+  nav.unmount();
+
+  await mountNav();
+  expect(screen.getByRole('button', { name: 'room.replacedTitle 1' })).toHaveAttribute(
+    'aria-expanded',
+    'false'
+  );
+  await user.click(screen.getByRole('button', { name: 'room.replacedTitle 1' }));
+});
+
+test('the room list is one tree with a single tab stop and the row actions out of the tab order', async () => {
+  roomsFixture.rooms = [
+    makeRoom({ room_id: '!a:example.org', name: 'Alpha' }),
+    makeRoom({ room_id: '!b:example.org', name: 'Beta' }),
+  ];
+  await mountNav();
+
+  const tree = screen.getByRole('tree', { name: 'nav.rooms' });
+  expect(
+    within(tree)
+      .getAllByRole('treeitem')
+      .filter((item) => item.tabIndex === 0)
+  ).toHaveLength(1);
+  expect(row('Alpha')).toHaveAttribute('aria-level', '2');
+  for (const trigger of screen.getAllByLabelText('room.menuLabel')) {
+    expect(trigger).toHaveAttribute('tabindex', '-1');
+  }
+
+  screen.getByRole('treeitem', { name: 'nav.rooms' }).focus();
+  await user.keyboard('{ArrowDown}');
+  expect(row('Alpha')).toHaveFocus();
+  await user.keyboard('{ArrowLeft}');
+  expect(screen.getByRole('treeitem', { name: 'nav.rooms' })).toHaveFocus();
+  await user.keyboard('{ArrowLeft}');
+  expect(screen.getByRole('treeitem', { name: 'nav.rooms' })).toHaveAttribute(
+    'aria-expanded',
+    'false'
+  );
+});
+
+test('a bridged room carries its network on the avatar, a native one does not', async () => {
+  visit('/direct');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!discord:example.org',
+      name: 'Friend',
+      is_direct: true,
+      bridge: { network: 'Discord', avatar_url: 'mxc://example.org/discord' },
+    }),
+    makeRoom({ room_id: '!native:example.org', name: 'Native', is_direct: true }),
+  ];
+  await mountNav();
+
+  const rowOf = (name: string) => screen.getByText(name).closest<HTMLElement>('[role="treeitem"]');
+  expect(
+    within(rowOf('Friend') as HTMLElement).getByRole('img', { name: 'nav.bridgedFrom:Discord' })
+  ).toBeInTheDocument();
+  expect(rowOf('Native')?.querySelector('.room-bridge')).toBeNull();
+});
+
+test('bridge badges leave the room icons when the preference is off', async () => {
+  visit('/direct');
+  setPreference('showBridgeBadges', false);
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!discord:example.org',
+      name: 'Friend',
+      is_direct: true,
+      bridge: { network: 'Discord', avatar_url: null },
+    }),
+  ];
+  await mountNav();
+
+  expect(screen.getByText('Friend')).toBeInTheDocument();
+  expect(screen.queryByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeNull();
+  setPreference('showBridgeBadges', true);
+});
+
+test('a space can hide bridge badges on its rooms for every member', async () => {
+  visit('/space/!root%3Aexample.org', { spaceId: '!root:example.org' });
+  core.rpc.room_state.event.mockImplementation(({ room_id, event_type }) =>
+    Promise.resolve(
+      room_id === '!root:example.org' && event_type === 'moe.sable.space.bridge_badges'
+        ? { hidden: true }
+        : null
+    )
+  );
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!root:example.org',
+      name: 'Root',
+      room_kind: 'space',
+      space_children: [
+        {
+          room_id: '!leaf:example.org',
+          via: [],
+          order: null,
+          origin_server_ts: 1,
+          suggested: false,
+        },
+      ],
+    }),
+    makeRoom({
+      room_id: '!leaf:example.org',
+      name: 'Leaf',
+      bridge: { network: 'Discord', avatar_url: null },
+    }),
+  ];
+  listSections(sectionView('!root:example.org', { rooms: ['!leaf:example.org'] }));
+  await mountNav();
+  await tick();
+
+  expect(screen.getByText('Leaf')).toBeInTheDocument();
+  expect(screen.queryByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeNull();
+  core.rpc.room_state.event.mockReset();
+  core.rpc.room_state.event.mockResolvedValue(null);
 });

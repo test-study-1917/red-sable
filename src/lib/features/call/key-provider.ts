@@ -31,7 +31,7 @@ export class MatrixKeyProvider extends BaseKeyProvider {
   readonly #listeners = new Set<(state: KeyProviderState) => void>();
 
   constructor() {
-    super({ ratchetWindowSize: 10, keyringSize: 256, sharedKey: false });
+    super({ ratchetWindowSize: 0, keyringSize: 256, sharedKey: false, failureTolerance: -1 });
   }
 
   reset(): void {

@@ -6,7 +6,8 @@ import { afterEach, expect, test, vi } from 'vitest';
 
 import VerificationQrScanner from './VerificationQrScanner.svelte';
 
-vi.mock('jsqr', () => ({ default: vi.fn(() => null) }));
+const decode = vi.hoisted(() => vi.fn<() => { binaryData: number[] } | null>(() => null));
+vi.mock('jsqr', () => ({ default: decode }));
 
 function camera(deviceId: string) {
   const stop = vi.fn();
@@ -15,10 +16,20 @@ function camera(deviceId: string) {
 }
 
 function setup() {
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
-    {} as CanvasRenderingContext2D
-  );
-  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    drawImage: vi.fn(),
+    getImageData: () => ({ data: new Uint8ClampedArray(4), width: 1, height: 1 }),
+  } as unknown as CanvasRenderingContext2D);
+  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (
+    this: HTMLMediaElement
+  ) {
+    Object.defineProperties(this, {
+      videoWidth: { configurable: true, value: 640 },
+      videoHeight: { configurable: true, value: 480 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+    });
+    return Promise.resolve();
+  });
   vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
   const front = camera('front');
   const rear = camera('rear');
@@ -35,11 +46,115 @@ function setup() {
   return { front, rear, getUserMedia, enumerateDevices, play };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  decode.mockReset().mockReturnValue(null);
+});
+
+test('releases the camera and allows retry when playback fails', async () => {
+  const { front, rear, play, getUserMedia } = setup();
+  play.mockRejectedValueOnce(new DOMException('Playback blocked', 'NotAllowedError'));
+  render(VerificationQrScanner, { onScan: vi.fn() });
+  expect(await screen.findByRole('alert')).toBeInTheDocument();
+  expect(front.stop).toHaveBeenCalledOnce();
+  expect(decode).not.toHaveBeenCalled();
+
+  await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => {
+    expect(play).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+  expect(getUserMedia).toHaveBeenLastCalledWith({
+    audio: false,
+    video: { deviceId: { exact: 'front' } },
+  });
+  expect(rear.stop).not.toHaveBeenCalled();
+});
+
+test.each(['pending playback', 'missing frames'])(
+  'releases the camera when startup times out: %s',
+  async (failure) => {
+    vi.useFakeTimers();
+    const { front, play } = setup();
+    play.mockImplementation(() =>
+      failure === 'pending playback' ? new Promise(() => {}) : Promise.resolve()
+    );
+    render(VerificationQrScanner, { onScan: vi.fn() });
+    await vi.waitFor(() => {
+      expect(play).toHaveBeenCalledOnce();
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => {
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+    });
+    expect(front.stop).toHaveBeenCalledOnce();
+    expect(decode).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+  }
+);
+
+test('ignores a playback failure after unmount', async () => {
+  const { front, play } = setup();
+  let reject!: (error: Error) => void;
+  play.mockReturnValueOnce(
+    new Promise((_, fail) => {
+      reject = fail;
+    })
+  );
+  const { unmount } = render(VerificationQrScanner, { onScan: vi.fn() });
+  await waitFor(() => {
+    expect(play).toHaveBeenCalledOnce();
+  });
+  unmount();
+  reject(new Error('Old playback failed'));
+  await Promise.resolve();
+  expect(front.stop).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+test.each(['MATRIX', 'IO_ELEMENT_MSC4388'])(
+  'scans %s codes without changing their bytes',
+  async (header) => {
+    const { front } = setup();
+    const data = [...new TextEncoder().encode(header), 0x00, 0x80, 0xff];
+    decode.mockReturnValue({ binaryData: data });
+    const onScan = vi.fn();
+    render(VerificationQrScanner, { onScan });
+
+    await waitFor(() => {
+      expect(onScan).toHaveBeenCalledExactlyOnceWith(new Uint8Array(data));
+    });
+    expect(front.stop).toHaveBeenCalledOnce();
+  }
+);
+
+test.each(['MATRI', 'IO_ELEMENT_MSC438', 'IO_ELEMENT_MSC4389', 'https://example.org'])(
+  'keeps scanning after an unrecognized header: %j',
+  async (header) => {
+    const { front } = setup();
+    decode.mockReturnValue({ binaryData: [...new TextEncoder().encode(header)] });
+    const onScan = vi.fn();
+    render(VerificationQrScanner, { onScan });
+
+    await waitFor(() => {
+      expect(decode).toHaveBeenCalled();
+    });
+    expect(onScan).not.toHaveBeenCalled();
+    expect(front.stop).not.toHaveBeenCalled();
+
+    const data = [...new TextEncoder().encode('IO_ELEMENT_MSC4388'), 0x03, 0x00];
+    decode.mockReturnValue({ binaryData: data });
+    await waitFor(() => {
+      expect(onScan).toHaveBeenCalledExactlyOnceWith(new Uint8Array(data));
+    });
+    expect(front.stop).toHaveBeenCalledOnce();
+  }
+);
 
 async function chooseRear() {
   const user = userEvent.setup();
-  const selector = await screen.findByRole('button', { name: 'Camera' });
+  const selector = await screen.findByRole('combobox', { name: 'Camera' });
   await waitFor(() => {
     expect(selector).toBeEnabled();
   });
@@ -70,9 +185,9 @@ test('keeps the selector available after a camera fails', async () => {
   render(VerificationQrScanner, { onScan: vi.fn() });
   await chooseRear();
   expect(await screen.findByRole('alert')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Camera' })).toBeEnabled();
+  expect(screen.getByRole('combobox', { name: 'Camera' })).toBeEnabled();
   const user = userEvent.setup();
-  await user.click(screen.getByRole('button', { name: 'Camera' }));
+  await user.click(screen.getByRole('combobox', { name: 'Camera' }));
   await user.click(await screen.findByRole('option', { name: 'Front camera' }));
   await waitFor(() => {
     expect(getUserMedia).toHaveBeenCalledTimes(3);
@@ -109,5 +224,5 @@ test('continues scanning if device enumeration is unavailable', async () => {
     expect(play).toHaveBeenCalled();
   });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Camera' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: 'Camera' })).not.toBeInTheDocument();
 });

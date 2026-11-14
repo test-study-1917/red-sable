@@ -6,6 +6,7 @@ import CopyIcon from 'phosphor-svelte/lib/CopyIcon';
 import DownloadIcon from 'phosphor-svelte/lib/DownloadSimpleIcon';
 import FavoriteIcon from 'phosphor-svelte/lib/HeartIcon';
 import ForwardIcon from 'phosphor-svelte/lib/ShareFatIcon';
+import GavelIcon from 'phosphor-svelte/lib/GavelIcon';
 import HistoryIcon from 'phosphor-svelte/lib/ClockCounterClockwiseIcon';
 import PinIcon from 'phosphor-svelte/lib/PushPinIcon';
 import ReportIcon from 'phosphor-svelte/lib/FlagIcon';
@@ -17,6 +18,7 @@ import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
 import LinkBreakIcon from 'phosphor-svelte/lib/LinkBreakIcon';
 import ReceiptIcon from 'phosphor-svelte/lib/EyeIcon';
 import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpLeftIcon';
+import ShareIcon from 'phosphor-svelte/lib/ShareNetworkIcon';
 import StealIcon from 'phosphor-svelte/lib/StickerIcon';
 import ThreadIcon from 'phosphor-svelte/lib/ChatCircleDotsIcon';
 import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
@@ -35,21 +37,25 @@ export type MessageActions = {
   onEdit?: () => void;
   onReproxy?: () => void;
   onDelete?: () => void;
+  onCancelSend?: () => void;
   onCopyText?: () => void;
   copyTextLabel?: string;
   onCopyLink?: () => void;
   onCopyHref?: () => void;
+  onShareHref?: () => void;
   onPin?: () => void;
   onBookmark?: () => void;
   onForward?: () => void;
   onRemoveLinkPreviews?: () => void;
   onDownload?: () => void;
+  onSaveToPhotos?: () => void;
   onFavoriteGif?: () => void;
   gifFavorited?: boolean;
   onStealEmotes?: () => void;
   onDownloadEmotes?: () => void;
   stealCount?: number;
   onReport?: () => void;
+  onMeowlnirBan?: () => void;
   onViewSource?: () => void;
   pinned?: boolean;
   bookmarked?: boolean;
@@ -58,7 +64,8 @@ export type MessageActions = {
 export type MessageMenuRow = {
   key: string;
   label: string;
-  icon: Component;
+  icon: Component<{ class?: string }>;
+  mirrored?: boolean;
   run: () => void;
   destructive?: boolean;
   separated?: boolean;
@@ -76,7 +83,13 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
     });
   }
   if (actions.onReply) {
-    rows.push({ key: 'reply', label: 'timeline.reply', icon: ReplyIcon, run: actions.onReply });
+    rows.push({
+      key: 'reply',
+      label: 'timeline.reply',
+      icon: ReplyIcon,
+      mirrored: true,
+      run: actions.onReply,
+    });
   }
   if (actions.onOpenThread) {
     rows.push({
@@ -113,6 +126,14 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onCopyHref,
     });
   }
+  if (actions.onShareHref) {
+    rows.push({
+      key: 'share-href',
+      label: 'timeline.shareLink',
+      icon: ShareIcon,
+      run: actions.onShareHref,
+    });
+  }
   if (actions.onCopyLink) {
     rows.push({
       key: 'link',
@@ -142,6 +163,7 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       key: 'forward',
       label: 'timeline.forwardMessage',
       icon: ForwardIcon,
+      mirrored: true,
       run: actions.onForward,
     });
   }
@@ -159,6 +181,14 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       label: 'common.download',
       icon: DownloadIcon,
       run: actions.onDownload,
+    });
+  }
+  if (actions.onSaveToPhotos) {
+    rows.push({
+      key: 'save-to-photos',
+      label: 'viewer.saveToPhotos',
+      icon: DownloadIcon,
+      run: actions.onSaveToPhotos,
     });
   }
   if (actions.onFavoriteGif) {
@@ -233,6 +263,25 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       icon: ReportIcon,
       run: actions.onReport,
       separated: true,
+    });
+  }
+  if (actions.onMeowlnirBan) {
+    rows.push({
+      key: 'meowlnir-ban',
+      label: 'timeline.meowlnirBanSender',
+      icon: GavelIcon,
+      run: actions.onMeowlnirBan,
+      destructive: true,
+      separated: !actions.onReport,
+    });
+  }
+  if (actions.onCancelSend) {
+    rows.push({
+      key: 'cancel-send',
+      label: 'timeline.cancelSend',
+      icon: TrashIcon,
+      run: actions.onCancelSend,
+      destructive: true,
     });
   }
   if (actions.onDelete) {

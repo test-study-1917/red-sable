@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import type { MemberView } from '#src/generated/protocol';
   import { Dialog } from 'bits-ui';
   import { innerWidth } from 'svelte/reactivity/window';
@@ -6,13 +7,15 @@
   import FunnelIcon from 'phosphor-svelte/lib/FunnelIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
 
-  import { i18n } from '#lib/i18n.js';
+  import { useCoreClient } from '#lib/core/context.js';
+  import { currentLocale, i18n } from '#lib/i18n.js';
+  import { panelIn, panelOut, usePanelStage } from '#lib/ui/motion.js';
+  import { readText, writeText } from '#lib/platform/local-json.js';
   import { usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
   import PanelHeader from '#lib/ui/primitives/PanelHeader.svelte';
-  import PanelHeaderButton from '#lib/ui/primitives/PanelHeaderButton.svelte';
   import ResizeHandle from '#lib/ui/primitives/ResizeHandle.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import { whenVisible } from '#lib/ui/when-visible.js';
@@ -25,6 +28,7 @@
     DEFAULT_ALWAYS_LISTED_FROM,
     INITIAL_MEMBER_ROWS,
     MEMBERSHIP_FILTERS,
+    MEMBERSHIP_FILTER_EMPTY_MESSAGES,
     MEMBERSHIP_FILTER_LABELS,
     MEMBER_ROWS_STEP,
     MEMBER_SORTS,
@@ -41,6 +45,7 @@
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
   interface Props {
+    roomId?: string;
     members: readonly MemberView[];
     loading: boolean;
     modal?: boolean;
@@ -50,11 +55,11 @@
     powerTags?: PowerLevelTagMap | null;
     alwaysListedFrom?: number | null;
     loadMembership?: ((membership: MemberView['membership']) => Promise<MemberView[]>) | null;
-    onClose: () => void;
     onMemberProfile: (userId: string, anchor: HTMLElement) => void;
   }
 
   let {
+    roomId,
     members,
     loading,
     modal = false,
@@ -64,9 +69,10 @@
     powerTags = {},
     alwaysListedFrom = null,
     loadMembership = null,
-    onClose,
     onMemberProfile,
   }: Props = $props();
+  const stage = usePanelStage();
+  const core = useCoreClient();
   const presenceStore = usePresenceStore();
 
   function connected(userId: string): boolean {
@@ -85,7 +91,6 @@
     void filter;
     return INITIAL_MEMBER_ROWS;
   });
-  let generation = 0;
 
   let sort = $derived(preferences.memberSort);
   let joined = $derived(members.filter((member) => !member.service));
@@ -99,52 +104,91 @@
   let groups = $derived(
     groupMembers(searched, sort, connected, alwaysListedFrom ?? DEFAULT_ALWAYS_LISTED_FROM)
   );
-  let shown = $derived(limitGroups(groups, limit));
-  let hidden = $derived(Math.max(0, searched.length - limit));
   let busy = $derived(powerTags === null || (filter === 'join' ? loading : fetching));
+  let previewKey = $derived(
+    JSON.stringify([
+      sort,
+      preferences.groupMembersByPresence,
+      currentLocale(),
+      preferences.developerTools && preferences.showTranslationStrings,
+    ])
+  );
+  let preview = $derived(
+    roomId && busy && filter === 'join' && !search.trim()
+      ? core.memberPreviews.get(roomId, previewKey, alwaysListedFrom)
+      : null
+  );
+  let shown = $derived(
+    preview?.groups ??
+      limitGroups(groups, limit).map((group) => ({ ...group, tag: groupTag(group.level) }))
+  );
+  let rowMembers = $derived(preview ? preview.groups.flatMap((group) => group.members) : listed);
+  let hidden = $derived(preview ? 0 : Math.max(0, searched.length - limit));
   let width = $state<number | null>(null);
+
+  function groupTag(level: number | null) {
+    return level === null
+      ? { name: i18n.t('timeline.memberGroupOffline'), color: null, icon: null }
+      : powerTag(level, i18n.t, powerTags ?? {});
+  }
+
+  $effect(() => {
+    if (roomId && !busy && filter === 'join' && !search.trim()) {
+      core.memberPreviews.set(roomId, {
+        key: previewKey,
+        threshold: alwaysListedFrom ?? DEFAULT_ALWAYS_LISTED_FROM,
+        count: joined.length,
+        groups: shown,
+      });
+    }
+  });
 
   const WIDTH_STORAGE_KEY = 'sable-members-drawer-width';
   const DEFAULT_WIDTH = 266;
   const MIN_WIDTH = 224;
   const MAX_WIDTH = 640;
   let currentWidth = $derived(width ?? DEFAULT_WIDTH);
-  let maxWidth = $derived(
-    Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, (innerWidth.current ?? Infinity) / 2))
-  );
+  let maxWidth = $derived(clamp((innerWidth.current ?? Infinity) / 2, MIN_WIDTH, MAX_WIDTH));
 
   $effect(() => {
+    void roomId;
     void members;
     const load = loadMembership;
     const membership = membershipFor(filter);
     if (filter === 'join' || !load) return;
 
-    const run = ++generation;
+    let current = true;
     fetching = true;
     void load(membership)
       .then((next) => {
-        if (run === generation) fetched = next;
+        if (current) fetched = next;
       })
       .catch((error: unknown) => {
         console.debug('[sable room] members unavailable', error);
-        if (run === generation) fetched = [];
+        if (current) fetched = [];
       })
       .finally(() => {
-        if (run === generation) fetching = false;
+        if (current) fetching = false;
       });
+    return () => {
+      current = false;
+    };
   });
 
   function resize(next: number): void {
-    width = Math.min(maxWidth, Math.max(MIN_WIDTH, next));
+    width = clamp(next, MIN_WIDTH, maxWidth);
   }
 
-  const storedWidth = Number.parseInt(localStorage.getItem(WIDTH_STORAGE_KEY) ?? '', 10);
+  const storedWidth = Number.parseInt(readText(WIDTH_STORAGE_KEY) ?? '', 10);
   if (Number.isFinite(storedWidth)) resize(storedWidth);
 </script>
 
 <aside
+  in:panelIn|global={{ modal, stage }}
+  out:panelOut|global={{ modal, stage }}
   class={['members-drawer', { compact }]}
   aria-label={title}
+  data-focus-region="panel"
   style:width={width === null ? undefined : `${width}px`}
 >
   {#if !modal && !compact}
@@ -159,20 +203,20 @@
       homeEnd
       onResize={resize}
       onCommit={() => {
-        if (width !== null) localStorage.setItem(WIDTH_STORAGE_KEY, String(width));
+        if (width !== null) writeText(WIDTH_STORAGE_KEY, String(width));
       }}
     />
   {/if}
-  <PanelHeader {modal} {title} subtitle={i18n.t('timeline.memberCount', { count: joined.length })}>
+  <PanelHeader
+    {modal}
+    {title}
+    subtitle={i18n.t('timeline.memberCount', { count: preview?.count ?? joined.length })}
+  >
     {#snippet suffix()}
       {#if modal}
         <Dialog.Close
           class="btn btn-ghost icon-button icon-button-small"
           aria-label={i18n.t('timeline.closeMembers')}><XIcon /></Dialog.Close
-        >
-      {:else}
-        <PanelHeaderButton label={i18n.t('timeline.closeMembers')} onclick={onClose}
-          ><XIcon /></PanelHeaderButton
         >
       {/if}
     {/snippet}
@@ -188,7 +232,7 @@
                 {...props}
                 type="button"
                 class="chip selection-open"
-                aria-label={i18n.t('timeline.memberFilter')}
+                aria-label={`${i18n.t('timeline.memberFilter')}: ${i18n.t(MEMBERSHIP_FILTER_LABELS[filter])}`}
               >
                 <FunnelIcon aria-hidden="true" />
                 <span>{i18n.t(MEMBERSHIP_FILTER_LABELS[filter])}</span>
@@ -202,7 +246,7 @@
                 }}
               >
                 <span class="menu-check" aria-hidden="true">{filter === option ? '✓' : ''}</span>
-                {i18n.t(MEMBERSHIP_FILTER_LABELS[option])}
+                <span>{i18n.t(MEMBERSHIP_FILTER_LABELS[option])}</span>
               </ActionMenuItem>
             {/each}
           </ActionMenu>
@@ -213,7 +257,7 @@
               {...props}
               type="button"
               class="chip selection-open"
-              aria-label={i18n.t('timeline.memberSort')}
+              aria-label={`${i18n.t('timeline.memberSort')}: ${i18n.t(MEMBER_SORT_LABELS[sort])}`}
             >
               <span>{i18n.t(MEMBER_SORT_LABELS[sort])}</span>
               <ArrowsDownUpIcon aria-hidden="true" />
@@ -227,7 +271,7 @@
               }}
             >
               <span class="menu-check" aria-hidden="true">{sort === option ? '✓' : ''}</span>
-              {i18n.t(MEMBER_SORT_LABELS[option])}
+              <span>{i18n.t(MEMBER_SORT_LABELS[option])}</span>
             </ActionMenuItem>
           {/each}
         </ActionMenu>
@@ -241,58 +285,51 @@
     </div>
   {/if}
 
-  {#if busy}
+  {#if busy && !preview}
     <p class="status">{i18n.t('timeline.loadingMembers')}</p>
+  {:else if shown.length > 0}
+    <div class="member-groups" aria-busy={busy} {@attach scrollHint}>
+      {#each shown as group (group.key)}
+        {@const tag = group.tag}
+        <h3
+          class={['group-label', { tinted: tag.color }]}
+          style:--name-color-on-light={roleColorOnLight(tag.color)}
+          style:--name-color-on-dark={roleColorOnDark(tag.color)}
+        >
+          {#if tag.icon}<RoleTagIcon icon={tag.icon} class="group-icon" />{/if}{tag.name}
+        </h3>
+        <ul>
+          {#each group.members as member (member.user_id)}
+            <li>
+              <MemberIdentityRow
+                class="member"
+                userId={member.user_id}
+                members={rowMembers}
+                powerTag={tag}
+                onProfile={onMemberProfile}
+                showStatus
+              />
+            </li>
+          {/each}
+        </ul>
+      {/each}
+      {#if hidden > 0}
+        <div
+          class="load-sentinel"
+          aria-hidden="true"
+          {@attach (node) => {
+            void limit;
+            return whenVisible(() => (limit += MEMBER_ROWS_STEP))(node);
+          }}
+        ></div>
+      {/if}
+    </div>
+  {:else if search.trim() !== ''}
+    <p class="status">{i18n.t('timeline.noMembersFound')}</p>
   {:else}
-    {#if groups.length > 0}
-      <div class="member-groups" {@attach scrollHint}>
-        {#each shown as group (group.key)}
-          {@const tag =
-            group.level === null
-              ? { name: i18n.t('timeline.memberGroupOffline'), color: null, icon: null }
-              : powerTag(group.level, i18n.t, powerTags ?? {})}
-          <h3
-            class={['group-label', { tinted: tag.color }]}
-            style:--name-color-on-light={roleColorOnLight(tag.color)}
-            style:--name-color-on-dark={roleColorOnDark(tag.color)}
-          >
-            {#if tag.icon}<RoleTagIcon icon={tag.icon} class="group-icon" />{/if}{tag.name}
-          </h3>
-          <ul>
-            {#each group.members as member (member.user_id)}
-              <li>
-                <MemberIdentityRow
-                  class="member"
-                  userId={member.user_id}
-                  {members}
-                  powerTag={tag}
-                  onProfile={onMemberProfile}
-                  showStatus
-                />
-              </li>
-            {/each}
-          </ul>
-        {/each}
-        {#if hidden > 0}
-          <div
-            class="load-sentinel"
-            aria-hidden="true"
-            {@attach (node) => {
-              void limit;
-              return whenVisible(() => (limit += MEMBER_ROWS_STEP))(node);
-            }}
-          ></div>
-        {/if}
-      </div>
-    {:else if search.trim() !== ''}
-      <p class="status">{i18n.t('timeline.noMembersFound')}</p>
-    {:else}
-      <p class="status">
-        {i18n.t('timeline.noMembersForFilter', {
-          filter: i18n.t(MEMBERSHIP_FILTER_LABELS[filter]),
-        })}
-      </p>
-    {/if}
+    <p class="status">
+      {i18n.t(MEMBERSHIP_FILTER_EMPTY_MESSAGES[filter])}
+    </p>
   {/if}
 </aside>
 
@@ -306,7 +343,8 @@
     color: var(--bg-on-container);
     display: flex;
     flex-direction: column;
-    inset: 0 0 0 auto;
+    inset-block: 0;
+    inset-inline: auto 0;
     max-width: min(22rem, 85%);
     position: absolute;
     width: 100%;
@@ -315,7 +353,7 @@
 
   .members-drawer :global(.resize-handle) {
     display: none;
-    left: 0;
+    inset-inline-start: 0;
     z-index: 3;
   }
 
@@ -423,7 +461,7 @@
   }
 
   :global(.group-icon) {
-    margin-right: var(--space-100);
+    margin-inline-end: var(--space-100);
   }
 
   ul {
@@ -447,7 +485,7 @@
 
   @media (width > 70.25rem) {
     .members-drawer:not(.compact) {
-      border-left: var(--border-width) solid var(--surface-container-line);
+      border-inline-start: var(--border-width) solid var(--surface-container-line);
       box-shadow: none;
       flex: 0 0 auto;
       inset: auto;

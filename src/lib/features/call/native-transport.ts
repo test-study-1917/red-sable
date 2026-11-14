@@ -83,13 +83,15 @@ const stateOf = (snapshot: NativeCallSnapshot, identity: string): CallTransportS
   cameraEnabled: snapshot.cameraEnabled,
   screenShareEnabled: snapshot.screenShareEnabled,
   error: snapshot.lastError?.message,
+  errorCode: snapshot.lastError?.code,
 });
 
 export type NativeTransport = CallTransport & { readonly callId: string };
 
 export async function createNativeTransport(
   callId: string,
-  identity: string
+  identity: string,
+  callerName?: string
 ): Promise<NativeTransport | null> {
   const plugin: Plugin | null = await loadNativeCalls();
   if (!plugin) return null;
@@ -100,6 +102,7 @@ export async function createNativeTransport(
   let unlisten: (() => void) | undefined;
   const queuedKeys: CallEncryptionKey[] = [];
   let connected = false;
+  let disposed = false;
 
   const adopt = (snapshot: NativeCallSnapshot): void => {
     if (snapshot.revision <= revision) return;
@@ -131,7 +134,12 @@ export async function createNativeTransport(
   return {
     callId,
     connect: async (options) => {
-      unlisten = await plugin.listenNativeCallSnapshot(adopt);
+      const stop = await plugin.listenNativeCallSnapshot(adopt);
+      if (disposed) {
+        stop();
+        return;
+      }
+      unlisten = stop;
       adopt(
         await plugin.connectNativeCall({
           callId,
@@ -143,6 +151,7 @@ export async function createNativeTransport(
             noiseSuppression: preferences.noiseSuppression,
             autoGainControl: preferences.autoGainControl,
           },
+          callerName,
           encryptionKeys: options.encryptionKeys.map((key) => ({
             identity: key.identity,
             keyIndex: key.keyIndex,
@@ -164,6 +173,7 @@ export async function createNativeTransport(
       }
     },
     disconnect: async () => {
+      disposed = true;
       try {
         adopt(await plugin.disconnectNativeCall({ callId }));
       } finally {

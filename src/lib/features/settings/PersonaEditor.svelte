@@ -22,14 +22,23 @@
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import Switch from '#lib/ui/primitives/Switch.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import MediaImage from '#lib/ui/MediaImage.svelte';
   import { hexColorOrEmpty } from '#lib/ui/hex-color.js';
   import ColorSetting from '#lib/ui/ColorSetting.svelte';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
+  import Select from '#lib/ui/primitives/Select.svelte';
+  import ProhibitIcon from 'phosphor-svelte/lib/ProhibitIcon';
+  import BioEditor from './BioEditor.svelte';
+  import { bioContent, bioHtml, type BioContent } from './bio-content';
 
   interface Props {
     open?: boolean;
     persona: PersonaView | null;
-    onSave: (persona: PersonaView, previousId: string | null) => Promise<void>;
+    onSave: (
+      persona: PersonaView,
+      previousId: string | null,
+      basePersona: PersonaView | null
+    ) => Promise<void>;
     onOpenChange: (open: boolean) => void;
   }
 
@@ -45,6 +54,12 @@
   let alternateAvatars = $state<{ id: string; avatar_url: string | null }[]>([]);
   let saving = $state(false);
   let error = $state<string | null>(null);
+  let biography: BioContent = $state({ body: '', formatted: '' });
+  let banner_url = $state('');
+  let is_animal = $state('');
+  let has_animal = $state('');
+  let animal_need = $state('');
+  let hidden = $state(false);
 
   $effect(() => {
     if (!open) return;
@@ -57,6 +72,12 @@
       triggers =
         persona?.triggers.map((trigger) => ({ ...trigger, id: crypto.randomUUID() })) ?? [];
       alternateAvatars = persona?.alternate_avatars ?? [];
+      biography = bioContent(persona?.biography ?? '');
+      banner_url = persona?.banner_url ?? '';
+      is_animal = persona?.is_animal ?? '';
+      has_animal = persona?.has_animal ?? '';
+      animal_need = persona?.animal_need ?? '';
+      hidden = persona?.sort_flags?.hidden ?? false;
       error = null;
     });
   });
@@ -69,11 +90,8 @@
     saving = true;
     error = null;
     try {
-      const upright = await uprightJpeg(file);
-      avatarUrl = await core.media.uploadMedia(
-        upright.type || 'image/*',
-        new Uint8Array(await upright.arrayBuffer())
-      );
+      const { mime, bytes } = await uprightImageBytes(file);
+      avatarUrl = await core.media.uploadMedia(mime, bytes);
     } catch (cause) {
       console.warn('[sable personas] uploading the picture failed', cause);
       error = i18n.t('personas.saveFailed');
@@ -85,7 +103,13 @@
   function addTrigger(): void {
     triggers = [
       ...triggers,
-      { prefix: '', suffix: null, keep_trigger: false, id: crypto.randomUUID() },
+      {
+        prefix: '',
+        suffix: null,
+        keep_trigger: false,
+        id: crypto.randomUUID(),
+        alternate_avatar_id: null,
+      },
     ];
   }
 
@@ -112,11 +136,26 @@
     saving = true;
     error = null;
     try {
-      const upright = await uprightJpeg(file);
-      alternateAvatars[index].avatar_url = await core.media.uploadMedia(
-        upright.type || 'image/*',
-        new Uint8Array(await upright.arrayBuffer())
-      );
+      const { mime, bytes } = await uprightImageBytes(file);
+      alternateAvatars[index].avatar_url = await core.media.uploadMedia(mime, bytes);
+    } catch (cause) {
+      console.warn('[sable personas] uploading the picture failed', cause);
+      error = i18n.t('personas.saveFailed');
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function pickBanner(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+
+    saving = true;
+    error = null;
+    try {
+      const { mime, bytes } = await uprightImageBytes(file);
+      banner_url = await core.media.uploadMedia(mime, bytes);
     } catch (cause) {
       console.warn('[sable personas] uploading the picture failed', cause);
       error = i18n.t('personas.saveFailed');
@@ -133,12 +172,18 @@
       return;
     }
 
+    const htmlBio = bioHtml(biography);
+    if ((htmlBio?.length ?? 0) >= 2048) {
+      error = i18n.t('personas.bioTooLong');
+      return;
+    }
+
     saving = true;
     error = null;
     try {
       await onSave(
         {
-          id: displayName,
+          id: persona?.id ?? crypto.randomUUID(),
           display_name: displayName,
           avatar_url: avatarUrl,
           pronouns: parsePronouns(pronouns),
@@ -149,6 +194,7 @@
               prefix: trigger.prefix?.trimStart() || null,
               suffix: trigger.suffix?.trimEnd() || null,
               keep_trigger: trigger.keep_trigger,
+              alternate_avatar_id: trigger.alternate_avatar_id || null,
             }))
             .filter((trigger) => trigger.prefix !== null || trigger.suffix !== null),
           alternate_avatars: alternateAvatars.filter(
@@ -156,8 +202,15 @@
           ),
           pluralkit: persona?.pluralkit ?? null,
           last_used: persona?.last_used ?? null,
+          biography: htmlBio ? htmlBio : null,
+          banner_url: banner_url ?? null,
+          is_animal: is_animal ?? null,
+          has_animal: has_animal ?? null,
+          animal_need: animal_need ?? null,
+          sort_flags: { hidden },
         },
-        persona?.id ?? null
+        persona?.id ?? null,
+        persona
       );
       onOpenChange(false);
     } catch (cause) {
@@ -281,6 +334,39 @@
               }}
             />
           </label>
+          <label class="field wrap">
+            <span>{i18n.t('personas.triggerAlternateAvatar')}</span>
+            <span
+              style=" align-items: center;display: flex; flex-flow: row nowrap; gap: var(--space-100);"
+            >
+              <Select
+                value={trigger.alternate_avatar_id ?? ''}
+                placeholder={i18n.t('personas.alternateAvatarNone')}
+                onValueChange={(value: string) => {
+                  triggers[index] = { ...trigger, alternate_avatar_id: value ?? null };
+                }}
+                items={[{ value: '', label: i18n.t('personas.alternateAvatarNone') }].concat(
+                  alternateAvatars.map((avatar) => {
+                    return {
+                      value: avatar.id,
+                      label: i18n.t('personas.alternateAvatarLabel'),
+                      mediaImage: avatar.avatar_url ?? undefined,
+                    };
+                  })
+                )}
+              ></Select>
+              {#if trigger.alternate_avatar_id && alternateAvatars.find((avatar) => avatar.id === trigger.alternate_avatar_id)}
+                <Avatar
+                  src={alternateAvatars.find((avatar) => avatar.id === trigger.alternate_avatar_id)
+                    ?.avatar_url}
+                  {name}
+                  size="small"
+                />
+              {:else}
+                <Avatar size="small"><ProhibitIcon /></Avatar>
+              {/if}
+            </span>
+          </label>
           <div class="button">
             <IconButton
               variant="subtle"
@@ -333,6 +419,100 @@
         <PlusIcon />
         {i18n.t('personas.alternateAvatarAdd')}
       </Button>
+    </fieldset>
+
+    <fieldset class="triggers">
+      <legend>{i18n.t('settings.profile')}</legend>
+
+      <div class="field">
+        <span>{i18n.t('settings.biography')}</span>
+        <BioEditor id="persona-biography" bind:value={biography} />
+      </div>
+
+      <div class="field">
+        <span>{i18n.t('settings.banner')}</span>
+        {#if banner_url}
+          <div class="profile-card-cover">
+            <MediaImage
+              class={banner_url
+                ? 'profile-card-banner'
+                : 'profile-card-banner profile-card-banner-fallback'}
+              alt=""
+              source={banner_url}
+              width={720}
+              height={240}
+              original={true}
+            />
+          </div>
+        {/if}
+        <div style="display: flex; flex-direction: row; gap: var(--space-200)">
+          <Button
+            variant="danger"
+            size="small"
+            disabled={!banner_url}
+            onclick={() => {
+              banner_url = '';
+            }}
+          >
+            {i18n.t('personas.avatarRemove')}
+          </Button>
+          <label class="file-button btn btn-secondary btn-small">
+            <input
+              use:nativeFilePicker
+              type="file"
+              accept="image/*"
+              onchange={(event) => void pickBanner(event)}
+            />
+            {i18n.t('common.chooseAPicture')}
+          </label>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="triggers">
+      <legend>{i18n.t('settings.animalIdentity')}</legend>
+
+      <label class="field">
+        <span>{i18n.t('settings.animalIdentityWhatIs')}</span>
+        <TextInput
+          name="persona-animal-is"
+          bind:value={is_animal}
+          autocomplete="off"
+          placeholder={i18n.t('settings.animalIdentityWhatIsPlaceholder')}
+          maxlength={128}
+        />
+      </label>
+
+      <label class="field">
+        <span>{i18n.t('settings.animalIdentityWhatHas')}</span>
+        <TextInput
+          name="persona-animal-has"
+          bind:value={has_animal}
+          autocomplete="off"
+          placeholder={i18n.t('settings.animalIdentityWhatHasPlaceholder')}
+          maxlength={128}
+        />
+      </label>
+
+      <label class="field">
+        <span>{i18n.t('settings.animalIdentityWhatNeeds')}</span>
+        <TextInput
+          name="persona-animal-need"
+          bind:value={animal_need}
+          autocomplete="off"
+          placeholder={i18n.t('settings.animalIdentityWhatNeedsPlaceholder')}
+          maxlength={128}
+        />
+      </label>
+    </fieldset>
+
+    <fieldset class="triggers">
+      <legend>{i18n.t('personas.editorSortFlags')}</legend>
+
+      <label class="field inline">
+        <span>{i18n.t('personas.sortFlagsHidden')}</span>
+        <Switch label="" bind:checked={hidden} />
+      </label>
     </fieldset>
 
     <DialogActions>
@@ -404,6 +584,12 @@
     font-size: var(--font-size-small);
   }
 
+  .field.inline {
+    display: flex;
+    flex-flow: row nowrap;
+    justify-content: space-between;
+  }
+
   .colors {
     display: grid;
     gap: var(--space-300);
@@ -439,6 +625,7 @@
   .trigger-row .field {
     align-items: center;
     grid-row: 1 / 3;
+    grid-template-rows: auto auto;
     grid-template-rows: subgrid;
   }
 
@@ -449,13 +636,18 @@
   @media (width < 34rem) {
     .trigger-row {
       grid-template-columns: 1fr 1fr auto;
-      grid-template-rows: auto auto var(--space-300) auto;
+      grid-template-rows: auto auto var(--space-300) auto var(--space-300) auto;
     }
 
     .trigger-row .field.wrap {
       grid-column: 1 / 4;
       grid-row: 4 / 5;
       grid-template-columns: 1fr auto;
+    }
+
+    /* hack sorry */
+    .trigger-row .field.wrap:nth-child(4) {
+      grid-row: 6 / 7;
     }
 
     fieldset {
@@ -468,5 +660,15 @@
     column-gap: var(--space-300);
     display: grid;
     grid-template-columns: 1fr auto auto;
+  }
+
+  .profile-card-cover {
+    height: 7rem;
+    overflow: hidden;
+  }
+
+  .profile-card-cover :global(.profile-card-banner img) {
+    object-fit: cover;
+    object-position: center;
   }
 </style>

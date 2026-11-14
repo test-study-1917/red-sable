@@ -4,8 +4,9 @@ import { render } from 'vitest-browser-svelte';
 
 import type { NotificationModeView, RoomListItemView } from '#src/generated/protocol';
 
-import { withCounts } from '#lib/rooms/summary-fixtures.js';
 import { roomNotifications, roomUnread } from '#lib/rooms/unread.js';
+import { expectNoA11yViolations, ICONS_HIDDEN_BY_LAYOUT } from '#lib/test-support/a11y.js';
+import { roomView } from '#lib/test-support/room-views.js';
 
 const roomsFixture = vi.hoisted(() => {
   const fixture = {
@@ -16,6 +17,17 @@ const roomsFixture = vi.hoisted(() => {
     notificationOverride: () => null,
     notificationMode: (): NotificationModeView => 'all',
     mutedRoomIds: new Set<string>(),
+    section: (key: string) => ({
+      key,
+      favourites: [],
+      rooms: fixture.rooms.map((room) => room.room_id),
+      subspaces: [],
+      calendars: [],
+      invites: [],
+      unread: { unread: 0, notifying: 0, highlight: 0, marked: false },
+      unread_rooms: [],
+      descendants: [],
+    }),
     quietRoomIds: new Set<string>(),
     unreadFor: (room: RoomListItemView) => roomUnread(room),
     badgeUnreadFor: (room: RoomListItemView) => roomUnread(room),
@@ -33,8 +45,6 @@ vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/rooms/room-list.svelte.js')>()),
   useRoomList: () => roomsFixture,
-  roomLabel: (room: RoomListItemView) => room.name ?? room.canonical_alias ?? room.room_id,
-  roomAvatarUrl: (room: RoomListItemView) => room.avatar_url,
 }));
 vi.mock('#lib/rooms/presence.svelte.js', async () => {
   const actual = await vi.importActual<typeof import('#lib/rooms/presence.svelte.js')>(
@@ -53,30 +63,10 @@ afterEach(async () => {
 });
 
 function room(overrides: Partial<RoomListItemView>): RoomListItemView {
-  return withCounts({
-    room_id: '!room:example.org',
-    canonical_alias: null,
-    name: null,
-    topic: null,
-    avatar_url: null,
-    is_direct: false,
-    direct_targets: [],
-    join_rule: 'invite',
-    tags: [],
-    state: 'joined',
-    encrypted: null,
-    is_tombstoned: false,
-    call_participants: [],
-    screen_sharers: [],
-    room_kind: 'text',
+  return roomView({
     supports_knock: true,
     supports_restricted: true,
     supports_knock_restricted: true,
-    space_children: [],
-    unread: 0,
-    notifying: 0,
-    highlight: 0,
-    marked_unread: false,
     latest_event: { sender: null, body: 'hi', timestamp: 1, sending: false, event_id: null },
     ...overrides,
   });
@@ -109,6 +99,27 @@ test('collapsed room rows keep their unread badges inside the row', async () => 
     return !wrap || box.left < wrap.left || box.right > wrap.right || box.top < wrap.top;
   });
   expect(outside).toHaveLength(0);
+  await expectNoA11yViolations(document.body, { disableRules: ICONS_HIDDEN_BY_LAYOUT });
+});
+
+test('hovering a collapsed room keeps its avatar inside the row', async () => {
+  roomsFixture.rooms = [room({ room_id: '!a:example.org', name: 'General' })];
+  await mountNav({ collapsed: true, width: 50 });
+
+  await expect
+    .poll(() => document.querySelector('.room-list.collapsed .room-row .avatar-root'))
+    .not.toBeNull();
+  const row = document.querySelector<HTMLElement>('.room-list.collapsed .room-row');
+  const avatar = row?.querySelector('.avatar-root');
+  if (!row || !avatar) throw new Error('the collapsed room row is not rendered');
+  const before = avatar.getBoundingClientRect();
+
+  await userEvent.hover(row);
+  const after = avatar.getBoundingClientRect();
+  const box = row.getBoundingClientRect();
+  expect(after.left).toBe(before.left);
+  expect(after.left).toBeGreaterThanOrEqual(box.left);
+  expect(after.right).toBeLessThanOrEqual(box.right);
 });
 
 test('the row options button toggles the shared menu and returns focus', async () => {
@@ -123,11 +134,12 @@ test('the row options button toggles the shared menu and returns focus', async (
   };
   await expect.poll(() => document.querySelector('.room-row-wrap')).not.toBeNull();
   await userEvent.hover(wrap());
-  const trigger = screen.getByRole('button', { name: 'Room options' });
+  const trigger = screen.getByRole('button', { name: 'Room options', includeHidden: true });
 
   await userEvent.click(trigger);
   await expect.element(screen.getByRole('menu')).toBeVisible();
   await expect.element(trigger).toHaveAttribute('aria-expanded', 'true');
+  await expectNoA11yViolations(document.body, { disableRules: ICONS_HIDDEN_BY_LAYOUT });
 
   await userEvent.click(trigger);
   await expect.poll(() => screen.getByRole('menu').elements().length).toBe(0);
@@ -146,4 +158,17 @@ test('the row options button toggles the shared menu and returns focus', async (
   await userEvent.click(screen.getByText('General'), { button: 'right' });
   await expect.element(screen.getByRole('menu')).toBeVisible();
   await userEvent.keyboard('{Escape}');
+});
+
+test('the list options menu renders its checkable items (#1341)', async () => {
+  roomsFixture.rooms = [room({ room_id: '!a:example.org', name: 'General' })];
+  const screen = await mountNav();
+  await userEvent.click(screen.getByRole('button', { name: 'List options' }));
+  await expect
+    .element(screen.getByRole('menuitemradio', { name: 'Group favourites' }))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole('menuitemradio', { name: 'Recent activity' }))
+    .toBeVisible();
+  await expectNoA11yViolations(document.body, { disableRules: ICONS_HIDDEN_BY_LAYOUT });
 });

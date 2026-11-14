@@ -1,23 +1,26 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
-import { pickBadgeStrategy, setUnreadBadge } from './badge.js';
+import { setUnreadBadge } from './badge.js';
 import type { ElectronBridge } from './electron';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it('uses the Electron Linux tray without the web Badging API', async () => {
-  const setTrayUnread = vi.fn().mockResolvedValue(undefined);
+it('sends the count to Electron without the web Badging API', async () => {
+  const setBadge = vi.fn().mockResolvedValue(undefined);
   vi.stubGlobal('sableElectron', {
     platform: 'linux',
-    setTrayUnread,
-  } satisfies Pick<ElectronBridge, 'platform' | 'setTrayUnread'>);
+    setBadge,
+  } satisfies Pick<ElectronBridge, 'platform' | 'setBadge'>);
   vi.stubGlobal('navigator', {});
 
   await setUnreadBadge(3);
   await setUnreadBadge(0);
-  expect(setTrayUnread.mock.calls).toEqual([[true], [false]]);
+  expect(setBadge.mock.calls).toEqual([
+    [3, null],
+    [0, null],
+  ]);
 });
 
 it('sets and clears the browser badge', async () => {
@@ -31,23 +34,18 @@ it('sets and clears the browser badge', async () => {
   expect(clearAppBadge).toHaveBeenCalledOnce();
 });
 
-describe('pickBadgeStrategy', () => {
-  it('uses the Tauri window API on Windows and macOS', () => {
-    expect(pickBadgeStrategy(true, 'windows', false)).toBe('tauri-window');
-    expect(pickBadgeStrategy(true, 'macos', false)).toBe('tauri-window');
-  });
-
-  it('marks the tray icon on Linux, which has no window badge', () => {
-    expect(pickBadgeStrategy(true, 'linux', false)).toBe('tauri-tray');
-  });
-
-  it('has no desktop badge concept on mobile Tauri builds', () => {
-    expect(pickBadgeStrategy(true, 'android', false)).toBe('none');
-    expect(pickBadgeStrategy(true, 'ios', false)).toBe('none');
-  });
-
-  it('falls back to the web Badging API outside Tauri when it exists', () => {
-    expect(pickBadgeStrategy(false, '', true)).toBe('web-app-badge');
-    expect(pickBadgeStrategy(false, '', false)).toBe('none');
-  });
+it('sets the native iOS badge', async () => {
+  vi.resetModules();
+  const invoke = vi.fn().mockResolvedValue(undefined);
+  vi.doMock('@tauri-apps/api/core', () => ({ invoke, isTauri: () => true }));
+  vi.doMock('@tauri-apps/plugin-os', () => ({ type: () => 'ios' }));
+  const { setUnreadBadge: set } = await import('./badge.js');
+  await set(3);
+  await set(0);
+  expect(invoke.mock.calls).toEqual([
+    ['set_badge_count', { count: 3 }],
+    ['set_badge_count', { count: 0 }],
+  ]);
+  vi.doUnmock('@tauri-apps/api/core');
+  vi.doUnmock('@tauri-apps/plugin-os');
 });

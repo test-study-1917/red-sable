@@ -12,8 +12,8 @@ pass `-c.mac.identity=YOUR_TEAM_ID` to use another team.
 
 Packages are written to `electron/release/sandboxed`. The app stores data in its own
 `moe.sable.client.sandboxed` container and requires a fresh login. Update by installing
-a new DMG. It shares stable's login callback schemes; macOS must route callbacks to
-the app you are using.
+a new DMG. It shares stable's link schemes; macOS must route links to the app you are
+using.
 
 `package.mjs` picks `electron-builder.stable.yml` or `electron-builder.nightly.yml`, both
 extending `electron-builder.yml`, from `SABLE_BUILD_FLAVOR`: only `stable` builds the stable
@@ -23,8 +23,13 @@ stable as `Sable Nightly`.
 On first launch the app copies the Tauri app's permission grants, telemetry consent and
 smooth-scrolling choice (`src/tauri-import.ts`).
 
-Login callback schemes are unchanged by app renames: stable uses `moe.sable.app` and
-`sable`; nightly uses `moe.sable.next`, not `moe.sable.next.nightly`.
+Sign-in opens the system browser and returns to a one-shot listener on `127.0.0.1`
+(RFC 8252 loopback redirect).
+
+Link schemes are unchanged by app renames: stable uses `moe.sable.app` and `sable`;
+nightly uses `moe.sable.next`, not `moe.sable.next.nightly`.
+Flatpak, deb and rpm declare them in their desktop entry. Only AppImage, tarball and
+development runs register a handler in `~/.local/share/applications` at startup.
 
 Update feeds:
 
@@ -45,3 +50,36 @@ manifest unchanged. Nightly pruning preserves releases referenced by those manif
 
 The main process uses `electron-updater` with the feed for the channel chosen in
 Settings → About. Stable macOS releases are signed and notarized, so they can install updates. Nightlies built without the signing secrets are unsigned and cannot.
+Pass `-c.extraMetadata.autoUpdate=false` to disable it.
+
+## Proxy
+
+Pass Chromium's `--proxy-server` switch:
+
+```sh
+# Linux
+sable --proxy-server=socks5://127.0.0.1:9050
+# macOS
+open -a Sable --args --proxy-server=socks5://127.0.0.1:9050
+# Windows
+Sable.exe --proxy-server=socks5://127.0.0.1:9050
+```
+
+It applies to the window and the Sable core. `socks5://` resolves host names on the proxy,
+`socks://` is SOCKS4 and `host:port` is an HTTP proxy. Credentials and per-scheme rules
+(`http=a:1;https=b:2`) are not supported, and the core refuses to start with the latter.
+
+Calls use WebRTC over UDP, which SOCKS does not carry. Set Settings → Calls → Network interfaces
+for calls to "Only through a proxy" to keep them off the direct route.
+
+## HEVC video on Linux
+
+Chromium has no software HEVC decoder, so HEVC videos only play when the GPU decodes them through
+VA-API, otherwise the timeline offers a download. Check that the driver decodes HEVC:
+
+```sh
+vainfo 2>/dev/null | grep HEVC | grep VAEntrypointVLD
+```
+
+NVIDIA needs [nvidia-vaapi-driver](https://github.com/elFarto/nvidia-vaapi-driver). If `vainfo`
+lists HEVC but videos still don't play, launch with `--enable-features=VaapiIgnoreDriverChecks`.

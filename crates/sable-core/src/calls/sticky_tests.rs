@@ -179,9 +179,16 @@ async fn test_encrypted_delayed_leave_is_not_sent_as_plaintext() {
         .await;
     Mock::given(method("PUT"))
         .and(path_regex(r"/rooms/.*/send/m\.room\.encrypted/.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"delay_id": "$delay"})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"delay_id": "$delay", "event_id": "$sent:example.org"})),
+        )
         .mount(server.server())
         .await;
+
+    send(&alice, &room, json!({"msc4354_sticky_key": "member"}))
+        .await
+        .expect("encrypted sticky send");
 
     send_delayed(
         &alice,
@@ -194,9 +201,30 @@ async fn test_encrypted_delayed_leave_is_not_sent_as_plaintext() {
     .expect("encrypted delayed leave");
 
     let requests = server.received_requests().await.unwrap();
+    let membership = requests
+        .iter()
+        .find(|request| {
+            request.url.path().contains("/send/m.room.encrypted/")
+                && !request
+                    .url
+                    .query_pairs()
+                    .any(|(key, _)| key == "org.matrix.msc4140.delay")
+        })
+        .expect("encrypted membership request");
+    assert!(
+        membership.url.query_pairs().any(|(key, value)| key
+            == "org.matrix.msc4354.sticky_duration_ms"
+            && value == "3600000")
+    );
     let request = requests
         .iter()
-        .find(|request| request.url.path().contains("/send/m.room.encrypted/"))
+        .find(|request| {
+            request.url.path().contains("/send/m.room.encrypted/")
+                && request
+                    .url
+                    .query_pairs()
+                    .any(|(key, _)| key == "org.matrix.msc4140.delay")
+        })
         .expect("encrypted delayed request");
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["algorithm"], "m.megolm.v1.aes-sha2");
@@ -513,10 +541,10 @@ async fn test_delayed_send_refreshes_expired_credentials_and_preserves_sticky_qu
 #[async_test]
 async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
     let (_server, room) = room().await;
-    let now = super::super::keys::now_ms();
-    let mut response = ruma::api::client::sync::sync_events::v5::Response::new("1".to_owned());
+    let now = crate::now_ms();
+    let mut response = ruma::api::client::sync::sync_events::msc4186::Response::new("1".to_owned());
     let mut sticky_room =
-        ruma::api::client::sync::sync_events::v5::response::StickyEventsRoom::default();
+        ruma::api::client::sync::sync_events::msc4186::response::StickyEventsRoom::default();
     sticky_room.events.push(
         ruma::serde::Raw::new(&json!({
             "type": "m.rtc.member", "sender": "@other:example.org", "event_id": "$member",

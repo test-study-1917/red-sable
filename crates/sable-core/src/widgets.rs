@@ -1,3 +1,5 @@
+use sable_model::text::visible_name;
+
 use crate::api::calls::RtcLivekitEndpoint;
 use crate::api::widgets::RestartDelayedEventParams;
 use std::collections::BTreeMap;
@@ -10,7 +12,6 @@ use futures_util::pin_mut;
 use matrix_sdk::RoomState;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::executor::{JoinHandleExt, spawn};
-use matrix_sdk::ruma::api::Direction;
 use matrix_sdk::ruma::api::client::account::request_openid_token;
 use matrix_sdk::ruma::api::client::delayed_events::update_delayed_event::UpdateAction;
 use matrix_sdk::ruma::api::client::relations::{
@@ -19,6 +20,7 @@ use matrix_sdk::ruma::api::client::relations::{
 use matrix_sdk::ruma::api::client::to_device::send_event_to_device;
 use matrix_sdk::ruma::api::client::user_directory::search_users;
 use matrix_sdk::ruma::api::client::voip::get_turn_server_info;
+use matrix_sdk::ruma::api::{Direction, error::FromHttpResponseError};
 use matrix_sdk::ruma::events::GlobalAccountDataEventType;
 use matrix_sdk::ruma::events::relation::RelationType;
 use matrix_sdk::ruma::events::{
@@ -35,8 +37,8 @@ use serde_with::{DefaultOnError, serde_as};
 use crate::calls::sticky;
 use crate::delayed_events::{self, DelayedEvent};
 use crate::protocol::{
-    CoreEvent, OpenIdTokenView, PaginationDirection, RelationsView, RpcError, TermsPolicyView,
-    TurnServerView, UserDirectoryEntryView,
+    CoreEvent, OpenIdTokenView, PaginationDirection, RelationsView, RpcCode, RpcError,
+    TermsPolicyView, TurnServerView, UserDirectoryEntryView,
 };
 use crate::view::ObjectOnly;
 use crate::{Core, ResultExt};
@@ -63,7 +65,7 @@ macro_rules! livekit_endpoint {
             }
 
             #[request]
-            pub struct Request {
+            pub(crate) struct Request {
                 #[ruma_api(header = CONTENT_TYPE)]
                 pub content_type: String,
                 #[ruma_api(raw_body)]
@@ -71,7 +73,7 @@ macro_rules! livekit_endpoint {
             }
 
             #[response]
-            pub struct Response {
+            pub(crate) struct Response {
                 #[ruma_api(raw_body)]
                 pub body: Vec<u8>,
             }
@@ -153,6 +155,19 @@ struct IntegrationsIn {
 struct ManagerIn {
     api_url: String,
     ui_url: String,
+}
+
+async fn fetch_well_known(client: &matrix_sdk::Client, base: &url::Url) -> Option<Value> {
+    let response = client
+        .http_client()
+        .get(base.join("/.well-known/matrix/client").ok()?)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    serde_json::from_str(&response.text().await.ok()?).ok()
 }
 
 fn managers_from_well_known(well_known: &Value) -> Vec<IntegrationManager> {
@@ -291,7 +306,10 @@ impl Core {
         since: Option<&OwnedEventId>,
     ) -> Result<Vec<serde_json::Value>, RpcError> {
         let client = self.client().await?;
-        let Ok((cache, _drop_handles)) = client.event_cache().room(room_id).await else {
+        let Some(event_cache) = client.event_cache() else {
+            return Ok(Vec::new());
+        };
+        let Ok((cache, _drop_handles)) = event_cache.room(room_id).await else {
             return Ok(Vec::new());
         };
         let Ok(events) = cache.events().await else {
@@ -351,8 +369,8 @@ impl Core {
         state_key: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, RpcError> {
         let room = self.room(room_id).await?;
-        let events = room
-            .get_state_events(event_type.into())
+        let events = self
+            .with_open_stores(async || room.get_state_events(event_type.into()).await)
             .await
             .or_failed(self, "room_state_events_raw")?;
 
@@ -389,17 +407,23 @@ impl Core {
             .await?
             .send(request)
             .await
-            .map_err(|error| self.homeserver_http_error("search_user_directory", error))?;
+            .or_failed(self, "search_user_directory")?;
 
         Ok((
             response.limited,
             response
                 .results
                 .into_iter()
-                .map(|user| UserDirectoryEntryView {
-                    user_id: user.user_id.to_string(),
-                    display_name: user.display_name,
-                    avatar_url: user.avatar_url.map(|url| url.to_string()),
+                .map(|user| {
+                    let real_name = user.display_name.and_then(visible_name);
+                    let real_avatar_url = user.avatar_url.map(|url| url.to_string());
+                    UserDirectoryEntryView {
+                        user_id: user.user_id.to_string(),
+                        display_name: real_name.clone(),
+                        avatar_url: real_avatar_url.clone(),
+                        real_name,
+                        real_avatar_url,
+                    }
                 })
                 .collect(),
         ))
@@ -417,7 +441,7 @@ impl Core {
         const LABEL: &str = "widget_send_delayed_event";
         let support = self.delayed_events_support().await?;
         if !support.any() {
-            return Err(RpcError::DelayedEventsUnsupported);
+            return Err(RpcCode::DelayedEventsUnsupported.into());
         }
         let room = self.room(room_id).await?;
         let client = self.client().await?;
@@ -434,11 +458,11 @@ impl Core {
             };
             return delayed_events::send(&client, support, event)
                 .await
-                .map_err(|error| self.homeserver_http_error(LABEL, error));
+                .or_failed(self, LABEL);
         }
         if let Some(duration) = sticky_duration_ms {
             if self.room_is_encrypted(&room).await? {
-                return Err(RpcError::EncryptedScheduleUnsupported);
+                return Err(RpcCode::EncryptedScheduleUnsupported.into());
             }
             return sticky::send_delayed_event(
                 &client, support, &room, event_type, content, delay, duration,
@@ -447,7 +471,7 @@ impl Core {
             .or_failed(self, LABEL);
         }
         if self.room_is_encrypted(&room).await? {
-            return Err(RpcError::EncryptedScheduleUnsupported);
+            return Err(RpcCode::EncryptedScheduleUnsupported.into());
         }
         let event = DelayedEvent {
             room_id: room_id.clone(),
@@ -459,7 +483,7 @@ impl Core {
         };
         delayed_events::send(&client, support, event)
             .await
-            .map_err(|error| self.homeserver_http_error(LABEL, error))
+            .or_failed(self, LABEL)
     }
 
     pub(crate) async fn widget_send_sticky_event(
@@ -485,7 +509,7 @@ impl Core {
     ) -> Result<(), RpcError> {
         delayed_events::update(&self.client().await?, delay_id, UpdateAction::Restart)
             .await
-            .map_err(|error| self.homeserver_http_error("restart_delayed_event", error))?;
+            .or_failed(self, "restart_delayed_event")?;
         Ok(())
     }
 
@@ -526,7 +550,7 @@ impl Core {
                     wire,
                 ))
                 .await
-                .map_err(|error| self.homeserver_http_error(LABEL, error))?;
+                .or_failed(self, LABEL)?;
             return Ok(());
         }
 
@@ -585,10 +609,9 @@ impl Core {
         room_id: &OwnedRoomId,
         event_type: &str,
     ) -> Result<Option<Value>, RpcError> {
+        let room = self.room(room_id).await?;
         let event = self
-            .room(room_id)
-            .await?
-            .account_data(event_type.into())
+            .with_open_stores(async || room.account_data(event_type.into()).await)
             .await
             .or_failed(self, "room_account_data_raw")?;
         Ok(event.and_then(|raw| {
@@ -637,10 +660,7 @@ impl Core {
             request.to = to;
             request.limit = limit;
             request.dir = dir;
-            let response = client
-                .send(request)
-                .await
-                .map_err(|error| self.homeserver_http_error(LABEL, error))?;
+            let response = client.send(request).await.or_failed(self, LABEL)?;
             (response.chunk, response.next_batch, response.prev_batch)
         } else {
             let mut request =
@@ -649,10 +669,7 @@ impl Core {
             request.to = to;
             request.limit = limit;
             request.dir = dir;
-            let response = client
-                .send(request)
-                .await
-                .map_err(|error| self.homeserver_http_error(LABEL, error))?;
+            let response = client.send(request).await.or_failed(self, LABEL)?;
             (response.chunk, response.next_batch, response.prev_batch)
         };
 
@@ -692,12 +709,27 @@ impl Core {
     }
 
     pub(crate) async fn turn_server(&self) -> Result<TurnServerView, RpcError> {
-        let response = self
+        let response = match self
             .client()
             .await?
             .send(get_turn_server_info::v3::Request::new())
             .await
-            .map_err(|error| self.homeserver_http_error("turn_server", error))?;
+        {
+            Ok(response) => response,
+            // A homeserver without TURN answers `{}`, which has no `username`.
+            Err(matrix_sdk::HttpError::Api(error))
+                if matches!(*error, FromHttpResponseError::Deserialization(_)) =>
+            {
+                tracing::debug!("the homeserver has no TURN server");
+                return Ok(TurnServerView {
+                    username: String::new(),
+                    password: String::new(),
+                    uris: Vec::new(),
+                    ttl_ms: 0,
+                });
+            }
+            Err(error) => return Err(self.rpc_error("turn_server", &error)),
+        };
         Ok(TurnServerView {
             username: response.username,
             password: response.password,
@@ -712,7 +744,7 @@ impl Core {
             .await?
             .discover_rtc_transports()
             .await
-            .map_err(|error| self.homeserver_http_error("rtc_transports", error))?
+            .or_failed(self, "rtc_transports")?
             .unwrap_or_default();
         serde_json::to_value(transports)
             .map(|transports| serde_json::json!({ "rtc_transports": transports }))
@@ -738,7 +770,7 @@ impl Core {
                 .await
                 .map(|response| response.body),
         }
-        .map_err(|error| self.homeserver_http_error(LABEL, error))?;
+        .or_failed(self, LABEL)?;
         serde_json::from_slice(&response).or_failed(self, LABEL)
     }
 
@@ -754,22 +786,28 @@ impl Core {
             .ok_or_else(|| self.failed(LABEL, "the integration manager URL is invalid"))
     }
 
+    /// The account's `/.well-known/matrix/client`, looked up on its server
+    /// name first because the homeserver URL it delegates to rarely serves it.
+    pub(crate) async fn well_known(&self) -> Result<Option<Value>, RpcError> {
+        let client = self.client().await?;
+        let named = client
+            .user_id()
+            .and_then(|user| url::Url::parse(&format!("https://{}", user.server_name())).ok());
+        let advertised = url::Url::parse(client.homeserver().as_str()).ok();
+        for base in named.into_iter().chain(advertised) {
+            if let Some(well_known) = fetch_well_known(&client, &base).await {
+                return Ok(Some(well_known));
+            }
+        }
+        Ok(None)
+    }
+
     async fn integration_manager(&self, label: &str) -> Result<IntegrationManager, RpcError> {
         let client = self.client().await?;
 
         let mut managers = Vec::new();
         if let Ok(base) = url::Url::parse(client.homeserver().as_str())
-            && let Ok(response) = client
-                .http_client()
-                .get(
-                    base.join("/.well-known/matrix/client")
-                        .or_failed(self, label)?,
-                )
-                .send()
-                .await
-            && response.status().is_success()
-            && let Ok(text) = response.text().await
-            && let Ok(well_known) = serde_json::from_str::<Value>(&text)
+            && let Some(well_known) = fetch_well_known(&client, &base).await
         {
             managers = managers_from_well_known(&well_known);
         }
@@ -780,10 +818,13 @@ impl Core {
         {
             managers_from_account_data(&widgets, &mut managers);
         }
-        Ok(managers.into_iter().next().unwrap_or(IntegrationManager {
-            api_url: DEFAULT_INTEGRATION_MANAGER.0.to_owned(),
-            ui_url: DEFAULT_INTEGRATION_MANAGER.1.to_owned(),
-        }))
+        Ok(managers
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| IntegrationManager {
+                api_url: DEFAULT_INTEGRATION_MANAGER.0.to_owned(),
+                ui_url: DEFAULT_INTEGRATION_MANAGER.1.to_owned(),
+            }))
     }
 
     pub(crate) async fn integration_manager_terms(&self) -> Result<Vec<TermsPolicyView>, RpcError> {
@@ -1018,12 +1059,12 @@ impl Core {
 
     pub(crate) async fn openid_token(&self) -> Result<OpenIdTokenView, RpcError> {
         let client = self.client().await?;
-        let user_id = client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned();
+        let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned();
 
         let response = client
             .send(request_openid_token::v3::Request::new(user_id))
             .await
-            .map_err(|error| self.homeserver_http_error("openid_token", error))?;
+            .or_failed(self, "openid_token")?;
 
         Ok(OpenIdTokenView {
             access_token: response.access_token,
@@ -1041,7 +1082,7 @@ mod tests {
         Core,
         api::calls::RtcLivekitEndpoint,
         api::room_state::SendEventParams,
-        protocol::{CoreEvent, RpcError},
+        protocol::{CoreEvent, RpcCode, RpcError},
         session::Session,
         store::MemorySessionStore,
     };
@@ -1108,15 +1149,7 @@ mod tests {
     }
 
     async fn core_with(server: &MatrixMockServer, client: matrix_sdk::Client) -> Arc<Core> {
-        let (core, _events) = Core::new("widgets", Box::new(MemorySessionStore::default()));
-        *core.session.write().await = Some(Session {
-            account_id: "widgets".to_owned(),
-            homeserver: server.server().uri(),
-            oauth: false,
-            sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
-            client,
-        });
-        core
+        crate::test_support::signed_in_core(server, client).await.0
     }
 
     async fn delayed_events_server() -> (MatrixMockServer, matrix_sdk::Client) {
@@ -1159,7 +1192,10 @@ mod tests {
                 None,
             )
             .await,
-            Err(RpcError::DelayedEventsUnsupported)
+            Err(RpcError {
+                code: RpcCode::DelayedEventsUnsupported,
+                ..
+            })
         ));
         assert!(core.delayed_events_support().await.unwrap().any());
     }
@@ -1219,7 +1255,10 @@ mod tests {
             .await;
         assert!(matches!(
             refused,
-            Err(RpcError::EncryptedScheduleUnsupported)
+            Err(RpcError {
+                code: RpcCode::EncryptedScheduleUnsupported,
+                ..
+            })
         ));
 
         let refused = core
@@ -1234,7 +1273,10 @@ mod tests {
             .await;
         assert!(matches!(
             refused,
-            Err(RpcError::EncryptedScheduleUnsupported)
+            Err(RpcError {
+                code: RpcCode::EncryptedScheduleUnsupported,
+                ..
+            })
         ));
         let refused = core
             .widget_send_delayed_event(
@@ -1248,7 +1290,10 @@ mod tests {
             .await;
         assert!(matches!(
             refused,
-            Err(RpcError::EncryptedScheduleUnsupported)
+            Err(RpcError {
+                code: RpcCode::EncryptedScheduleUnsupported,
+                ..
+            })
         ));
     }
 
@@ -1369,6 +1414,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_homeserver_without_turn_has_no_servers() {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/voip/turnServer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(server.server())
+            .await;
+        let core = core_with(&server, client).await;
+
+        let server = core.turn_server().await.unwrap();
+
+        assert_eq!(server.uris, Vec::<String>::new());
+    }
+
+    #[tokio::test]
     async fn rtc_transports_are_relayed_as_the_homeserver_describes_them() {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
@@ -1442,7 +1503,13 @@ mod tests {
             .rtc_livekit(RtcLivekitEndpoint::GetToken, &json!({}))
             .await;
 
-        assert!(matches!(result, Err(RpcError::Unsupported)));
+        assert!(matches!(
+            result,
+            Err(RpcError {
+                code: RpcCode::Unsupported,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -1500,10 +1567,11 @@ mod tests {
         let client = server.client_builder().build().await;
         let room_id = room_id!("!stickyread:example.org");
         server.sync_joined_room(&client, room_id).await;
-        let now = u64::from(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now().get());
-        let mut response = ruma::api::client::sync::sync_events::v5::Response::new("1".to_owned());
+        let now = crate::now_ms();
+        let mut response =
+            ruma::api::client::sync::sync_events::msc4186::Response::new("1".to_owned());
         let mut sticky_room =
-            ruma::api::client::sync::sync_events::v5::response::StickyEventsRoom::default();
+            ruma::api::client::sync::sync_events::msc4186::response::StickyEventsRoom::default();
         sticky_room.events.push(
             matrix_sdk::ruma::serde::Raw::new(&json!({
                 "type": "com.example.presence", "event_id": "$sticky", "sender": "@a:example.org",

@@ -1,9 +1,10 @@
+use crate::now_ms;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use matrix_sdk::Room;
 use matrix_sdk::ruma::events::macros::EventContent;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedRoomId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId};
 use matrix_sdk_base::crypto::CollectStrategy;
 use serde::{Deserialize, Serialize};
 
@@ -293,13 +294,14 @@ impl KeyDistributor {
                 }
                 let first = self.outbound.is_none();
                 let index = OutboundKey::next_index(self.outbound.as_ref());
-                let Ok(key) = OutboundKey::generate(index, now_ms()) else {
+                let Ok(mut key) = OutboundKey::generate(index, now_ms()) else {
                     tracing::error!("no entropy available for a call encryption key");
                     return Rolled::Nothing;
                 };
 
                 let reached = self.send(room, &key, &targets).await;
                 self.last_sent_ms = now_ms();
+                key.created_ts = self.last_sent_ms;
 
                 let announcement = Announcement {
                     identity: self.identity.clone(),
@@ -407,6 +409,7 @@ impl KeyDistributor {
                     reached.push(target.clone());
                 }
                 Ok(None) => tracing::warn!(
+                    reported = true,
                     user_id = %target.user_id,
                     device_id = %device_id,
                     "call member device is unknown, cannot send it a media key"
@@ -447,6 +450,7 @@ impl KeyDistributor {
             Ok(failures) if failures.is_empty() => reached,
             Ok(failures) => {
                 tracing::warn!(
+                    reported = true,
                     count = failures.len(),
                     "some call members did not receive the media key"
                 );
@@ -459,7 +463,7 @@ impl KeyDistributor {
                 reached
             }
             Err(error) => {
-                tracing::warn!(?error, "could not send the call media key");
+                tracing::warn!(reported = true, ?error, "could not send the call media key");
                 reached.retain(|member| member.is_own(&self.user_id, &self.device_id));
                 reached
             }
@@ -481,6 +485,7 @@ fn warn_unreached(unreached: &[CallMember], known: &[CallMember]) {
         .filter(|member| !known.iter().any(|known| known.same_generation(member)))
     {
         tracing::warn!(
+            reported = true,
             user_id = %member.user_id,
             device_id = ?member.device_id,
             "a call member did not receive the media key"
@@ -504,10 +509,6 @@ pub(crate) fn decode_key_for_wire(
         .filter(|key| wire != super::membership::RtcWire::Stable || key.len() >= KEY_BYTES)
 }
 
-pub(crate) fn now_ms() -> u64 {
-    MilliSecondsSinceUnixEpoch::now().get().into()
-}
-
 #[cfg(test)]
 mod tests {
     use matrix_sdk::ruma::{owned_room_id, owned_user_id};
@@ -520,10 +521,10 @@ mod tests {
 
     fn member(device: &str, created_ts: u64) -> CallMember {
         CallMember {
-            user_id: owned_user_id!("@erwan:localhost"),
+            user_id: owned_user_id!("@kris:localhost"),
             device_id: Some(device.into()),
             member_id: None,
-            identity: format!("@erwan:localhost:{device}"),
+            identity: format!("@kris:localhost:{device}"),
             mode: crate::protocol::CallMode::Legacy,
             created_ts,
             joined_ts: created_ts,
@@ -829,10 +830,10 @@ mod tests {
     fn test_a_sent_key_carries_both_formats_for_older_receivers() {
         let distributor = KeyDistributor::new(
             owned_room_id!("!room:example.org"),
-            owned_user_id!("@erwan:localhost"),
+            owned_user_id!("@kris:localhost"),
             "LAPTOP".into(),
             "member".to_owned(),
-            "@erwan:localhost:LAPTOP".to_owned(),
+            "@kris:localhost:LAPTOP".to_owned(),
         );
         let key = OutboundKey::generate(6, 0).unwrap();
 
@@ -959,12 +960,16 @@ mod sdk_tests {
         );
         Mock::given(method("PUT"))
             .and(path_regex(r"/sendToDevice/m\.room\.encrypted/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-            .expect(1)
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(300))
+                    .set_body_json(json!({})),
+            )
+            .expect(2)
             .mount(server.server())
             .await;
 
-        let distributor = KeyDistributor::new(
+        let mut distributor = KeyDistributor::new(
             owned_room_id!("!call:example.org"),
             owned_user_id!("@alice:example.org"),
             "ALICE".into(),
@@ -978,6 +983,12 @@ mod sdk_tests {
             .await;
 
         assert_eq!(reached, vec![bob_member]);
+        let start = now_ms();
+        assert!(matches!(
+            distributor.roll(&room, &reached).await,
+            Rolled::Rotated { .. }
+        ));
+        assert!(distributor.outbound.as_ref().unwrap().created_ts >= start + 250);
     }
 
     #[tokio::test]

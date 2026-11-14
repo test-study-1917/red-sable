@@ -13,7 +13,11 @@
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
-  import { goToPage, scopedSearchPath } from '#lib/features/room/room-navigation.js';
+  import {
+    createRoomPath,
+    goToPage,
+    scopedSearchPath,
+  } from '#lib/features/room/room-navigation.js';
 
   interface Props {
     pathname: string;
@@ -37,15 +41,7 @@
   let canCreateHere = $derived(
     activeSpace === null || (spacePermissions?.can_manage_children ?? false)
   );
-  // Nested under the space so its rail, room list and header survive the
-  // navigation; the flat routes would drop back to Home.
-  let createRoomHref = $derived(
-    activeSpace === null
-      ? resolve('create-room')
-      : resolve('/(app)/space/[spaceId]/create-room', {
-          spaceId: roomPathParam(activeSpace, roomList.rooms),
-        })
-  );
+  let createRoomHref = $derived(createRoomPath(roomList.rooms, activeSpace, true));
 
   // A space browses its own children through the lobby; the public directory is
   // a home-level destination.
@@ -145,7 +141,7 @@
           type="button"
           class="room-nav-trigger"
           aria-label={collapsed ? createRoomLabel : undefined}
-          style="align-items: center; display: flex; gap: var(--space-200); text-align: left"
+          style="align-items: center; display: flex; gap: var(--space-200); text-align: start"
         >
           <span class="room-icon" aria-hidden="true"><PlusIcon /></span>
           {#if !collapsed}<span class="room-text"
@@ -281,7 +277,7 @@
     outline-offset: 2px;
   }
 
-  @media (width >= 48rem) {
+  @media (--app-layout) {
     .room-nav-actions.collapsed :is(a, button) {
       width: var(--control-height-small);
     }

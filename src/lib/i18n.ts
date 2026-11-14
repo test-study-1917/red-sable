@@ -7,6 +7,7 @@ import {
   trackTranslations,
   translationsChanged,
 } from './language.svelte.js';
+import { DEFAULT_APP_NAME } from './deployment/default-app-name.js';
 import { availableLocales, loadLocaleBundle, SYSTEM_LANGUAGE } from './locales.js';
 import { preferences } from './settings/preferences.svelte.js';
 
@@ -23,9 +24,11 @@ async function ensureBundle(code: string): Promise<void> {
 
 function applyLanguage(code: string): void {
   const language = availableLocales.includes(code) ? code : 'en';
-  setCurrentLanguage(language);
+  const dir = i18next.dir(language);
+  setCurrentLanguage(language, dir);
   if (typeof document === 'undefined') return;
   document.documentElement.lang = language;
+  document.documentElement.dir = dir;
 }
 
 const initialLanguage = chosenLanguage();
@@ -41,6 +44,7 @@ i18next
     },
     interpolation: {
       escapeValue: false,
+      defaultVariables: { appName: DEFAULT_APP_NAME },
     },
     detection: {
       order: ['querystring', 'navigator'],
@@ -57,6 +61,14 @@ i18next.on('initialized', translationsChanged);
 i18next.on('languageChanged', translationsChanged);
 i18next.store.on('added', translationsChanged);
 applyLanguage(i18next.resolvedLanguage ?? i18next.language);
+
+export function setAppName(name: string): void {
+  i18next.options.interpolation = {
+    ...i18next.options.interpolation,
+    defaultVariables: { ...i18next.options.interpolation?.defaultVariables, appName: name },
+  };
+  translationsChanged();
+}
 
 export async function setLanguage(value: string): Promise<void> {
   if (value === SYSTEM_LANGUAGE) {
@@ -76,11 +88,16 @@ if (initialLanguage !== undefined) {
 
 export const i18n = {
   get t() {
-    if (preferences.showTranslationStrings)
+    if (preferences.developerTools && preferences.showTranslationStrings)
       return (key: string, options?: Record<string, unknown>) =>
         `${key}${options ? JSON.stringify(options) : ''}`;
     trackTranslations();
     return i18next.t;
+  },
+
+  get exists() {
+    trackTranslations();
+    return i18next.exists;
   },
 };
 

@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { currentDirection } from '#lib/language.svelte.js';
   import { DropdownMenu } from 'bits-ui';
   import CaretRightIcon from 'phosphor-svelte/lib/CaretRightIcon';
   import type { Snippet } from 'svelte';
 
   import { i18n } from '#lib/i18n.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   import BottomSheet from './BottomSheet.svelte';
   import { setActionMenuSurface, useActionMenuSurface } from './action-menu.js';
@@ -12,12 +14,13 @@
 
   interface Props {
     label: string;
+    disabled?: boolean;
     class?: string;
     trigger: Snippet;
     children: Snippet;
   }
 
-  let { label, class: surfaceClass, trigger, children }: Props = $props();
+  let { label, disabled = false, class: surfaceClass, trigger, children }: Props = $props();
 
   const parent = useActionMenuSurface();
   let open = $state(false);
@@ -36,6 +39,7 @@
 {#if parent.sheet}
   <button
     type="button"
+    {disabled}
     role="menuitem"
     class="menu-item menu-item-roomy action-menu-row"
     aria-haspopup="dialog"
@@ -45,7 +49,7 @@
     }}
   >
     {@render trigger()}
-    <CaretRightIcon class="menu-submenu-chevron" aria-hidden="true" />
+    <CaretRightIcon class="mirror-rtl menu-submenu-chevron" aria-hidden="true" />
   </button>
   {#if open}
     <BottomSheet bind:open {label} closeLabel={i18n.t('timeline.closeMenu')}>
@@ -54,15 +58,17 @@
   {/if}
 {:else}
   <DropdownMenu.Sub>
-    <DropdownMenu.SubTrigger class="menu-item">
+    <DropdownMenu.SubTrigger class="menu-item" {disabled}>
       {@render trigger()}
-      <CaretRightIcon class="menu-submenu-chevron" aria-hidden="true" />
+      <CaretRightIcon class="mirror-rtl menu-submenu-chevron" aria-hidden="true" />
     </DropdownMenu.SubTrigger>
     <DropdownMenu.Portal>
       <DropdownMenu.SubContent
+        dir={currentDirection()}
         class={['menu-surface', surfaceClass]}
         {...overlayLayer()}
         sideOffset={4}
+        collisionPadding={collisionPadding()}
       >
         <div class="menu-scroll-content" {@attach scrollHint}>
           {@render children()}

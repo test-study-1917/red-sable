@@ -1,4 +1,5 @@
 use crate::api::messages::CancelScheduledParams;
+use crate::api::messages::ScheduleAttachmentParams;
 use crate::api::messages::SendScheduledParams;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use serde::Serialize;
 use crate::Core;
 use crate::ResultExt;
 use crate::delayed_events::{self, DelayedEvent, DelayedEventsSupport};
-use crate::protocol::{AttachmentInfoView, RpcError, ScheduledMessageView};
+use crate::protocol::{AttachmentInfoView, RpcCode, RpcError, ScheduledMessageView};
 use crate::view::SPOILER_PROPERTY;
 
 #[derive(Serialize)]
@@ -109,7 +110,7 @@ impl Core {
         persona: Option<&crate::protocol::PerMessageProfileView>,
     ) -> Result<String, RpcError> {
         let mut content = serde_json::to_value(content).or_failed(self, "schedule_message")?;
-        if let Some(profile) = persona {
+        if let Some(profile) = &persona {
             crate::personas::stamp_profile(&mut content, profile);
         }
         let content =
@@ -125,11 +126,11 @@ impl Core {
     ) -> Result<String, RpcError> {
         let support = self.delayed_events_support().await?;
         if !support.can_list() {
-            return Err(RpcError::DelayedEventsUnsupported);
+            return Err(RpcCode::DelayedEventsUnsupported.into());
         }
         let room = self.room(room_id).await?;
         if self.room_is_encrypted(&room).await? {
-            return Err(RpcError::EncryptedScheduleUnsupported);
+            return Err(RpcCode::EncryptedScheduleUnsupported.into());
         }
 
         let event = DelayedEvent {
@@ -145,23 +146,24 @@ impl Core {
             .or_failed(self, "schedule_message")
     }
 
-    #[expect(clippy::too_many_arguments, reason = "mirrors the protocol fields")]
     pub(crate) async fn schedule_attachment(
         &self,
-        room_id: &OwnedRoomId,
-        filename: String,
-        mime: String,
-        url: String,
-        size: u64,
-        info: Option<AttachmentInfoView>,
-        spoiler: bool,
-        delay_ms: u64,
-        persona: Option<&crate::protocol::PerMessageProfileView>,
+        ScheduleAttachmentParams {
+            room_id,
+            filename,
+            mime,
+            url,
+            size,
+            info,
+            spoiler,
+            delay_ms,
+            persona,
+        }: ScheduleAttachmentParams,
     ) -> Result<String, RpcError> {
-        let mime: Mime = mime.parse().map_err(|_| RpcError::InvalidMedia)?;
+        let mime: Mime = mime.parse().map_err(|_| RpcCode::InvalidMedia)?;
         let url = OwnedMxcUri::from(url);
         if url.parts().is_err() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
 
         let info = info.unwrap_or_default();
@@ -169,7 +171,7 @@ impl Core {
             filename, &mime, url, size, info, spoiler,
         ))
         .or_failed(self, "schedule_attachment")?;
-        if let Some(profile) = persona {
+        if let Some(profile) = &persona {
             crate::personas::stamp_profile(
                 &mut content,
                 &crate::personas::without_fallback(profile),
@@ -177,7 +179,8 @@ impl Core {
         }
         let content =
             serde_json::value::to_raw_value(&content).or_failed(self, "schedule_attachment")?;
-        self.schedule_room_message(room_id, content, delay_ms).await
+        self.schedule_room_message(&room_id, content, delay_ms)
+            .await
     }
 
     pub(crate) async fn cancel_scheduled_message(
@@ -207,9 +210,9 @@ impl Core {
         }
         let client = self.client().await?;
         let response = client
-            .send(get_all_delayed_events::unstable::Request::new())
+            .send(get_all_delayed_events::msc4140::Request::new())
             .await
-            .map_err(|error| self.homeserver_http_error("scheduled_messages", error))?;
+            .or_failed(self, "scheduled_messages")?;
 
         Ok(response
             .delayed_events

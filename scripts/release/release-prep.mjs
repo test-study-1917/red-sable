@@ -7,15 +7,28 @@ const ABI_CODES = { arm: 1, arm64: 2 };
 
 export const FASTLANE_DIR = 'fastlane/metadata/android/en-US/changelogs';
 
-export const METAINFO_FILES = [
-  'packaging/flatpak/moe.sable.client.metainfo.xml',
-  'packaging/flatpak/electron/moe.sable.next.electron.metainfo.xml',
-];
+export const METAINFO_FILES = ['packaging/flatpak/moe.sable.client.metainfo.xml'];
 
 export function fastlaneChangelogs(version) {
-  const [major, minor, patch] = version.split('.').map(Number);
+  const { major, minor, patch } = stableVersion(version);
   const base = major * 1_000_000 + minor * 1_000 + patch;
   return Object.values(ABI_CODES).map((abi) => join(FASTLANE_DIR, `${base * 10 + abi}.txt`));
+}
+
+// The release job installs no packages, so this cannot use `semver`.
+const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+function parseStable(version) {
+  const match = STABLE_VERSION.exec(version ?? '');
+  if (!match) return null;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return { major, minor, patch };
+}
+
+function stableVersion(version) {
+  const parsed = parseStable(version);
+  if (!parsed) throw new Error(`Expected a stable SemVer version (got ${version})`);
+  return parsed;
 }
 
 /** What a release tree is missing: the version bump, the changelog section, the Android changelogs and the Flatpak entries. */
@@ -60,7 +73,7 @@ export function releaseProblems(version, root = '.') {
 
 if (import.meta.main) {
   const version = process.argv[2];
-  if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
+  if (!parseStable(version)) {
     console.error(`Usage: release-prep.mjs <version>  (got: ${version ?? '<none>'})`);
     process.exit(1);
   }

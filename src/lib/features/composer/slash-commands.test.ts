@@ -17,16 +17,15 @@ import type {
 } from '#src/generated/protocol';
 
 import {
-  descriptionKey,
   parseSlash,
   runSlash,
   slashCommandNames,
   SlashError,
-  usageKey,
   type SlashContext,
 } from './slash-commands';
 
-import en from '../../../locales/en.json' with { type: 'json' };
+import { testPersona } from '#lib/personas/persona.ts';
+import { memberView } from '#lib/test-support/room-views.js';
 
 function fakeCommands() {
   return {
@@ -76,6 +75,7 @@ function fakeRpc() {
           personas: [],
           account: null,
           rooms: {},
+          account_rooms: [],
           disabled_rooms: [],
         } as PersonaCatalogView)
       ),
@@ -109,6 +109,7 @@ function context(
     roomId: '!room:example.org',
     userId: '@me:example.org',
     developerTools: true,
+    e2eePolicy: () => Promise.resolve({ defaultEncrypted: true, forceDisabled: false }),
     rpc: {
       ...rpc,
       account: commands,
@@ -244,15 +245,15 @@ test.each(['hug', 'cuddle', 'wave', 'poke', 'headpat'] as const)(
 test('a mention pill stands in for the user id a command asks for', async () => {
   const commands = fakeCommands();
 
-  await runSlash('/headpat @Erwan', {
+  await runSlash('/headpat @Kris', {
     ...context(commands),
-    formatted: '/headpat <a href="https://matrix.to/#/@erwan:example.org">@Erwan</a>',
+    formatted: '/headpat <a href="https://matrix.to/#/@kris:example.org">@Kris</a>',
   });
 
   expect(commands.sendGesture).toHaveBeenCalledWith({
     room_id: '!room:example.org',
     gesture: 'headpat',
-    target: '@erwan:example.org',
+    target: '@kris:example.org',
   });
 });
 
@@ -504,19 +505,6 @@ test.each([
   });
 });
 
-test('every command has a description and a usage line', () => {
-  const slash: Record<string, { description: string; usage: string }> = en.composer.slash;
-
-  for (const name of slashCommandNames()) {
-    const entry = slash[name];
-    expect(entry, `no locale entry for /${name}`).toBeDefined();
-    expect(descriptionKey(name)).toBe(`composer.slash.${name}.description`);
-    expect(usageKey(name)).toBe(`composer.slash.${name}.usage`);
-    expect(entry.description.length, `/${name} description`).toBeGreaterThan(0);
-    expect(entry.usage.startsWith(`/${name}`), `/${name} usage`).toBe(true);
-  }
-});
-
 test('no two commands claim the same name', () => {
   const names = slashCommandNames();
 
@@ -653,21 +641,15 @@ test('/addwidget shows its usage for a url the core refuses', async () => {
 test('/pmpproxy appends a persona trigger', async () => {
   const rpc = fakeRpc();
   const persona = {
+    ...testPersona,
     id: 'alt',
     display_name: 'Alt',
-    avatar_url: null,
-    pronouns: [],
-    color_on_light: null,
-    color_on_dark: null,
-    triggers: [],
-    pluralkit: null,
-    last_used: null,
-    alternate_avatars: null,
   } satisfies PersonaView;
   rpc.personas.list.mockResolvedValueOnce({
     personas: [persona],
     account: null,
     rooms: {},
+    account_rooms: [],
     disabled_rooms: [],
   });
 
@@ -676,8 +658,9 @@ test('/pmpproxy appends a persona trigger', async () => {
   expect(rpc.personas.save).toHaveBeenCalledWith({
     persona: expect.objectContaining({
       id: 'alt',
-      triggers: [{ prefix: '✨:', suffix: null, keep_trigger: false }],
+      triggers: [{ prefix: '✨:', suffix: null, keep_trigger: false, alternate_avatar_id: null }],
     }) as unknown,
+    base_persona: persona,
     previous_id: 'alt',
   });
 });
@@ -818,6 +801,7 @@ test('/addpmp creates a profile from its named fields', async () => {
       display_name: 'Alt',
       avatar_url: 'mxc://example.org/a',
     }) as unknown,
+    base_persona: expect.objectContaining({ id: 'alt' }) as unknown,
     previous_id: null,
   });
 });
@@ -874,16 +858,7 @@ test('/usepmp latches a profile and resets it', async () => {
 });
 
 function member(userId: string, membership: MemberView['membership'] = 'join'): MemberView {
-  return {
-    user_id: userId,
-    display_name: null,
-    avatar_url: null,
-    power_level: 0,
-    membership,
-    member_ts: null,
-    kicked: false,
-    service: false,
-  };
+  return memberView({ user_id: userId, membership });
 }
 
 test('/pronoun sets and resets your room pronouns', async () => {

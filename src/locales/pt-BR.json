@@ -21,7 +21,7 @@
     "dark": "Escuro",
     "retry": "Tentar novamente",
     "sourceCode": "Código fonte",
-    "startingSable": "Iniciando o Sable…",
+    "startingSable": "Iniciando o {{appName}}…",
     "today": "Hoje",
     "searchMessages": "Procurar mensagens",
     "searchRooms": "Procurar salas",
@@ -127,8 +127,12 @@
     "rooms": "Salas",
     "unspaced": "Salas fora de espaços",
     "unspacedEmpty": "Salas que não estão em um espaço vão aparecer aqui.",
-    "unreadMessages": "{{count, number}} mensagens não lidas",
-    "unreadMentions": "{{count, number}} menções",
+    "unreadMessages_one": "{{count, number}} mensagens não lidas",
+    "unreadMessages_many": "",
+    "unreadMessages_other": "",
+    "unreadMentions_one": "{{count, number}} menções",
+    "unreadMentions_many": "",
+    "unreadMentions_other": "",
     "markedUnread": "Marcado como não lido",
     "pinToSidebar": "Fixar na barra lateral"
   },
@@ -216,10 +220,7 @@
     "getSupport": "Suporte"
   },
   "app": {
-    "migrationFailed": "Seus dados v1 não puderam ser migrados. Seus dados originais ainda estão salvos. Feche outras janelas do Sable antes de tentar novamente.",
-    "unableToStart": "O Sable não conseguiu iniciar.",
-    "skipMigration": "Continuar sem seus dados v1",
-    "skipMigrationHint": "Seus dados v1 permanecem onde estão, mas o Sable não tentará migrar novamente. Você pode logar novamente depois.",
+    "unableToStart": "O {{appName}} não conseguiu iniciar.",
     "startFailed": "Verifique sua conexão e o armazenamento do seu dispositivo."
   },
   "settings": {
@@ -246,7 +247,7 @@
     "animalIdentityWhatHasPlaceholder": "gatos",
     "otherProfileFields": "Outros campos de perfil",
     "closeToTrayHint": "Fechar a janela esconde o app. Para fechar use o ícone da bandeja do sistema.",
-    "useCustomTitleBar": "Usar barra de título do Sable",
+    "useCustomTitleBar": "Usar barra de título do {{appName}}",
     "pronouns": "Pronomes",
     "animalIdentity": "Identidade animal",
     "animalIdentityWhatNeedsPlaceholder": "abraços"
@@ -256,7 +257,7 @@
     "browseThemes": "Navegar por mais temas"
   },
   "auth": {
-    "welcome": "Bem vindo ao Sable"
+    "welcome": "Bem vindo ao {{appName}}"
   },
   "composer": {
     "slash": {
@@ -273,7 +274,7 @@
     "gifSearchFailed": "Não foi possível procurar por GIFs."
   },
   "errors": {
-    "coreUnresponsive": "Sable não está respondendo."
+    "coreUnresponsive": "{{appName}} não está respondendo."
   },
   "personas": {
     "pronouns": "Pronomes"

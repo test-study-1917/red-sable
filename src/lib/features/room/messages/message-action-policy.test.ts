@@ -18,8 +18,7 @@ function item(overrides: Partial<TimelineItemView> = {}): TimelineItemView {
       kind: 'message',
       body: 'hello',
       html: '<b>hello</b>',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -36,6 +35,7 @@ function item(overrides: Partial<TimelineItemView> = {}): TimelineItemView {
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
     ...overrides,
   });
 }
@@ -101,6 +101,7 @@ function mediaContent(
     caption,
     html,
     source: 'mxc://example.org/x',
+    external_url: null,
     mime: 'text/x',
   };
   if (kind === 'image') {
@@ -185,6 +186,7 @@ test('media and threaded events expose their respective actions', () => {
       filename: 'photo.png',
       caption: null,
       source: 'mxc://example.org/photo',
+      external_url: null,
       mime: 'image/png',
       width: null,
       height: null,
@@ -268,8 +270,7 @@ test('edited messages can still be annotated through their original event', () =
       kind: 'message',
       body: 'edited',
       html: 'edited',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: true,
       jumbo: null,
     },

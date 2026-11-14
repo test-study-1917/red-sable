@@ -1,11 +1,18 @@
-import type { BookmarkView, InboxItemView, RoomListItemView } from '#src/generated/protocol';
+import { localpartOf } from '#lib/matrix-id.js';
+import type {
+  BookmarkView,
+  InboxFilter,
+  InboxItemView,
+  RoomListItemView,
+} from '#src/generated/protocol';
 
+import { DAY_MS, startOfDay } from '#lib/day.js';
 import { formatTime } from '#lib/ui/date-time.js';
 import { currentLocale } from '#lib/i18n.js';
 import { hasUnread, type RoomUnread, roomUnread } from '#lib/rooms/unread.js';
 import type { UnreadCount } from '#lib/rooms/unread.js';
 
-export type NotificationFilter = 'all' | 'mentions' | 'direct';
+export type NotificationFilter = InboxFilter;
 export type InboxTab = 'notifications' | 'invites' | 'requests';
 
 export const NOTIFICATION_GROUP_LIMIT = 5;
@@ -48,7 +55,7 @@ export function parseInboxTab(
 }
 
 export function parseFilter(value: string | null): NotificationFilter {
-  return value === 'mentions' || value === 'direct' ? value : 'all';
+  return value === 'mentions' || value === 'direct' || value === 'threads' ? value : 'all';
 }
 
 export function notificationCount(counts: UnreadCount): number {
@@ -60,18 +67,17 @@ function matchesFilter(
   filter: NotificationFilter,
   counts: UnreadCount
 ): boolean {
+  const pending = hasUnread(counts) || notificationCount(counts) > 0;
   switch (filter) {
     case 'direct':
-      return room.is_direct && hasUnread(counts);
+      return room.is_direct && pending;
     case 'mentions':
       return counts.highlight > 0;
+    case 'threads':
+      return false;
     default:
-      return hasUnread(counts);
+      return pending;
   }
-}
-
-function byRecency(left: RoomListItemView, right: RoomListItemView): number {
-  return (right.latest_event?.timestamp ?? 0) - (left.latest_event?.timestamp ?? 0);
 }
 
 export function notifications(
@@ -79,12 +85,10 @@ export function notifications(
   filter: NotificationFilter,
   unreadFor: RoomUnread = roomUnread
 ): RoomListItemView[] {
-  return rooms
-    .filter((room) => {
-      if (room.state !== 'joined' || room.room_kind === 'space') return false;
-      return matchesFilter(room, filter, unreadFor(room));
-    })
-    .sort(byRecency);
+  return rooms.filter((room) => {
+    if (room.state !== 'joined' || room.room_kind === 'space') return false;
+    return matchesFilter(room, filter, unreadFor(room));
+  });
 }
 
 export function countNotifications(
@@ -132,7 +136,7 @@ export function backfillSignal(rooms: readonly RoomListItemView[]): string {
 }
 
 export function pendingInvites(rooms: readonly RoomListItemView[]): RoomListItemView[] {
-  return rooms.filter((room) => room.state === 'invited').sort(byRecency);
+  return rooms.filter((room) => room.state === 'invited');
 }
 
 export function countInvites(rooms: readonly RoomListItemView[]): number {
@@ -144,7 +148,7 @@ export function inviter(room: RoomListItemView): string | null {
 }
 
 export function senderName(userId: string): string {
-  return userId.startsWith('@') ? (userId.slice(1).split(':')[0] ?? userId) : userId;
+  return userId.startsWith('@') ? localpartOf(userId) : userId;
 }
 
 function matchesBookmarkQuery(bookmark: BookmarkView, needle: string): boolean {
@@ -166,16 +170,10 @@ export function filteredBookmarks(
     .sort((left, right) => right.bookmarked_ts - left.bookmarked_ts);
 }
 
-const DAY_MS = 86_400_000;
-
-function startOfDay(date: Date): number {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-}
-
 export function formatCompactTimestamp(timestamp: number, now: number = Date.now()): string {
   const date = new Date(timestamp);
   const today = new Date(now);
-  const days = Math.round((startOfDay(today) - startOfDay(date)) / DAY_MS);
+  const days = Math.round((startOfDay(now) - startOfDay(timestamp)) / DAY_MS);
   if (days <= 0) return formatTime(timestamp);
   if (days < 7) return date.toLocaleDateString(currentLocale(), { weekday: 'short' });
   return date.toLocaleDateString(currentLocale(), {

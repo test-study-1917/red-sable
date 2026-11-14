@@ -1,4 +1,5 @@
 {
+  "$schema": "./config.schema.json",
   "homeserverList": [
     "matrix.org",
     "mozilla.org",
@@ -22,7 +23,7 @@
     "unifiedPushEmbeddedServerUrl": "https://ntfy.ow-ops.eu"
   },
   "embeds": {
-    "serviceUrl": ""
+    "serviceUrl": "https://preview.sable.moe"
   },
   "supporterAwards": {
     "serviceUrl": "https://awards.sable.moe",

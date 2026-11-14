@@ -1,46 +1,32 @@
 import { afterEach, assert, expect, test, vi } from 'vitest';
 
+vi.mock('#lib/i18n.js', () => import('#lib/test-support/i18n.js'));
+
 import type { RoomListItemView } from '#src/generated/protocol';
 
 import { parseMatrixLink } from '#lib/rooms/matrix-link.js';
-import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { roomView } from '#lib/test-support/room-views.js';
 
 import {
   copyRoomLink,
   existingChatPath,
+  joinVia,
   matrixLinkPath,
   matrixToUrl,
   permalinkTarget,
   roomSectionPath,
+  setSidebarSpaceOrder,
   viaFor,
 } from './permalink';
 
 function room(roomId: string, overrides: Partial<RoomListItemView> = {}): RoomListItemView {
-  return withCounts({
+  return roomView({
     room_id: roomId,
-    canonical_alias: null,
     name: roomId,
-    topic: null,
-    avatar_url: null,
-    is_direct: false,
-    direct_targets: [],
     join_rule: 'public',
-    tags: [],
-    state: 'joined',
-    encrypted: null,
-    is_tombstoned: false,
-    room_kind: 'text',
-    call_participants: [],
-    screen_sharers: [],
     supports_knock: true,
     supports_restricted: true,
     supports_knock_restricted: true,
-    space_children: [],
-    unread: 0,
-    notifying: 0,
-    highlight: 0,
-    marked_unread: false,
-    latest_event: null,
     ...overrides,
   });
 }
@@ -268,6 +254,30 @@ test('only a room id is given routing help; an alias resolves itself', () => {
   expect(viaFor('#lobby:example.org', ['a.example'])).toEqual([]);
 });
 
+function viaCore() {
+  const viaServers = vi.fn().mockResolvedValue(['member.example']);
+  const core = { rpc: { rooms: { viaServers } }, session: { user_id: '@me:home.example' } };
+  return { core: core as unknown as Parameters<typeof joinVia>[0], viaServers };
+}
+
+test('a via naming another server is kept as is', async () => {
+  const { core, viaServers } = viaCore();
+  expect(await joinVia(core, ['home.example', 'other.example'], '!space:x')).toEqual([
+    'home.example',
+    'other.example',
+  ]);
+  expect(viaServers).not.toHaveBeenCalled();
+});
+
+test('a via naming only our server adds the parent space members', async () => {
+  const { core, viaServers } = viaCore();
+  expect(await joinVia(core, ['home.example'], '!space:x')).toEqual([
+    'home.example',
+    'member.example',
+  ]);
+  expect(viaServers).toHaveBeenCalledWith({ room_id: '!space:x' });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -385,4 +395,27 @@ test('chat links reuse joined DMs and ask before replacing left or tombstoned DM
       '@alice:example.org'
     )
   ).toBeNull();
+});
+
+test('a room under several spaces lands under the one highest in the sidebar', () => {
+  const rooms = [
+    room('!archive:example.org', {
+      room_kind: 'space',
+      space_children: [child('!inner:example.org')],
+    }),
+    room('!main:example.org', { room_kind: 'space', space_children: [child('!sub:example.org')] }),
+    room('!sub:example.org', { room_kind: 'space', space_children: [child('!inner:example.org')] }),
+    room('!inner:example.org'),
+  ];
+  const order = ['!main:example.org', '!archive:example.org'];
+
+  setSidebarSpaceOrder(order);
+  expect(roomSectionPath(rooms, '!inner:example.org')).toBe(
+    '/space/!main%3Aexample.org/!inner%3Aexample.org'
+  );
+  setSidebarSpaceOrder(order.toReversed());
+  expect(roomSectionPath(rooms, '!inner:example.org')).toBe(
+    '/space/!archive%3Aexample.org/!inner%3Aexample.org'
+  );
+  setSidebarSpaceOrder([]);
 });

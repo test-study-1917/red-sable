@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpLeftIcon';
+  import ReplyIcon from 'phosphor-svelte/lib/ArrowBendUpRightIcon';
 
   import type {
     MemberView,
@@ -10,7 +10,6 @@
   } from '#src/generated/protocol';
 
   import { i18n } from '#lib/i18n.js';
-  import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
   import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { findMember, senderDisplayColors, stripReplyFallback } from '../members/members.js';
@@ -41,8 +40,7 @@
     return member ? member.display_name : (reply.sender_name ?? target?.sender_name ?? null);
   });
   let nameBase = $derived(
-    persona?.display_name ??
-      profileOverrides.name(sender ?? '', roomName ?? sender ?? i18n.t('timeline.unknownSender'))
+    persona?.display_name ?? roomName ?? sender ?? i18n.t('timeline.unknownSender')
   );
   let name = $derived(
     reply.sender_mentioned && !nameBase.startsWith('@') ? `@${nameBase}` : nameBase
@@ -76,7 +74,7 @@
 {#snippet copy()}
   <span class="reply-copy"
     ><SenderName displayName={name} {colors} nameClass="reply-name" compact />
-    <span class="reply-body">{body}</span></span
+    <span class="reply-body" dir="auto">{body}</span></span
   >
 {/snippet}
 
@@ -98,7 +96,7 @@
       onJumpToEvent?.(reply.event_id);
     }}
   >
-    <ReplyIcon class="reply-icon" />
+    <ReplyIcon class="mirror-rtl reply-icon" />
     {@render copy()}
   </button>
 {/if}
@@ -172,12 +170,12 @@
   }
 
   .reply-connected::before {
-    border-left: var(--reply-connector-width) solid var(--surface-on-container);
+    border-inline-start: var(--reply-connector-width) solid var(--surface-on-container);
     border-radius: var(--radius) 0 0;
     border-top: var(--reply-connector-width) solid var(--surface-on-container);
     content: '';
     height: calc(var(--space-250) + var(--border-width-300));
-    left: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+    inset-inline-start: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
     opacity: var(--opacity-placeholder);
     pointer-events: none;
     position: absolute;
@@ -205,7 +203,7 @@
     background: var(--primary-main);
     bottom: 0;
     content: '';
-    left: 0;
+    inset-inline-start: 0;
     pointer-events: none;
     position: absolute;
     top: 0;
@@ -241,7 +239,7 @@
   }
 
   :global(.message.layout-compact) .reply-connected::before {
-    left: calc(var(--space-050) - var(--space-300));
+    inset-inline-start: calc(var(--space-050) - var(--space-300));
     width: calc(var(--space-300) - var(--space-150));
   }
 
@@ -257,14 +255,12 @@
   }
 
   :global(.message.layout-bubble.own.align-own) .reply-connected {
+    justify-self: end;
+    max-width: 100%;
     text-align: end;
   }
 
   :global(.message.layout-bubble.own.align-own) .reply-connected::before {
-    border-left: 0;
-    border-radius: 0 var(--radius) 0 0;
-    border-right: var(--reply-connector-width) solid var(--surface-on-container);
-    left: auto;
-    right: calc(-1 * (var(--timeline-row-gap) + var(--avatar-size-small) / 2));
+    display: none;
   }
 </style>

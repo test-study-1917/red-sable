@@ -46,16 +46,28 @@
   label={i18n.t('common.readReceipts')}
   closeLabel={i18n.t('timeline.closeReadReceipts')}
   children={content}
+  expandable
 />
 
 <style>
   .receipts-dialog {
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: var(--space-300);
+
+    /* The frame scrolls once its content passes this, so stay inside it and leave the list to scroll. */
+    max-height: min(
+      28rem,
+      calc(
+        100dvh - var(--safe-top) - var(--safe-bottom) - var(--space-300) * 2 - var(--space-500) * 2
+      )
+    );
     width: min(22rem, calc(100vw - 2rem));
   }
 
   .receipts-dialog.sheet {
+    height: calc(16rem - var(--control-height-large) - var(--space-400));
+    max-height: none;
     padding: 0 var(--space-400);
     width: auto;
   }

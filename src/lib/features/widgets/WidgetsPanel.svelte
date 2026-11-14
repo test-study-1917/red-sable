@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
+  import { panelIn, panelOut, usePanelStage } from '#lib/ui/motion.js';
   import ArrowLeftIcon from 'phosphor-svelte/lib/ArrowLeftIcon';
   import GridFourIcon from 'phosphor-svelte/lib/GridFourIcon';
   import PlusIcon from 'phosphor-svelte/lib/PlusIcon';
+  import ShieldSlashIcon from 'phosphor-svelte/lib/ShieldSlashIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
 
   import { i18n } from '#lib/i18n.js';
+  import { readText, removeLocalValue, writeText } from '#lib/platform/local-json.js';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import PanelHeader from '#lib/ui/primitives/PanelHeader.svelte';
@@ -14,6 +18,11 @@
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
   import type { RoomWidget } from './widget-content.js';
+  import {
+    type CapabilityDecision,
+    approveCapabilities,
+    widgetPermissionKey,
+  } from './capabilities.js';
   import { templateWidgetUrl } from './widget-url.js';
   import IntegrationManagerDialog from './IntegrationManagerDialog.svelte';
   import WidgetCapabilitiesDialog from './WidgetCapabilitiesDialog.svelte';
@@ -45,18 +54,19 @@
     onAdd,
     onRemove,
   }: Props = $props();
+  const stage = usePanelStage();
 
   const WIDTH_STORAGE_KEY = 'sable-widgets-panel-width';
   const MIN_WIDTH = 18;
   const MAX_WIDTH = 48;
   const WIDTH_STEP = 1;
 
-  const storedWidth = Number.parseFloat(localStorage.getItem(WIDTH_STORAGE_KEY) ?? '');
+  const storedWidth = Number.parseFloat(readText(WIDTH_STORAGE_KEY) ?? '');
   let width = $state(Number.isFinite(storedWidth) ? clampWidth(storedWidth) : 22);
   let activeId = $state<string | null>(null);
 
   function clampWidth(next: number): number {
-    return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, next));
+    return clamp(next, MIN_WIDTH, MAX_WIDTH);
   }
 
   function remFromPixels(pixels: number): number {
@@ -93,23 +103,32 @@
   }
 
   interface PendingApproval {
+    key: string;
     widgetName: string;
     requested: string[];
-    settle: (approved: string[]) => void;
+    settle: (decision: CapabilityDecision) => void;
   }
 
   let approval = $state.raw<PendingApproval | null>(null);
 
-  function requestCapabilities(widgetName: string) {
-    return async (requested: Set<string>): Promise<Set<string>> => {
-      if (requested.size === 0) return new Set();
-
-      const approved = await new Promise<string[]>((settle) => {
-        approval = { widgetName, requested: [...requested], settle };
-      });
-      approval = null;
-      return new Set(approved);
-    };
+  function requestCapabilities(key: string, widgetName: string) {
+    return (requested: Set<string>): Promise<Set<string>> =>
+      approveCapabilities(
+        key,
+        requested,
+        (missing) =>
+          new Promise<CapabilityDecision>((settle) => {
+            approval = {
+              key,
+              widgetName,
+              requested: missing,
+              settle: (decision) => {
+                approval = null;
+                settle(decision);
+              },
+            };
+          })
+      );
   }
 
   let activeWidget = $derived(widgets.find((widget) => widget.id === activeId) ?? null);
@@ -123,11 +142,24 @@
         })
       : null
   );
+  let activeKey = $derived(
+    activeWidget && activeUrl ? widgetPermissionKey(userId, roomId, activeWidget, activeUrl) : null
+  );
+
+  $effect(() => {
+    const key = activeKey;
+    return () => {
+      if (approval?.key === key) approval.settle({ approved: [], remember: false });
+    };
+  });
 </script>
 
 <aside
+  in:panelIn|global={{ modal, stage }}
+  out:panelOut|global={{ modal, stage }}
   class={['widgets-panel', { modal }]}
   aria-label={i18n.t('widgets.label')}
+  data-focus-region="panel"
   style:width={modal ? null : `${width}rem`}
 >
   {#if !modal}
@@ -140,35 +172,47 @@
       step={WIDTH_STEP}
       fromPixels={remFromPixels}
       onResize={(next) => (width = clampWidth(next))}
-      onCommit={() => localStorage.setItem(WIDTH_STORAGE_KEY, String(width))}
+      onCommit={() => writeText(WIDTH_STORAGE_KEY, String(width))}
     />
   {/if}
   <PanelHeader class="widgets-header" title={activeWidget?.name || i18n.t('widgets.title')}>
     {#snippet prefix()}
       {#if activeWidget}
         <PanelHeaderButton label={i18n.t('widgets.back')} onclick={() => (activeId = null)}>
-          <ArrowLeftIcon />
+          <ArrowLeftIcon class="mirror-rtl" />
         </PanelHeaderButton>
       {:else}
         <GridFourIcon aria-hidden="true" />
       {/if}
     {/snippet}
     {#snippet suffix()}
+      {#if activeKey}
+        {@const key = activeKey}
+        <PanelHeaderButton
+          label={i18n.t('widgets.capabilitiesForget')}
+          onclick={() => {
+            removeLocalValue(key);
+            activeId = null;
+          }}
+        >
+          <ShieldSlashIcon />
+        </PanelHeaderButton>
+      {/if}
       <PanelHeaderButton label={i18n.t('widgets.close')} onclick={onClose}>
         <XIcon />
       </PanelHeaderButton>
     {/snippet}
   </PanelHeader>
 
-  {#if activeWidget && activeUrl}
-    {#key activeUrl}
+  {#if activeWidget && activeUrl && activeKey}
+    {#key activeKey}
       <div class="widgets-frame">
         <WidgetFrame
           {roomId}
           widgetId={activeWidget.id}
           url={activeUrl}
           name={activeWidget.name}
-          onCapabilities={requestCapabilities(activeWidget.name)}
+          onCapabilities={requestCapabilities(activeKey, activeWidget.name)}
         />
       </div>
     {/key}
@@ -280,12 +324,12 @@
   }
 
   .widgets-panel:not(.modal) {
-    border-left: var(--border-width) solid var(--surface-container-line);
+    border-inline-start: var(--border-width) solid var(--surface-container-line);
     flex: 0 0 auto;
   }
 
   .widgets-panel :global(.resize-handle) {
-    left: -0.25rem;
+    inset-inline-start: -0.25rem;
     z-index: 1;
   }
 

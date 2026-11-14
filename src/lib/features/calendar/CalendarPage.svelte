@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import PageTitle from '#lib/ui/primitives/PageTitle.svelte';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
   const remembered = { mode: 'agenda' as 'agenda' | 'month', monthStart: null as number | null };
 </script>
@@ -30,10 +31,11 @@
   } from '#lib/features/room/room-navigation.js';
   import RoomSettingsDialog from '#lib/features/room/settings/RoomSettingsDialog.svelte';
   import type { RoomSettingsSectionId } from '#lib/features/room/settings/room-settings-sections.js';
+  import { DAY_MS, startOfDay, startOfMonth } from '#lib/day.js';
   import { formatDate, formatTime } from '#lib/ui/date-time.js';
   import { currentLocale, i18n } from '#lib/i18n.js';
   import { findRoomByPathId, useRoomList } from '#lib/rooms/room-list.svelte.js';
-  import { preferences, readReceiptIsPrivate } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
@@ -53,21 +55,14 @@
     monthGrid,
     occursOn,
     readEntries,
-    startOfDay,
     tallyRsvps,
   } from '#lib/calendar/calendar-events.js';
   import CalendarEventDialog from './CalendarEventDialog.svelte';
 
-  const DAY = 86_400_000;
-  const WINDOW = 365 * DAY;
+  const WINDOW = 365 * DAY_MS;
   const STATUSES: readonly RsvpStatus[] = ['accepted', 'tentative', 'declined'];
   const CHIPS = 3;
   const DOTS = 3;
-
-  function startOfMonth(at: number): number {
-    const date = new Date(at);
-    return new Date(date.getFullYear(), date.getMonth(), 1).getTime();
-  }
 
   function firstWeekday(): number {
     return { sunday: 0, monday: 1, saturday: 6 }[preferences.weekStart];
@@ -121,7 +116,7 @@
 
   let grid = $derived(monthGrid(monthStart, firstWeekday()));
   let gridOccurrences = $derived(
-    agenda(items, grid[0] ?? monthStart, startOfDay(grid.at(-1) ?? monthStart) + 2 * DAY)
+    agenda(items, grid[0] ?? monthStart, startOfDay(grid.at(-1) ?? monthStart, 2))
   );
   let activeDay = $derived(
     pickedDay ?? (startOfMonth(now) === monthStart ? startOfDay(now) : monthStart)
@@ -239,8 +234,7 @@
   }
 
   function moveMonth(by: number): void {
-    const date = new Date(monthStart);
-    monthStart = new Date(date.getFullYear(), date.getMonth() + by, 1).getTime();
+    monthStart = startOfMonth(monthStart, by);
     pickedDay = null;
   }
 
@@ -313,10 +307,9 @@
       .markRead({
         room_id: resolvedRoomId,
         event_id: null,
-        private_receipt: readReceiptIsPrivate(),
         thread_root: null,
         subscription: null,
-        fully_read: false,
+        fully_read: true,
       })
       .catch((error: unknown) => {
         console.warn('[sable calendar] mark as read failed', error);
@@ -409,15 +402,13 @@
   }
 </script>
 
-<svelte:head>
-  <title>{roomName}</title>
-</svelte:head>
+<PageTitle title={roomName} />
 
 <main class="calendar-page" aria-label={i18n.t('calendar.label')} data-inset-owner="top">
   <PanelHeader title={roomName} titleSize="h1">
     {#snippet prefix()}
       <PanelHeaderButton label={i18n.t('timeline.back')} onclick={backToRoomList}>
-        <BackIcon />
+        <BackIcon class="mirror-rtl" />
       </PanelHeaderButton>
       <Avatar
         id={resolvedRoomId}
@@ -457,7 +448,7 @@
       />
     {/snippet}
   </PanelHeader>
-  <RoomBannerStrip {roomId} />
+  <RoomBannerStrip roomId={resolvedRoomId} />
 
   <div class="calendar-content" {@attach scrollHint}>
     <div class="calendar-range">
@@ -496,7 +487,7 @@
     {#if mode === 'month'}
       <div class="calendar-month-nav">
         <PanelHeaderButton label={i18n.t('calendar.previousMonth')} onclick={() => moveMonth(-1)}>
-          <BackIcon />
+          <BackIcon class="mirror-rtl" />
         </PanelHeaderButton>
         <h2 class="calendar-month-title">
           {new Date(monthStart).toLocaleDateString(currentLocale(), {
@@ -505,7 +496,7 @@
           })}
         </h2>
         <PanelHeaderButton label={i18n.t('calendar.nextMonth')} onclick={() => moveMonth(1)}>
-          <NextIcon />
+          <NextIcon class="mirror-rtl" />
         </PanelHeaderButton>
         <Button size="small" variant="ghost" onclick={goToday}>{i18n.t('common.today')}</Button>
       </div>

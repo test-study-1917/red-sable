@@ -3,7 +3,10 @@
 </script>
 
 <script lang="ts">
+  import { cubicOut } from 'svelte/easing';
   import { MediaQuery } from 'svelte/reactivity';
+  import { slide } from 'svelte/transition';
+  import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
   import type {
     ImageUsageView,
     MemberView,
@@ -30,18 +33,15 @@
   import { i18n } from '#lib/i18n.js';
   import { isPackChange } from '#lib/emoji/load-packs.js';
   import { capturesFromCamera, pickFiles } from '#lib/platform/files.js';
+  import { isAndroid } from '#lib/platform/os.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
   import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
   import { personaSpaces } from './persona-spaces.js';
-  import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
-  import {
-    preferences,
-    setPreference,
-    type ImageMetadata,
-  } from '#lib/settings/preferences.svelte.js';
-  import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { type ImageMetadata } from '#lib/settings/definitions.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
   import { cachedMediaUrl, holdMediaUrl, loadMediaUrl } from '#lib/ui/media-url.js';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
@@ -69,6 +69,13 @@
   import ScheduleComposer from './ScheduleComposer.svelte';
   import type { AutocompleteQuery, Suggestion } from './autocomplete';
   import { formattedForEditing, type ComposerContext } from '#lib/composer/composer-context.js';
+  import {
+    readBotCommand,
+    readDraft,
+    writeBotCommand,
+    writeDraft,
+    type BotCommandDraft,
+  } from '#lib/composer/composer-drafts.svelte.js';
   import {
     previewKind,
     restoreFile,
@@ -113,7 +120,6 @@
     buildInvocation,
     draftsFromText,
     matchBotCommand,
-    type ArgumentDrafts,
     type BotCommand,
     type BotCommandInvocation,
   } from './bot-commands';
@@ -126,6 +132,7 @@
   import VoiceRecorder from './VoiceRecorder.svelte';
   import { isVoiceRecordingSupported } from './voice-recorder-support';
   import './composer-chrome.css';
+  import { resolveProxy, type ProxyMatch } from '#lib/personas/persona.js';
 
   interface Props {
     roomId: string;
@@ -189,6 +196,7 @@
     onCancelContext?: () => void;
     onEditPersona?: (persona: PersonaView | null) => void;
     onToggleSilentReply?: () => void;
+    onJumpToContext?: (eventId: string) => void;
     onDeleteEdited?: (eventId: string, reason: string | null) => void;
     onEditLast?: (before?: string) => void;
     onEditNext?: (after: string) => void;
@@ -221,6 +229,7 @@
     onCancelContext,
     onEditPersona,
     onToggleSilentReply,
+    onJumpToContext,
     onDeleteEdited,
     onEditLast,
     onEditNext,
@@ -231,10 +240,14 @@
   const core = useCoreClient();
   const roomList = useRoomList();
   const personas = usePersonaStore();
-  const appLayout = new MediaQuery(BREAKPOINTS.appLayout);
+  const appLayout = new AppLayout();
   const roomyPointer = new MediaQuery('(width >= 32rem) and (any-pointer: fine)');
+  const keyboardResizesViewport = isAndroid();
+  let heldCompactHeight = $state<boolean | null>(null);
+  const compactHeight = $derived(heldCompactHeight ?? appLayout.compactHeight);
   const composerShort = $derived(
-    preferences.composerForm === 'short' ||
+    compactHeight ||
+      preferences.composerForm === 'short' ||
       (preferences.composerForm === 'adaptive' && roomyPointer.current)
   );
   const uid = $props.id();
@@ -295,10 +308,13 @@
   let measurerEl = $state<HTMLElement>();
   let multiline = $state(false);
   let pointerHidden = $state(false);
-  const shortLayout = $derived(composerShort && (!multiline || preferences.alwaysInlineEditor));
+  const shortLayout = $derived(
+    compactHeight || (composerShort && (!multiline || preferences.alwaysInlineEditor))
+  );
   let layoutFrame: number | undefined;
   let empty = $state(true);
   let showPlaceholder = $state(true);
+  let shorthandHint = $state<ProxyMatch | null>(null);
   let activeFormats = $state.raw<FormatAction[]>([]);
   let activeColors = $state.raw<ActiveColors>({ fg: null, bg: null });
   let formattingOpen = $derived(preferences.formattingToolbar);
@@ -311,14 +327,9 @@
   let previousContext: ComposerContext | null = untrack(() => restoredContext);
   let deleteEditTarget = $state.raw<ComposerContext | null>(null);
   let members = $derived(roomMembers?.length ? roomMembers : sources.loadedMembers);
-  let activeBotCommand = $derived.by<{
-    command: BotCommand;
-    drafts: ArgumentDrafts;
-    prefix: string;
-  } | null>(() => {
-    void roomId;
-    return null;
-  });
+  let activeBotCommand = $derived(
+    readBotCommand(draftKey(), core.session?.account_id ?? '') ?? null
+  );
 
   let desktop = $derived(appLayout.current);
   let sending = $derived(inFlight > 0);
@@ -400,8 +411,7 @@
       advertisedAdminCommands.length > 0
         ? adminCommandTree(advertisedAdminCommands)
         : sources.adminCommands,
-      slashBotCommands,
-      (userId, fallback) => profileOverrides.name(userId, fallback)
+      slashBotCommands
     )
   );
 
@@ -449,8 +459,7 @@
 
   const editor = new ComposerEditor({
     media,
-    mentionName: (userId) =>
-      members.find((member) => member.user_id === userId)?.display_name ?? null,
+    mentionName: (userId) => members.find((member) => member.user_id === userId)?.real_name ?? null,
     emotes: () => sources.emotes,
     label: () => i18n.t('timeline.messagePlaceholder'),
     describedBy: hintId,
@@ -471,6 +480,7 @@
       if (change.docChanged) {
         typing.update(empty);
         scheduleDraftLinks();
+        shorthandHinting();
         scheduleLayout();
         draft.schedulePersist();
       }
@@ -549,11 +559,18 @@
       staged = files.staged;
       nextStagedId = files.nextStagedId;
     },
-    onLeave: (previousRoomId) => {
+    onLeave: () => {
       prefilledFor = null;
       prefilledDoc = undefined;
       error = null;
-      typing.leave(previousRoomId);
+      retry = null;
+      pollOpen = false;
+      locationOpen = false;
+      scheduleOpen = false;
+      recording = false;
+      recordingDraft = undefined;
+      boardOpen = false;
+      typing.stop();
     },
   });
 
@@ -601,16 +618,9 @@
   $effect(() => {
     if (context === previousContext) return;
 
-    const wasActive = previousContext !== null;
     previousContext = context;
     const frame = requestAnimationFrame(() => {
-      if (context !== null) {
-        editor.focus();
-      } else if (wasActive && !desktop && !sending) {
-        editor.blur();
-        const activeElement = document.activeElement;
-        if (activeElement instanceof HTMLElement) activeElement.blur();
-      }
+      if (context !== null) editor.focus();
     });
 
     return () => {
@@ -618,14 +628,20 @@
     };
   });
 
+  function storeBotCommand(command: BotCommandDraft | null): void {
+    activeBotCommand = command;
+    writeBotCommand(draftKey(), command, core.session?.account_id ?? '');
+  }
+
   function openBotCommand(command: BotCommand, args: string, prefix: string): void {
-    activeBotCommand = { command, drafts: draftsFromText(command, args), prefix };
+    const drafts = $state(draftsFromText(command, args));
+    storeBotCommand({ command, drafts, prefix });
     error = null;
     void sources.loadMembers();
   }
 
   function closeBotCommand(): void {
-    activeBotCommand = null;
+    storeBotCommand(null);
     editor.focus();
   }
 
@@ -636,15 +652,20 @@
   ): Promise<boolean> {
     if (!onSendBotCommand) return false;
     const targetRoomId = roomId;
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
     inFlight += 1;
     error = null;
     try {
       await queue.enqueue(() => onSendBotCommand(targetRoomId, command.sender, body, invocation));
-      if (activeBotCommand?.command === command) closeBotCommand();
+      if (readBotCommand(targetKey, accountId)?.command === command) {
+        writeBotCommand(targetKey, null, accountId);
+        if (targetKey === draftKey()) closeBotCommand();
+      }
       return true;
     } catch (cause) {
       console.debug('[sable composer] bot command failed', cause);
-      error = failureText(cause);
+      if (targetRoomId === roomId) error = failureText(cause);
       return false;
     } finally {
       inFlight -= 1;
@@ -671,6 +692,9 @@
     const matched = matchBotCommand(typed.line, typed.commands);
     if (!matched) return false;
 
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
+    const restore = () => restoreUnsent(targetKey, accountId, doc, []);
     editor.clear();
     if (matched.command.parameters.length === 0 && matched.args !== '') {
       const body = `${typed.prefix}${matched.command.command}${matched.raw_args}`;
@@ -680,7 +704,7 @@
           arguments: {},
         }))
       ) {
-        if (doc && roomId === targetRoomId && editor.isEmpty()) editor.setDoc(doc);
+        restore();
       }
       return true;
     }
@@ -688,7 +712,7 @@
     const result = buildInvocation(matched.command, drafts, typed.prefix);
     if (result.kind === 'built') {
       if (!(await sendBotCommand(matched.command, result.body, result.invocation))) {
-        if (doc && roomId === targetRoomId && editor.isEmpty()) editor.setDoc(doc);
+        restore();
       }
     } else {
       openBotCommand(matched.command, matched.args, typed.prefix);
@@ -740,9 +764,48 @@
     }, 300);
   }
 
+  function shorthandHinting(): void {
+    const doc = editor.doc();
+    const message = doc ? (richSend ? serializeComposer(doc) : serializePlain(doc)) : null;
+    if (preferences.personaProxying && preferences.personaPicker) {
+      if (message?.body) {
+        const proxy = resolveProxy(personas.personas, message.body);
+        shorthandHint = proxy ?? null;
+      } else {
+        shorthandHint = null;
+      }
+    }
+  }
+
   function failureText(cause: unknown): string {
     const { key, values } = sendFailure(cause);
     return i18n.t(key, values);
+  }
+
+  /** A send outlives a room switch, so its failure is put back in the room it was meant for. */
+  function restoreUnsent(
+    key: string,
+    accountId: string,
+    doc: ProseMirrorNode | undefined,
+    files: StagedFile[]
+  ): boolean {
+    if (key === draftKey() && accountId === (core.session?.account_id ?? '')) {
+      if (doc && editor.isEmpty()) editor.setDoc(doc);
+      staged = [...files, ...staged];
+      return true;
+    }
+    const held = readDraft(key, accountId);
+    const keepsText = held?.doc !== null && held?.doc !== undefined;
+    writeDraft(
+      key,
+      {
+        doc: keepsText ? held.doc : (doc?.toJSON() ?? null),
+        staged: [...files, ...(held?.staged ?? [])],
+        nextStagedId: held?.nextStagedId ?? nextStagedId,
+      },
+      accountId
+    );
+    return false;
   }
 
   function failRetryably(cause: unknown, run: () => void): void {
@@ -780,6 +843,9 @@
     const captionEdit = editingCaption && !attachmentsCancelEdit;
     const asCaption = preferences.sendAttachmentAsCaption;
     let unsent = staged;
+    const target = roomId;
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
 
     inFlight += 1;
     error = null;
@@ -797,11 +863,11 @@
           : {
               body: '',
               formatted: null,
-              mentions: { userIds: [], room: false },
+              mentions: { user_ids: [], room: false },
               imageSourcePacks: [],
             };
         const message = attachmentsCancelEdit
-          ? { ...serialized, body: '', formatted: null, mentions: { userIds: [], room: false } }
+          ? { ...serialized, body: '', formatted: null, mentions: { user_ids: [], room: false } }
           : untouched
             ? { ...serialized, ...untouched }
             : serialized;
@@ -810,13 +876,14 @@
           preferences.sendAttachmentsAsGallery &&
           onSendGallery !== undefined &&
           unsent.length > 1 &&
-          unsent.every((item) => !item.spoiler && previewKind(item.file) !== null);
+          unsent.every((item) => previewKind(item.file) !== null);
 
         if (gallery) {
-          await onSendGallery(roomId, await Promise.all(unsent.map(outgoingFile)), {
+          await onSendGallery(target, await Promise.all(unsent.map(outgoingFile)), {
             caption: message.body || null,
             formattedCaption: message.formatted,
             mentions: message.mentions,
+            spoilers: unsent.map((item) => item.spoiler),
           });
           unsent = [];
           return;
@@ -825,7 +892,7 @@
         while (unsent.length > 0) {
           const [next, ...rest] = unsent;
           await onSendAttachment(
-            roomId,
+            target,
             await outgoingFile(next),
             captioned
               ? {
@@ -842,13 +909,13 @@
         if (captioned || (message.body === '' && !captionEdit)) return;
         const action = message.imageSourcePacks
           ? await onSend(
-              roomId,
+              target,
               message.body,
               message.formatted,
               message.mentions,
               message.imageSourcePacks
             )
-          : await onSend(roomId, message.body, message.formatted, message.mentions);
+          : await onSend(target, message.body, message.formatted, message.mentions);
         if (isGifSearchAction(action)) {
           boardTab = 'gif';
           boardQuery = action.query;
@@ -858,9 +925,9 @@
       editor.clearHistory();
     } catch (cause) {
       console.debug('[sable composer] send failed', cause);
-      if (doc && editor.isEmpty()) editor.setDoc(doc);
-      staged = [...unsent, ...staged];
-      failRetryably(cause, () => void send());
+      if (restoreUnsent(targetKey, accountId, doc, unsent)) {
+        failRetryably(cause, () => void send());
+      }
     } finally {
       inFlight -= 1;
     }
@@ -884,6 +951,9 @@
 
     const attachments = staged;
     const delayIds: string[] = [];
+    const target = roomId;
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
 
     editor.clear();
     staged = [];
@@ -893,20 +963,20 @@
       for (const attachment of attachments) {
         delayIds.push(
           await core.media.scheduleAttachment(
-            roomId,
+            target,
             await outgoingFile(attachment),
             dueTs,
             attachment.spoiler,
             outgoingPersona(
               personas,
-              roomId,
-              personaSpaces(roomList.rooms, roomId, undefined).order
+              target,
+              personaSpaces(roomList.rooms, target, undefined).order
             ).persona
           )
         );
       }
       if (message.body !== '') {
-        await onSchedule(roomId, message.body, message.formatted, dueTs);
+        await onSchedule(target, message.body, message.formatted, dueTs);
       }
       editor.clearHistory();
       error = null;
@@ -916,12 +986,12 @@
         delayIds.map((delayId) => core.rpc.messages.cancelScheduled({ delay_id: delayId }))
       );
       if (cause instanceof ScheduledOriginalKept) {
+        if (target !== roomId) return;
         editor.clearHistory();
         error = i18n.t('composer.scheduledOriginalKept');
         return;
       }
-      if (doc && editor.isEmpty()) editor.setDoc(doc);
-      staged = [...attachments, ...staged];
+      if (!restoreUnsent(targetKey, accountId, doc, attachments)) return;
       error = i18n.t(
         attachments.length > 0 && isServerScheduleUnsupported(cause)
           ? 'composer.scheduleAttachmentUnsupported'
@@ -945,16 +1015,17 @@
 
   async function sendVoice(file: File): Promise<void> {
     void stopRecording();
+    const target = roomId;
     inFlight += 1;
     error = null;
 
     try {
       await queue.enqueue(async () => {
-        await onSendAttachment(roomId, file, {});
+        await onSendAttachment(target, file, {});
       });
     } catch (cause) {
       console.debug('[sable composer] voice message failed', cause);
-      failRetryably(cause, () => void sendVoice(file));
+      if (target === roomId) failRetryably(cause, () => void sendVoice(file));
     } finally {
       inFlight -= 1;
     }
@@ -1297,6 +1368,12 @@
   }}
 />
 
+<svelte:document
+  onvisibilitychange={() => {
+    if (document.visibilityState === 'hidden') draft.flush();
+  }}
+/>
+
 <ComposerDropZone {roomName} {readOnly} onFiles={stage} />
 
 <div
@@ -1314,7 +1391,12 @@
     <div class="composer-shell">
       <div class="composer" role="group" aria-label={i18n.t('timeline.messagePlaceholder')}>
         {#if context}
-          <ComposerContextBanner {context} onCancel={cancelContext} {onToggleSilentReply} />
+          <ComposerContextBanner
+            {context}
+            onCancel={cancelContext}
+            {onToggleSilentReply}
+            onJump={onJumpToContext}
+          />
         {/if}
         {#if activeBotCommand}
           {#key activeBotCommand}
@@ -1375,7 +1457,14 @@
           hidden={activeBotCommand !== null}
           bind:this={rowEl}
           onmousedown={focusFromRow}
-          onfocusin={() => (lastFocusedRow = rowEl)}
+          onfocusin={(event) => {
+            lastFocusedRow = rowEl;
+            if (keyboardResizesViewport && isEditableTarget(event.target))
+              heldCompactHeight ??= appLayout.compactHeight;
+          }}
+          onfocusout={(event) => {
+            if (!isEditableTarget(event.relatedTarget)) heldCompactHeight = null;
+          }}
           onkeydown={(event) => {
             stepReply(event);
             stepEdit(event);
@@ -1403,6 +1492,7 @@
                 edit={context?.kind === 'edit' && onEditPersona
                   ? { current: context.persona ?? null, onChoose: onEditPersona }
                   : undefined}
+                shorthandHint={shorthandHint ?? undefined}
               />
             {/snippet}
             <div class="composer-before" bind:this={beforeEl}>
@@ -1410,6 +1500,7 @@
                 {desktop}
                 onPick={pick}
                 onCapture={capturesFromCamera() ? capture : undefined}
+                onFiles={(files) => void stage(files)}
                 onPoll={onCreatePoll
                   ? () => {
                       pollOpen = true;
@@ -1446,7 +1537,10 @@
             />
             <ComposerField {editor} {showPlaceholder} {placeholder} bind:expanded />
             {#if formattingOpen}
-              <div class="composer-formatting">
+              <div
+                class="composer-formatting"
+                transition:slide={{ duration: motionMs(MOTION_MS.quick), easing: cubicOut }}
+              >
                 <ComposerFormatting
                   active={activeFormats}
                   source={sourceMode}

@@ -15,7 +15,6 @@ internal enum class PushOutcome {
     READ_KEPT,
     DECRYPTED,
     PLAINTEXT,
-    HIDDEN_BY_SETTING,
     NO_ACCOUNT,
     NO_CONTENT,
     NO_NATIVE_LIB,
@@ -36,6 +35,7 @@ internal enum class PushOutcome {
     FETCHED,
     FETCH_FAILED,
     DIAGNOSTIC_RECEIVED,
+    ACTIVE_ELSEWHERE,
     POSTED,
 }
 

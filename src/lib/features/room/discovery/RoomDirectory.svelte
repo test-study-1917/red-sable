@@ -24,6 +24,7 @@
   import Pill from '#lib/ui/primitives/Pill.svelte';
   import Select from '#lib/ui/primitives/Select.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
   import {
@@ -127,18 +128,19 @@
   async function join(room: PublicRoomView): Promise<void> {
     if (joining.has(room.room_id)) return;
     const address = room.canonical_alias ?? room.room_id;
+    const via = directory.query.server === null ? [] : [directory.query.server];
     const knocking = lobbyAction(room.join_rule, invitedIds.has(room.room_id)) === 'knock';
 
     joining.add(room.room_id);
     failedJoin = null;
     try {
       if (knocking) {
-        await knockRoom(core.rpc, address);
+        await knockRoom(core.rpc, address, via);
         knocked.add(room.room_id);
         return;
       }
 
-      const roomId = await joinRoom(core.rpc, address);
+      const roomId = await joinRoom(core.rpc, address, via);
       // eslint-disable-next-line svelte/no-navigation-without-resolve -- roomSectionPath() resolves the route itself
       await goto(roomSectionPath(roomList.rooms, roomId));
     } catch (error) {
@@ -219,11 +221,9 @@
   {/if}
 
   <form class="filters" onsubmit={submit}>
-    <TextInput
+    <SearchField
       bind:value={search}
-      type="search"
-      autocomplete="off"
-      aria-label={i18n.t('room.directorySearchLabel')}
+      label={i18n.t('room.directorySearchLabel')}
       placeholder={i18n.t('common.searchRooms')}
     />
     <Select
@@ -292,7 +292,7 @@
                   void open(room);
                 }}
               >
-                <ArrowRightIcon />
+                <ArrowRightIcon class="mirror-rtl" />
               </IconButton>
             {:else if action}
               <Button

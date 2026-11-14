@@ -4,6 +4,7 @@ import type {
   PersonaTriggerView,
   PersonaView,
 } from '#src/generated/protocol';
+import { proxyBody } from '#lib/model/model.js';
 
 export function projectPersona(persona: PersonaView, fallback: boolean): PerMessageProfileView {
   return {
@@ -14,6 +15,11 @@ export function projectPersona(persona: PersonaView, fallback: boolean): PerMess
     color_on_light: persona.color_on_light,
     color_on_dark: persona.color_on_dark,
     has_fallback: fallback,
+    biography: persona.biography,
+    banner_url: persona.banner_url,
+    is_animal: persona.is_animal,
+    has_animal: persona.has_animal,
+    animal_need: persona.animal_need,
   };
 }
 
@@ -23,6 +29,15 @@ export function personaById(
 ): PersonaView | undefined {
   if (id === undefined) return undefined;
   return personas.find((persona) => persona.id === id);
+}
+
+export function filterPersonas(personas: readonly PersonaView[], query: string): PersonaView[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return personas.filter(
+    (persona) =>
+      persona.display_name.toLocaleLowerCase().includes(needle) ||
+      persona.id.toLocaleLowerCase().includes(needle)
+  );
 }
 
 export function reorderPersonas(
@@ -44,31 +59,53 @@ function live(selection: PersonaSelectionView | undefined, now: number): boolean
   return selection.valid_until === null || selection.valid_until > now;
 }
 
-export type PersonaAssociation = PersonaSelectionView | false | undefined;
+/** `'account'` sends as the account but lets triggers proxy, `false` turns personas off. */
+export type PersonaAssociation = PersonaSelectionView | 'account' | false | undefined;
 
-export function resolvePersona({
-  personas,
-  proxied,
-  room,
-  spaces = [],
-  account,
-  now,
-}: {
+export type SelectionScope = 'room' | 'space' | 'account';
+
+interface PersonaScope {
   personas: readonly PersonaView[];
-  proxied?: PersonaView | undefined;
   room?: PersonaAssociation;
   spaces?: readonly PersonaAssociation[];
   account?: PersonaSelectionView | undefined;
   now: number;
-}): PersonaView | undefined {
-  let inherited: PersonaView | undefined;
+}
+
+export function heldSelection({
+  personas,
+  room,
+  spaces = [],
+  account,
+  now,
+}: PersonaScope): PersonaAssociation {
   for (const selection of [room, ...spaces, account]) {
-    if (selection === false) return undefined;
-    if (!live(selection, now)) continue;
-    inherited = personaById(personas, selection?.persona_id);
-    if (inherited) break;
+    if (selection === false || selection === 'account') return selection;
+    if (live(selection, now) && personaById(personas, selection?.persona_id)) return selection;
   }
-  return proxied ?? inherited;
+  return undefined;
+}
+
+export function resolvePersona({
+  proxied,
+  ...scope
+}: PersonaScope & { proxied?: PersonaView | undefined }): PersonaView | undefined {
+  const held = heldSelection(scope);
+  if (held === false) return undefined;
+  if (proxied) return proxied;
+  return held === 'account' ? undefined : personaById(scope.personas, held?.persona_id);
+}
+
+export function alternateAvatarId(
+  persona: PersonaView,
+  trigger: PersonaTriggerView | undefined,
+  held: PersonaAssociation
+): string | null {
+  return trigger
+    ? trigger.alternate_avatar_id
+    : held && held !== 'account' && held.persona_id === persona.id
+      ? held.alternate_avatar_id
+      : null;
 }
 
 export interface ProxyMatch {
@@ -77,30 +114,15 @@ export interface ProxyMatch {
   trigger: PersonaTriggerView;
 }
 
-function matches(trigger: PersonaTriggerView, body: string): boolean {
-  const prefix = trigger.prefix ?? '';
-  const suffix = trigger.suffix ?? '';
-  if (prefix === '' && suffix === '') return false;
-  if (body.length < prefix.length + suffix.length) return false;
-  return body.startsWith(prefix) && body.endsWith(suffix);
-}
-
 export function resolveProxy(
   personas: readonly PersonaView[],
   body: string
 ): ProxyMatch | undefined {
   for (const persona of personas) {
-    const trigger = persona.triggers.find((candidate) => matches(candidate, body));
-    if (!trigger) continue;
-    if (trigger.keep_trigger) return { persona, body, trigger };
-
-    return {
-      persona,
-      body: body
-        .slice(trigger.prefix?.length ?? 0, body.length - (trigger.suffix?.length ?? 0))
-        .trim(),
-      trigger,
-    };
+    for (const trigger of persona.triggers) {
+      const proxied = proxyBody(trigger.prefix, trigger.suffix, trigger.keep_trigger, body);
+      if (proxied !== null) return { persona, body: proxied, trigger };
+    }
   }
   return undefined;
 }
@@ -164,3 +186,22 @@ export function stripProxyHtml(
 export function triggerLabel(trigger: PersonaTriggerView): string {
   return `${trigger.prefix ?? ''}text${trigger.suffix ?? ''}`;
 }
+
+export const testPersona: PersonaView = {
+  id: 'kris',
+  display_name: 'Kris',
+  avatar_url: null,
+  pronouns: [],
+  color_on_light: null,
+  color_on_dark: null,
+  triggers: [],
+  pluralkit: null,
+  last_used: null,
+  alternate_avatars: null,
+  biography: null,
+  banner_url: null,
+  is_animal: null,
+  has_animal: null,
+  animal_need: null,
+  sort_flags: null,
+};

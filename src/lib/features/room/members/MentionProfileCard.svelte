@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { serverNameOf } from '#lib/matrix-id.js';
   import PronounPill from '#lib/ui/primitives/PronounPill.svelte';
   import UserSupporterBadge from '#lib/supporter/UserSupporterBadge.svelte';
   import { profileSupporterAppearance } from '#lib/supporter/variants.js';
@@ -10,6 +11,7 @@
     MutualRoomView,
     ProfileFieldView,
     PerMessageProfileView,
+    PresenceUserSharingView,
   } from '#src/generated/protocol';
   import IconContext from 'phosphor-svelte/lib/IconContext';
   import ArrowSquareOutIcon from 'phosphor-svelte/lib/ArrowSquareOutIcon';
@@ -28,6 +30,7 @@
   import PaperPlaneRightIcon from 'phosphor-svelte/lib/PaperPlaneRightIcon';
   import FlagIcon from 'phosphor-svelte/lib/FlagIcon';
   import ProhibitIcon from 'phosphor-svelte/lib/ProhibitIcon';
+  import PulseIcon from 'phosphor-svelte/lib/PulseIcon';
   import ShareNetworkIcon from 'phosphor-svelte/lib/ShareNetworkIcon';
   import ShieldIcon from 'phosphor-svelte/lib/ShieldIcon';
   import LockKeyIcon from 'phosphor-svelte/lib/LockKeyIcon';
@@ -40,14 +43,18 @@
   import { useRoomCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
   import { hasDirectRoom, roomPathParamFromId, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { sendMessage } from '#lib/core/api/messages.svelte.js';
+  import { openDirectMessage as openDm } from '#lib/core/api/rooms.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { formatNowInZone } from '#lib/ui/date-time.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import { lastSeenBucket, lastSeenMs, usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
   import { roleColorOnDark, roleColorOnLight } from '#lib/ui/primitives/readable-color.js';
   import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
+  import { presenceSharing } from '#lib/rooms/presence-sharing.svelte.js';
+  import { meowlnirFor } from '#lib/rooms/meowlnir-registry.svelte.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -66,6 +73,7 @@
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
   import MessageReportDialog from '../messages/MessageReportDialog.svelte';
+  import MeowlnirBanDialog from './MeowlnirBanDialog.svelte';
   import ProfileOverrideDialog from './ProfileOverrideDialog.svelte';
   import { sendReport } from '../messages/report';
   import FormattedBody from '../messages/FormattedBody.svelte';
@@ -94,7 +102,6 @@
     pmp?: PerMessageProfileView | null;
     onOpenAccount?: () => void;
     onNestedMenuOpenChange?: (open: boolean) => void;
-    onAvatarClick?: (source: string, displayName: string) => void;
     onMatrixLink?: (link: MatrixLink, anchor: HTMLAnchorElement) => void;
     onPowerLevelChange?: (roomId: string, userId: string, level: number) => void;
     failed?: boolean;
@@ -112,7 +119,6 @@
     pmp = null,
     onOpenAccount,
     onNestedMenuOpenChange,
-    onAvatarClick,
     onMatrixLink,
     onPowerLevelChange,
     failed = false,
@@ -166,14 +172,11 @@
     }
   });
 
-  let ownIdentity = $derived({
-    name: roomMember ? roomMember.display_name : (currentProfile?.display_name ?? null),
-    avatar: roomMember ? roomMember.avatar_url : (currentProfile?.avatar_url ?? null),
-  });
-  let realName = $derived(ownIdentity.name ?? userId);
-  let realAvatar = $derived(ownIdentity.avatar);
-  let displayName = $derived(profileOverrides.name(userId, realName));
-  let avatarUrl = $derived(profileOverrides.avatar(userId, realAvatar));
+  let shown = $derived(roomMember ?? currentProfile);
+  let realName = $derived(shown?.real_name ?? userId);
+  let realAvatar = $derived(shown?.real_avatar_url ?? null);
+  let displayName = $derived(shown?.display_name ?? userId);
+  let avatarUrl = $derived(shown?.avatar_url ?? null);
   let overrideColors = $derived(profileOverrides.colors(userId));
   let overrideOpen = $state(false);
   let reportOpen = $state(false);
@@ -186,17 +189,8 @@
   let localTime = $derived.by(() => {
     const timezone = currentProfile?.timezone;
     if (!timezone) return null;
-
-    try {
-      const time = new Intl.DateTimeFormat(undefined, {
-        hour: 'numeric',
-        minute: '2-digit',
-        timeZone: timezone,
-      }).format(new Date());
-      return { time, timezone };
-    } catch {
-      return null;
-    }
+    const time = formatNowInZone(timezone);
+    return time === null ? null : { time, timezone };
   });
   let animalText = $derived.by(() => {
     const animal = currentProfile?.animal;
@@ -232,7 +226,12 @@
   let sending = $state(false);
   let sendFailed = $state<'send' | 'open' | null>(null);
   let confirmingDirect = $state(false);
-  let homeserver = $derived(userId.slice(userId.indexOf(':') + 1));
+
+  function setConfirmingDirect(next: boolean): void {
+    confirmingDirect = next;
+    onNestedMenuOpenChange?.(next);
+  }
+  let homeserver = $derived(serverNameOf(userId));
   let elevated = $derived(roomMember !== null && roomMember.power_level >= 50);
   let roleTag = $derived(
     roomMember && powerTags !== null ? powerTag(roomMember.power_level, i18n.t, powerTags) : null
@@ -318,6 +317,20 @@
     profileActions.openServer(homeserver);
   }
 
+  let presenceChoices = $derived([
+    { sharing: null, label: i18n.t('timeline.profilePresenceDefault') },
+    { sharing: 'allow' as const, label: i18n.t('timeline.profilePresenceAllow') },
+    { sharing: 'deny' as const, label: i18n.t('timeline.profilePresenceDeny') },
+  ]);
+  let presenceChoice = $derived(presenceSharing.userSharing(userId));
+
+  function setPresenceSharing(sharing: PresenceUserSharingView | null): void {
+    presenceSharing.edit({ kind: 'user', user_id: userId, sharing }).catch((error: unknown) => {
+      console.warn('[sable profile] presence sharing not changed', error);
+      toasts.error(i18n.t('errors.actionFailed'));
+    });
+  }
+
   async function toggleIgnored(): Promise<void> {
     const next = !ignored;
     try {
@@ -335,6 +348,8 @@
     };
   }
 
+  let meowlnir = $derived(isSelf ? null : meowlnirFor(roomId, core.session?.user_id));
+  let meowlnirBanOpen = $state(false);
   let moderationAction = $state<'kick' | 'ban' | null>(null);
   let moderationReason = $state('');
   let moderationBusy = $state(false);
@@ -401,7 +416,7 @@
     sending = true;
     sendFailed = null;
     try {
-      const dmId = await core.rpc.rooms.createDm({ user_id: userId, encrypted: null });
+      const dmId = await openDm(core, userId);
       if (body) {
         step = 'send';
         await sendMessage(core.rpc, dmId, body);
@@ -419,7 +434,7 @@
 
   function messageUser(): void {
     if (hasDirectRoom(roomList.rooms, userId)) void openDirectMessage('');
-    else confirmingDirect = true;
+    else setConfirmingDirect(true);
   }
 
   function sendDirectMessage(event: SubmitEvent): void {
@@ -488,26 +503,33 @@
     </ActionMenu>
   {/if}
   {#if !isSelf}
-    <ActionMenu
-      label={mutualLabel}
-      class="profile-mutual-menu"
-      align="start"
-      onOpenChange={onNestedMenuOpenChange}
-    >
-      {#snippet trigger({ props })}
-        <Pill {...props}>
-          <ChatsIcon size={14} />
-          {mutualLabel}
-        </Pill>
-      {/snippet}
-      {#if sharedSpaces.length > 0}
-        {@render mutualRows(sharedSpaces)}
-      {/if}
-      {#if sharedSpaces.length > 0 && sharedRooms.length > 0}
-        <ActionMenuSeparator />
-      {/if}
-      {@render mutualRoomRows()}
-    </ActionMenu>
+    {#if sharedRooms.length > 0 || sharedSpaces.length > 0}
+      <ActionMenu
+        label={mutualLabel}
+        class="profile-mutual-menu"
+        align="start"
+        onOpenChange={onNestedMenuOpenChange}
+      >
+        {#snippet trigger({ props })}
+          <Pill {...props}>
+            <ChatsIcon size={14} />
+            {mutualLabel}
+          </Pill>
+        {/snippet}
+        {#if sharedSpaces.length > 0}
+          {@render mutualRows(sharedSpaces)}
+        {/if}
+        {#if sharedSpaces.length > 0 && sharedRooms.length > 0}
+          <ActionMenuSeparator />
+        {/if}
+        {@render mutualRoomRows()}
+      </ActionMenu>
+    {:else}
+      <Pill>
+        <ChatsIcon size={14} />
+        {mutualLabel}
+      </Pill>
+    {/if}
   {/if}
   <ActionMenu label={i18n.t('timeline.moreActions')} onOpenChange={onNestedMenuOpenChange}>
     {#snippet trigger({ props })}
@@ -597,14 +619,38 @@
           {i18n.t('timeline.profileBan')}
         </ActionMenuItem>
       {/if}
+      {#if meowlnir}
+        <ActionMenuItem destructive onSelect={() => (meowlnirBanOpen = true)}>
+          <GavelIcon />
+          {i18n.t('timeline.meowlnirBan')}
+        </ActionMenuItem>
+      {/if}
       {#if !isSelf}
-        {#if canKick || canBan}
+        {#if canKick || canBan || meowlnir}
           <ActionMenuSeparator />
         {/if}
         <ActionMenuItem onSelect={() => (overrideOpen = true)}>
           <PencilSimpleIcon />
           {i18n.t('timeline.profileOverride')}
         </ActionMenuItem>
+        {#if presenceSharing.supported}
+          <ActionMenuSub label={i18n.t('timeline.profilePresenceSharing')}>
+            {#snippet trigger()}
+              <PulseIcon />
+              {i18n.t('timeline.profilePresenceSharing')}
+            {/snippet}
+            {#each presenceChoices as choice (choice.label)}
+              <ActionMenuItem
+                checked={presenceChoice === choice.sharing}
+                onSelect={() => {
+                  setPresenceSharing(choice.sharing);
+                }}
+              >
+                {choice.label}
+              </ActionMenuItem>
+            {/each}
+          </ActionMenuSub>
+        {/if}
         <ActionMenuSeparator />
         <ActionMenuItem destructive onSelect={toggleIgnored}>
           <ProhibitIcon />
@@ -698,7 +744,7 @@
           disabled={sending}
         >
           {#if hasDraft}
-            <PaperPlaneRightIcon />
+            <PaperPlaneRightIcon class="mirror-rtl" />
           {:else}
             <ChatCircleIcon />
           {/if}
@@ -722,6 +768,7 @@
       miscOpen = !miscOpen;
       activeExtra = null;
     }}
+    size="small"
     block
   >
     {#if miscOpen}
@@ -732,7 +779,7 @@
         {i18n.t('timeline.profileHideMiscData', { count: extra.length })}
       {/if}
     {:else}
-      <CaretRightIcon />
+      <CaretRightIcon class="mirror-rtl" />
       {i18n.t('timeline.profileMiscData', { count: extra.length })}
     {/if}
   </Button>
@@ -785,7 +832,7 @@
     accountProfile={currentProfile}
     member={roomMember}
     {powerTags}
-    {onAvatarClick}
+    {onMatrixLink}
     {variant}
     below={profileBelow}
     headerAction={variant === 'popover' && canMessage ? messageAction : undefined}
@@ -796,8 +843,6 @@
     {displayName}
     {userId}
     {avatarUrl}
-    avatarLabel={i18n.t('timeline.profileAvatar', { name: displayName })}
-    {onAvatarClick}
     {color}
     heroColor={currentProfile?.hero_color}
     heroBrightness={currentProfile?.hero_brightness}
@@ -858,13 +903,14 @@
 />
 
 <ConfirmDialog
-  bind:open={confirmingDirect}
+  open={confirmingDirect}
+  onOpenChange={setConfirmingDirect}
   title={i18n.t('direct.confirmTitle', { name: displayName })}
   description={i18n.t('direct.confirmBody')}
   confirmLabel={i18n.t('direct.submit')}
   confirmVariant="primary"
   onConfirm={() => {
-    confirmingDirect = false;
+    setConfirmingDirect(false);
     void openDirectMessage('');
   }}
 />
@@ -884,6 +930,15 @@
     if (selfDemotion !== null) setPowerLevel(selfDemotion);
   }}
 />
+
+{#if meowlnir}
+  <MeowlnirBanDialog
+    bind:open={meowlnirBanOpen}
+    management={meowlnir}
+    {userId}
+    name={displayName}
+  />
+{/if}
 
 <DialogFrame
   open={moderationAction !== null}
@@ -923,6 +978,14 @@
 <style>
   :global(.profile-mutual-menu) {
     --menu-max-height: min(32rem, 80dvh);
+
+    max-width: 300px;
+  }
+
+  :global(.profile-mutual-menu .menu-item) {
+    --menu-item-padding: var(--control-padding-150);
+
+    min-width: 0;
   }
 
   :global(.profile-mutual-menu .avatar-root) {
@@ -930,7 +993,6 @@
   }
 
   .profile-mutual-name {
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -984,7 +1046,7 @@
   }
 
   :global(.profile-card-actions > .pill-icon-only) {
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   :global(.profile-power-name) {

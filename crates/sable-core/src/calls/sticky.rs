@@ -3,17 +3,17 @@ use std::time::Duration;
 use crate::delayed_events::DelayedEventsSupport;
 use matrix_sdk::deserialized_responses::{EncryptionInfo, VerificationLevel, VerificationState};
 use matrix_sdk::{Client, Room};
-use ruma::api::client::sync::sync_events::v5;
+use ruma::api::client::sync::sync_events::msc4186 as v5;
 use ruma::events::{StateEventType, room::encrypted::OriginalSyncRoomEncryptedEvent};
 use ruma::serde::Raw;
 use ruma::{OwnedDeviceId, OwnedEventId};
 use serde_json::Value;
 
-const STICKY_DURATION_MS: u32 = 3_600_000;
-const ENCRYPTED_STICKY_DURATION_MS: u32 = 120_000;
+pub(super) const STICKY_DURATION_MS: u32 = 3_600_000;
 
 pub(super) struct StickySync {
     conn_id: String,
+    include_invite_state: bool,
     pos: Option<String>,
     since: Option<String>,
     pending: Vec<(Value, u64)>,
@@ -79,6 +79,17 @@ impl StickySync {
     pub(super) fn new(session: u32) -> Self {
         Self {
             conn_id: format!("call-{session}"),
+            include_invite_state: false,
+            pos: None,
+            since: None,
+            pending: Vec::new(),
+        }
+    }
+
+    pub(super) fn for_invites() -> Self {
+        Self {
+            conn_id: format!("call-invites-{}", ruma::TransactionId::new()),
+            include_invite_state: true,
             pos: None,
             since: None,
             pending: Vec::new(),
@@ -94,6 +105,19 @@ impl StickySync {
         subscription
             .required_state
             .push((StateEventType::RoomCreate, String::new()));
+        if self.include_invite_state {
+            for event_type in super::SLOT_TYPES {
+                subscription
+                    .required_state
+                    .push((event_type.into(), "*".to_owned()));
+            }
+            subscription
+                .required_state
+                .push(("org.matrix.msc3401.call.member".into(), "*".to_owned()));
+            subscription
+                .required_state
+                .push((StateEventType::RoomPowerLevels, String::new()));
+        }
         request
             .room_subscriptions
             .insert(room.room_id().to_owned(), subscription);
@@ -107,10 +131,6 @@ impl StickySync {
         request
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sync and decryption share expiry handling"
-    )]
     pub(super) async fn sync(
         &mut self,
         room: &Room,
@@ -139,6 +159,14 @@ impl StickySync {
             );
         }
         if let Some(room_events) = response.rooms.get(room.room_id()) {
+            if self.include_invite_state {
+                events.extend(
+                    room_events
+                        .required_state
+                        .iter()
+                        .filter_map(|event| serde_json::from_str(event.json().get()).ok()),
+                );
+            }
             events.extend(
                 room_events
                     .timeline
@@ -146,34 +174,11 @@ impl StickySync {
                     .filter_map(|event| serde_json::from_str(event.json().get()).ok()),
             );
         }
-        let now = super::keys::now_ms();
+        let now = crate::now_ms();
         let mut candidates = std::mem::take(&mut self.pending);
         candidates.retain(|(_, expires)| *expires > now);
         for value in events {
-            let duration = value
-                .get("msc4354_sticky")
-                .or_else(|| value.get("sticky"))
-                .and_then(|sticky| sticky.get("duration_ms"))
-                .and_then(Value::as_u64)
-                .unwrap_or(3_600_000)
-                .min(3_600_000);
-            let sent = value
-                .get("origin_server_ts")
-                .and_then(Value::as_u64)
-                .unwrap_or(now)
-                .min(now);
-            let ttl = value
-                .get("unsigned")
-                .and_then(|u| {
-                    u.get("msc4354_sticky_duration_ttl_ms")
-                        .or_else(|| u.get("sticky_duration_remaining_ms"))
-                        .or_else(|| u.get("sticky_duration_ttl_ms"))
-                })
-                .and_then(Value::as_u64);
-            let expires = ttl.map_or_else(
-                || sent.saturating_add(duration),
-                |ttl| now.saturating_add(ttl.min(duration)),
-            );
+            let expires = sticky_expiry(&value, now);
             candidates.push((value, expires));
         }
         let mut resolved = Vec::new();
@@ -191,52 +196,88 @@ impl StickySync {
             {
                 continue;
             }
-            let Ok(raw) =
-                Raw::new(&value).map(Raw::cast_unchecked::<OriginalSyncRoomEncryptedEvent>)
-            else {
-                continue;
-            };
-            let Ok(decrypted) = room.decrypt_event(&raw, None).await else {
-                if self.pending.len() < 1024 {
-                    self.pending.push((value, expires));
-                }
-                continue;
-            };
-            let Some(info) = decrypted.encryption_info() else {
-                if self.pending.len() < 1024 {
-                    self.pending.push((value, expires));
-                }
-                continue;
-            };
-            let Ok(mut plaintext) = serde_json::from_str::<Value>(decrypted.raw().json().get())
-            else {
-                continue;
-            };
-            if let Some(object) = plaintext.as_object_mut() {
-                for field in ["msc4354_sticky", "sticky"] {
-                    if let Some(envelope) = value.get(field) {
-                        object.insert(field.to_owned(), envelope.clone());
-                    }
-                }
-                let unsigned = object
-                    .entry("unsigned")
-                    .or_insert_with(|| serde_json::json!({}));
-                if let Some(unsigned) = unsigned.as_object_mut() {
-                    unsigned.insert(
-                        "msc4354_sticky_duration_ttl_ms".to_owned(),
-                        expires.saturating_sub(now).into(),
-                    );
-                }
+            if let Some(event) = self.decrypt_candidate(room, value, expires, now).await {
+                resolved.push(event);
             }
-            let device = authenticated_device(Some(info), &plaintext);
-            resolved.push(Event {
-                value: plaintext,
-                device,
-                redacts: None,
-            });
         }
         Ok(resolved)
     }
+
+    async fn decrypt_candidate(
+        &mut self,
+        room: &Room,
+        value: Value,
+        expires: u64,
+        now: u64,
+    ) -> Option<Event> {
+        let raw = Raw::new(&value)
+            .map(Raw::cast_unchecked::<OriginalSyncRoomEncryptedEvent>)
+            .ok()?;
+        let Ok(decrypted) = room.decrypt_event(&raw, None).await else {
+            self.defer(value, expires);
+            return None;
+        };
+        let Some(info) = decrypted.encryption_info() else {
+            self.defer(value, expires);
+            return None;
+        };
+        let mut plaintext = serde_json::from_str::<Value>(decrypted.raw().json().get()).ok()?;
+        if let Some(object) = plaintext.as_object_mut() {
+            for field in ["msc4354_sticky", "sticky"] {
+                if let Some(envelope) = value.get(field) {
+                    object.insert(field.to_owned(), envelope.clone());
+                }
+            }
+            let unsigned = object
+                .entry("unsigned")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(unsigned) = unsigned.as_object_mut() {
+                unsigned.insert(
+                    "msc4354_sticky_duration_ttl_ms".to_owned(),
+                    expires.saturating_sub(now).into(),
+                );
+            }
+        }
+        let device = authenticated_device(Some(info), &plaintext);
+        Some(Event {
+            value: plaintext,
+            device,
+            redacts: None,
+        })
+    }
+
+    fn defer(&mut self, value: Value, expires: u64) {
+        if self.pending.len() < 1024 {
+            self.pending.push((value, expires));
+        }
+    }
+}
+
+fn sticky_expiry(value: &Value, now: u64) -> u64 {
+    let duration = value
+        .get("msc4354_sticky")
+        .or_else(|| value.get("sticky"))
+        .and_then(|sticky| sticky.get("duration_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(3_600_000)
+        .min(3_600_000);
+    let sent = value
+        .get("origin_server_ts")
+        .and_then(Value::as_u64)
+        .unwrap_or(now)
+        .min(now);
+    let ttl = value
+        .get("unsigned")
+        .and_then(|u| {
+            u.get("msc4354_sticky_duration_ttl_ms")
+                .or_else(|| u.get("sticky_duration_remaining_ms"))
+                .or_else(|| u.get("sticky_duration_ttl_ms"))
+        })
+        .and_then(Value::as_u64);
+    ttl.map_or_else(
+        || sent.saturating_add(duration),
+        |ttl| now.saturating_add(ttl.min(duration)),
+    )
 }
 
 pub(crate) fn live_events(room: &Room) -> Vec<Event> {
@@ -358,11 +399,11 @@ pub(super) async fn send_wire(
     wire: super::membership::RtcWire,
 ) -> Result<ruma::OwnedEventId, matrix_sdk::Error> {
     let content = serde_json::to_value(content)?;
-    let duration = match room.latest_encryption_state().await? {
-        matrix_sdk::EncryptionState::NotEncrypted => STICKY_DURATION_MS,
-        state if state.is_encrypted() => ENCRYPTED_STICKY_DURATION_MS,
+    match room.latest_encryption_state().await? {
+        matrix_sdk::EncryptionState::NotEncrypted => {}
+        state if state.is_encrypted() => {}
         _ => return Err(matrix_sdk::Error::InsufficientData),
-    };
+    }
     Ok(room
         .send_raw(
             if wire == super::membership::RtcWire::Stable {
@@ -372,7 +413,7 @@ pub(super) async fn send_wire(
             },
             content,
         )
-        .with_sticky_duration(Duration::from_millis(duration.into()))
+        .with_sticky_duration(Duration::from_millis(STICKY_DURATION_MS.into()))
         .await?
         .response
         .event_id)

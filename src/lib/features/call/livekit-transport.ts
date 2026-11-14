@@ -2,7 +2,6 @@ import {
   ConnectionQuality,
   ConnectionState,
   LocalAudioTrack,
-  LocalVideoTrack,
   Room as LivekitRoom,
   type ScreenShareCaptureOptions,
   type TrackPublishOptions,
@@ -10,6 +9,7 @@ import {
   type RemoteParticipant,
   CryptorError,
   CryptorErrorReason,
+  DisconnectReason,
   RoomEvent,
   Track,
   type TrackPublication,
@@ -23,7 +23,6 @@ import {
 } from '#lib/platform/screen-audio.js';
 import type { ScreenAudioChoice } from '#lib/platform/screen-audio-stream.js';
 import { electronBridge } from '#lib/platform/electron.js';
-import { startHdrShare, stopHdrShare } from '#lib/platform/hdr-share.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
 
 import type {
@@ -37,9 +36,15 @@ import type {
 } from './call-transport';
 import { idleTransportState, ignoreError, ScreenAudioError } from './call-transport';
 import { MatrixKeyProvider } from './key-provider';
-import { createMicrophoneFilter, supportsVoiceFilter } from './voice-filter';
-import { screenCaptureOptions, videoPublishOptions, videoResolution } from './video-quality';
-import type { CallTelemetry } from './call-telemetry';
+import { createMicrophoneFilter, microphoneProcessing } from './voice-filter';
+import {
+  resolveVideoCodec,
+  screenCaptureOptions,
+  videoPublishOptions,
+  videoResolution,
+} from './video-quality';
+import { isExpectedDeviceError, type CallTelemetry } from './call-telemetry';
+import { routeLivekitLogs } from './livekit-logging';
 
 const qualityOf = (quality: ConnectionQuality): CallConnectionQuality => {
   switch (quality) {
@@ -87,7 +92,7 @@ export type LivekitTransportOptions = {
   encryptMedia: boolean;
   publishMedia?: boolean;
   ownIdentity?: string;
-  telemetry?: Pick<CallTelemetry, 'step' | 'event' | 'failure'>;
+  telemetry?: Pick<CallTelemetry, 'step' | 'event' | 'failure' | 'degraded'>;
   telemetryAttributes?: Record<string, string | number | boolean>;
   createRoom?: (options: ConstructorParameters<typeof LivekitRoom>[0]) => LivekitRoom;
   createWorker?: () => Worker;
@@ -95,6 +100,21 @@ export type LivekitTransportOptions = {
 
 const defaultWorker = (): Worker =>
   new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), { type: 'module' });
+
+// Senders keep using their previous key for a few seconds after rotating.
+const MISSING_KEY_GRACE_MS = 10_000;
+
+const encryptionFaultOf = (error: unknown): 'missing_key' | 'invalid_key' | 'error' => {
+  if (error instanceof CryptorError) {
+    if (error.reason === CryptorErrorReason.MissingKey) return 'missing_key';
+    if (error.reason === CryptorErrorReason.InvalidKey) return 'invalid_key';
+    return 'error';
+  }
+  if (!(error instanceof Error)) return 'error';
+  if (error.message.startsWith('MissingKey: ')) return 'missing_key';
+  if (error.message.startsWith('InvalidKey: ')) return 'invalid_key';
+  return 'error';
+};
 
 // Chrome rejects a BUNDLE whose Opus sections share a payload type with different
 // fmtp, so these must keep the microphone's defaults.
@@ -116,45 +136,42 @@ const DISPLAY_AUDIO_CAPTURE: ScreenShareCaptureOptions = {
 };
 
 export function createLivekitTransport(options: LivekitTransportOptions): LivekitTransport {
+  routeLivekitLogs();
   const keyProvider = options.encryptMedia ? new MatrixKeyProvider() : undefined;
   const worker = keyProvider ? (options.createWorker ?? defaultWorker)() : undefined;
-  const voiceIsolation = preferences.noiseSuppression && preferences.voiceIsolation;
-  const filterMicrophone = voiceIsolation && supportsVoiceFilter();
-  const cameraCapture = {
+  const { filter: filterMicrophone, constraints: microphoneConstraints } = microphoneProcessing();
+  const cameraCapture = () => ({
     ...(preferences.videoInputDevice ? { deviceId: preferences.videoInputDevice } : {}),
     ...(preferences.callCameraResolution !== 'auto'
       ? { resolution: videoResolution(preferences.callCameraResolution) }
       : {}),
-  };
-  const cameraPublish = videoPublishOptions(
-    'camera',
-    preferences.callCameraBitrate,
-    preferences.callCameraCodec,
-    preferences.callSimulcast
-  );
-  const screenCapture: ScreenShareCaptureOptions = screenCaptureOptions(
-    preferences.callScreenResolution,
-    preferences.callScreenFramerate
-  );
-  const screenPublish = videoPublishOptions(
-    'screen',
-    preferences.callScreenBitrate,
-    preferences.callScreenCodec,
-    preferences.callSimulcast,
-    preferences.callScreenFramerate
-  );
+  });
+  const cameraPublish = async () =>
+    videoPublishOptions(
+      'camera',
+      preferences.callCameraBitrate,
+      await resolveVideoCodec(preferences.callCameraCodec),
+      preferences.callSimulcast
+    );
+  const screenCapture = (): ScreenShareCaptureOptions =>
+    screenCaptureOptions(preferences.callScreenResolution, preferences.callScreenFramerate);
+  const screenPublish = async () =>
+    videoPublishOptions(
+      'screen',
+      preferences.callScreenBitrate,
+      await resolveVideoCodec(preferences.callScreenCodec),
+      preferences.callSimulcast,
+      preferences.callScreenFramerate
+    );
 
   const room = (options.createRoom ?? ((config) => new LivekitRoom(config)))({
     adaptiveStream: true,
     dynacast: false,
     audioCaptureDefaults: {
-      echoCancellation: preferences.echoCancellation,
-      noiseSuppression: preferences.noiseSuppression && !filterMicrophone,
-      autoGainControl: preferences.autoGainControl,
-      ...(voiceIsolation && !filterMicrophone ? { voiceIsolation: true } : {}),
+      ...microphoneConstraints,
       ...(preferences.audioInputDevice ? { deviceId: preferences.audioInputDevice } : {}),
     },
-    videoCaptureDefaults: cameraCapture,
+    videoCaptureDefaults: cameraCapture(),
     ...(preferences.audioOutputDevice
       ? { audioOutput: { deviceId: preferences.audioOutputDevice } }
       : {}),
@@ -171,6 +188,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
   let qualitySnapshot = '';
   const participantIndexes = new WeakMap<object, number>();
   let nextParticipantIndex = 0;
+  const missingKeys = new Map<string, { since: number; last: number; reported: boolean }>();
 
   const fail = (
     stage: string,
@@ -369,9 +387,11 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
       event('call.connection.reconnected');
     })
     .on(RoomEvent.Disconnected, (reason) => {
+      missingKeys.clear();
       void stopSharingAudio();
-      publish({ connection: 'disconnected', participants: [] });
-      event('call.connection.disconnected', { 'call.disconnect_reason': reason ?? -1 });
+      const disconnectReason = reason === undefined ? 'UNKNOWN' : DisconnectReason[reason];
+      publish({ connection: 'disconnected', participants: [], disconnectReason });
+      event('call.connection.disconnected', { 'call.disconnect_reason': disconnectReason });
       healthGeneration += 1;
       if (healthTimer) clearTimeout(healthTimer);
       healthTimer = undefined;
@@ -379,19 +399,27 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     .on(RoomEvent.ConnectionStateChanged, (connectionState) => {
       event('call.connection.state', { 'call.connection_state': connectionState });
     })
-    .on(RoomEvent.EncryptionError, (error) => {
-      if (
-        (error instanceof CryptorError && error.reason === CryptorErrorReason.MissingKey) ||
-        (error instanceof Error && error.message.startsWith('MissingKey: '))
-      ) {
-        fail('call.encryption.missing_key', error);
+    .on(RoomEvent.EncryptionError, (error, participant) => {
+      const fault = encryptionFaultOf(error);
+      const identity =
+        participant?.identity ??
+        (error instanceof CryptorError ? error.participantIdentity : undefined) ??
+        '';
+      const now = Date.now();
+      const streak = missingKeys.get(identity);
+      if (!streak || now - streak.last > MISSING_KEY_GRACE_MS) {
+        missingKeys.set(identity, { since: now, last: now, reported: false });
+        event(`call.encryption.${fault}_frame`);
         return;
       }
-      fail('call.encryption.error', error);
+      streak.last = now;
+      if (streak.reported || now - streak.since < MISSING_KEY_GRACE_MS) return;
+      streak.reported = true;
+      fail(`call.encryption.${fault}`, error);
     })
     .on(RoomEvent.MediaDevicesError, (error) => {
-      if (error.name === 'NotAllowedError') {
-        event('call.media.device_denied');
+      if (isExpectedDeviceError(error.name)) {
+        event('call.media.device_denied', { 'call.error_name': error.name });
         return;
       }
       fail('call.media.device_error', error);
@@ -417,7 +445,8 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
         'call.participant_count': room.remoteParticipants.size,
       });
     })
-    .on(RoomEvent.ParticipantDisconnected, () => {
+    .on(RoomEvent.ParticipantDisconnected, (participant) => {
+      missingKeys.delete(participant.identity);
       event('call.media.participant_count', {
         'call.participant_count': room.remoteParticipants.size,
       });
@@ -452,14 +481,19 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
       await checkConnection();
 
       if (options.publishMedia !== false) {
-        await publishTrack('call.microphone.set', () =>
-          room.localParticipant.setMicrophoneEnabled(connectOptions.microphoneEnabled)
-        );
-        await publishTrack('call.camera.set', () =>
+        await publishTrack('call.microphone.set', async () => {
+          if (connectOptions.microphoneEnabled || !connectOptions.microphoneStandby) {
+            return room.localParticipant.setMicrophoneEnabled(connectOptions.microphoneEnabled);
+          }
+          const [track] = await room.localParticipant.createTracks({ audio: true });
+          await track.mute();
+          return room.localParticipant.publishTrack(track);
+        });
+        await publishTrack('call.camera.set', async () =>
           room.localParticipant.setCameraEnabled(
             connectOptions.cameraEnabled,
-            cameraCapture,
-            cameraPublish
+            cameraCapture(),
+            await cameraPublish()
           )
         );
       }
@@ -487,17 +521,6 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
   let screenAudio: LocalAudioTrack | null = null;
   let screenAudioGeneration = 0;
   let screenAudioTask: Promise<boolean> = Promise.resolve(true);
-  let hdrScreen: LocalVideoTrack | null = null;
-
-  const stopHdrScreen = async (): Promise<void> => {
-    const track = hdrScreen;
-    hdrScreen = null;
-    if (!track) return;
-    await room.localParticipant.unpublishTrack(track, true).catch(ignoreError);
-    await stopHdrShare().catch((error: unknown) => {
-      fail('call.screen_share.hdr_stop', error);
-    });
-  };
 
   const stopSharingAudio = (): Promise<void> => {
     screenAudioGeneration += 1;
@@ -553,7 +576,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     try {
       await step(stage, enable);
     } catch (error) {
-      fail(stage, error);
+      options.telemetry?.degraded(stage, error, { ...options.telemetryAttributes });
     }
     await checkConnection();
   };
@@ -577,7 +600,6 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
       healthTimer = undefined;
       try {
         await stopSharingAudio();
-        await stopHdrScreen();
         await room.disconnect();
       } finally {
         worker?.terminate();
@@ -592,15 +614,16 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     },
     setCameraEnabled: async (enabled) => {
       if (disposed || options.publishMedia === false) return;
-      await step('call.camera.set', () =>
-        room.localParticipant.setCameraEnabled(enabled, cameraCapture, cameraPublish)
+      await step('call.camera.set', async () =>
+        room.localParticipant.setCameraEnabled(enabled, cameraCapture(), await cameraPublish())
       );
       syncLocal();
     },
-    setEncryptionKey: (key: CallEncryptionKey) =>
-      disposed
-        ? Promise.resolve()
-        : (keyProvider?.setKey(key, key.identity === options.ownIdentity) ?? Promise.resolve()),
+    setEncryptionKey: (key: CallEncryptionKey) => {
+      if (disposed) return Promise.resolve();
+      missingKeys.delete(key.identity);
+      return keyProvider?.setKey(key, key.identity === options.ownIdentity) ?? Promise.resolve();
+    },
     subscribe: (listener) => {
       listeners.add(listener);
       listener(state);
@@ -609,45 +632,15 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     getState: () => ({ ...state, participants: [...state.participants] }),
     capabilities: {
       screenShare: {
-        setEnabled: async (enabled, audio, source) => {
+        setEnabled: async (enabled, audio) => {
           if (disposed || options.publishMedia === false) return;
-          if (enabled && source?.kind === 'hdr') {
-            await step('call.screen_share.hdr', async () => {
-              const track = new LocalVideoTrack(
-                await startHdrShare(
-                  source.monitor,
-                  () => {
-                    void stopHdrScreen().then(stopSharingAudio).then(syncLocal);
-                  },
-                  screenCapture.resolution
-                ),
-                undefined,
-                true
-              );
-              hdrScreen = track;
-              await room.localParticipant.publishTrack(track, {
-                ...screenPublish,
-                source: Track.Source.ScreenShare,
-              });
-            });
-            const audioShared = await shareAudio(audio);
-            syncLocal();
-            if (!audioShared) throw new ScreenAudioError();
-            return;
-          }
-          if (!enabled && hdrScreen) {
-            await stopHdrScreen();
-            await stopSharingAudio();
-            syncLocal();
-            return;
-          }
-          await step('call.screen_share.set', () => {
+          await step('call.screen_share.set', async () => {
             if (!enabled) return room.localParticipant.setScreenShareEnabled(false);
             const browserAudio = !screenAudioSupported();
             return room.localParticipant.setScreenShareEnabled(
               true,
-              { ...(browserAudio ? DISPLAY_AUDIO_CAPTURE : {}), ...screenCapture },
-              { ...(browserAudio ? SCREEN_AUDIO_PUBLISH : {}), ...screenPublish }
+              { ...(browserAudio ? DISPLAY_AUDIO_CAPTURE : {}), ...screenCapture() },
+              { ...(browserAudio ? SCREEN_AUDIO_PUBLISH : {}), ...(await screenPublish()) }
             );
           });
           const audioShared =

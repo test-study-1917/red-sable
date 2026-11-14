@@ -20,8 +20,8 @@
   import AccountSwitcher from './AccountSwitcher.svelte';
   import '#lib/ui/primitives/nav-tab.css';
   import './sidebar-tools.css';
-  import AlertPopover from './AlertPopover.svelte';
   import { useAlertProviders } from './alerts.js';
+  import AlertListButton from './AlertListButton.svelte';
 
   interface Props {
     mobile?: boolean;
@@ -96,10 +96,6 @@
       return mobileTools.length;
     }
 
-    if (page.url.pathname === '/alerts') {
-      return mobileTools.length + 1;
-    }
-
     return mobileTools.findIndex((item) => isToolActive(item.href));
   });
 </script>
@@ -113,6 +109,7 @@
       aria-label={i18n.t('shortcuts.paletteTitle')}
       onclick={() => (paletteState.open = true)}
     >
+      <span class="nav-tab-hit-area" aria-hidden="true"></span>
       <span class="tool-icon" aria-hidden="true"><ListMagnifyingGlassIcon /></span>
     </button>
   {/snippet}
@@ -156,13 +153,13 @@
         <AccountSwitcher mode="mobile" />
       </div>
       <div class="mobile-tool-slot" style:display={hasAlerts ? undefined : 'none'}>
-        <AlertPopover mode="mobile" />
+        <AlertListButton mode="mobile" />
       </div>
     </div>
   </nav>
 {:else if compact}
   <nav class="compact-tools" aria-label={i18n.t('nav.quickTools')}>
-    <AlertPopover mode="compact" />
+    <AlertListButton mode="compact" />
     {@render roomSwitcher('compact-tool nav-tab-side', 'right')}
     {#each desktopTools as item (item.href)}
       {@const toolActive = isToolActive(item.href)}
@@ -180,6 +177,7 @@
           aria-current={toolActive ? 'page' : undefined}
           draggable="false"
         >
+          <span class="nav-tab-hit-area" aria-hidden="true"></span>
           <span class="tool-icon" aria-hidden="true"
             ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
           >
@@ -189,7 +187,7 @@
         </a>
         <!-- eslint-enable svelte/no-navigation-without-resolve -->
       {/snippet}
-      <Tooltip label={i18n.t(item.label)} side="right" {trigger} />
+      <Tooltip label={toolLabel(item)} side="right" {trigger} />
     {/each}
     <AccountSwitcher mode="compact" />
   </nav>
@@ -197,7 +195,7 @@
   <nav class="desktop-tools" aria-label={i18n.t('nav.quickTools')}>
     <AccountSwitcher mode="desktop" />
     <div class="desktop-tool-actions">
-      <AlertPopover mode="desktop" />
+      <AlertListButton mode="desktop" />
       {@render roomSwitcher('desktop-tool nav-tab-bottom', 'top')}
       {#each desktopTools as item (item.href)}
         {@const toolActive = isToolActive(item.href)}
@@ -215,6 +213,7 @@
             aria-current={toolActive ? 'page' : undefined}
             draggable="false"
           >
+            <span class="nav-tab-hit-area" aria-hidden="true"></span>
             <span class="tool-icon" aria-hidden="true"
               ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
             >
@@ -224,7 +223,7 @@
           </a>
           <!-- eslint-enable svelte/no-navigation-without-resolve -->
         {/snippet}
-        <Tooltip label={i18n.t(item.label)} {trigger} />
+        <Tooltip label={toolLabel(item)} {trigger} />
       {/each}
     </div>
   </nav>
@@ -238,7 +237,7 @@
   .desktop-tools {
     align-items: center;
     background: var(--surface-container);
-    border-right: var(--border-width) solid var(--surface-container-line);
+    border-inline-end: var(--border-width) solid var(--surface-container-line);
     border-top: var(--border-width) solid var(--surface-container-line);
     box-sizing: border-box;
     color: var(--surface-on-container);
@@ -257,7 +256,7 @@
   .compact-tools {
     align-items: center;
     background: var(--bg-container);
-    border-right: var(--border-width) solid var(--bg-container-line);
+    border-inline-end: var(--border-width) solid var(--bg-container-line);
     box-sizing: border-box;
     color: var(--bg-on-container);
     display: flex;
@@ -280,6 +279,13 @@
     width: 100%;
   }
 
+  @media (--compact-height) {
+    .mobile-tools {
+      min-height: calc(var(--control-height-large) + var(--edge-inset-bottom));
+      padding-block: 0 var(--edge-inset-bottom);
+    }
+  }
+
   .mobile-tools-row {
     align-items: center;
     container-type: inline-size;
@@ -295,7 +301,7 @@
     border-radius: var(--radius-pill);
     content: '';
     height: var(--control-height-large);
-    left: 0;
+    inset-inline-start: 0;
     opacity: 0;
     pointer-events: none;
     position: absolute;

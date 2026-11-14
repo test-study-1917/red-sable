@@ -1,5 +1,6 @@
 import { base64ToUint8Array } from 'uint8array-extras';
 
+import type { CallBackendView } from '#src/generated/protocol';
 import type { ScreenAudioChoice } from '#lib/platform/screen-audio-stream.js';
 
 export type CallEncryptionKey = {
@@ -39,19 +40,24 @@ export type CallTransportState = {
   cameraEnabled: boolean;
   screenShareEnabled: boolean;
   error?: string;
+  /** A native transport's failure code, such as `permission_denied` or `media_failed`. */
+  errorCode?: string;
+  disconnectReason?: string;
+  unreachableBackends?: string[];
 };
 
 export type CallTransportConnectOptions = {
   url: string;
   token: string;
   microphoneEnabled: boolean;
+  microphoneStandby?: boolean;
   cameraEnabled: boolean;
   encryptionKeys: CallEncryptionKey[];
   publisherId?: string;
   backends?: CallBackendGrant[];
 };
 
-export type CallBackendGrant = { id: string; url: string; jwt: string; identity: string };
+export type CallBackendGrant = CallBackendView;
 export type CallTransportRoom = { backendId: string; room: import('livekit-client').Room };
 
 export type CallAudioRoute = {
@@ -92,16 +98,9 @@ export type CallTransportCapabilities = {
     select: (inputId: string) => Promise<void>;
   };
   screenShare?: {
-    setEnabled: (
-      enabled: boolean,
-      audio?: ScreenAudioChoice,
-      source?: ScreenSource
-    ) => Promise<void>;
+    setEnabled: (enabled: boolean, audio?: ScreenAudioChoice) => Promise<void>;
   };
 };
-
-/** A monitor the desktop app captures itself, converting HDR to SDR. */
-export type ScreenSource = { kind: 'hdr'; monitor: number };
 
 export type CallTransport = {
   connect: (options: CallTransportConnectOptions) => Promise<void>;
@@ -140,5 +139,19 @@ export function decodeCallKey(encoded: string): Uint8Array<ArrayBuffer> | null {
     return key.length > 0 ? key : null;
   } catch {
     return null;
+  }
+}
+
+export class TransportDisconnectError extends Error {
+  constructor(readonly reason: string) {
+    super(`transport-disconnected: ${reason}`);
+    this.name = 'TransportDisconnectError';
+  }
+}
+
+export class NativeCallFailure extends Error {
+  constructor(readonly code: string) {
+    super(`native-call-failed: ${code}`);
+    this.name = 'NativeCallFailure';
   }
 }

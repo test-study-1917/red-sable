@@ -101,6 +101,12 @@ paru -S sable-bin
 Use `sable-nightly-bin` for nightly builds. See the
 [AUR upgrade notes](packaging/aur/README.md) when upgrading older packages.
 
+#### Nix
+
+```bash
+nix run git+https://git.sable.moe/SableClient/sable-next#sable-desktop
+```
+
 #### Using Forgejo Repositories
 
 Packages are published to the Forgejo repositories at `git.sable.moe`. Use `nightly` instead of `stable` for nightly builds; the package is then `sable-nightly`.
@@ -135,7 +141,19 @@ The cask is published to the GitHub tap, which `brew install` taps by default, a
 
 ### App Store
 
-There is a [Testflight](https://testflight.apple.com/join/PT2DSC3f) you can join while the app is under review. It will be available on the App Store soon™.
+<a href="https://apps.apple.com/us/app/sable-chat/id6820482696"><img alt="Download on the App Store" src="https://img.shields.io/badge/App_Store-0D96F6?style=for-the-badge&logo=appstore&logoColor=white"></a>
+
+To try new versions early, join the [TestFlight beta](https://testflight.apple.com/join/PT2DSC3f).
+
+### AltStore PAL
+
+In the EU, [AltStore PAL](https://altstore.io) installs the same notarized build as the App Store.
+
+<a href="https://intradeus.github.io/http-protocol-redirector?r=altstore-pal://source?url=https://git.sable.moe/SableClient/sable-next/releases/download/latest/altstore-pal-source.json"><img alt="Add to AltStore PAL" src="https://img.shields.io/badge/Add_to_AltStore_PAL-7C3AED?style=for-the-badge"></a>
+&nbsp;
+<a href="https://git.sable.moe/SableClient/sable-next/releases/download/latest/altstore-pal-source.json"><img alt="Direct URL" src="https://img.shields.io/badge/Direct_URL-6B7280?style=for-the-badge"></a>
+
+The [`altstore-pal.yml`](.forgejo/workflows/altstore-pal.yml) workflow publishes each App Store release once AltStore has processed it.
 
 ### AltStore / SideStore
 
@@ -204,20 +222,11 @@ Put Node, pnpm, Rust (with the `wasm32-unknown-unknown` target) and
 `wasm-bindgen-cli` (the version in `Cargo.lock`) on your `PATH`, then run
 `pnpm install` and `pnpm build`.
 
-## Customization
+## Self-hosting
 
-Edit [`static/config.json`](static/config.json) to customize homeservers and client
-defaults. With Docker, copy it to `config.json`, edit it, and mount it:
-
-```yaml
-services:
-  sable:
-    image: git.sable.moe/sableclient/sable-next:dev
-    ports:
-      - '8080:8080'
-    volumes:
-      - ./config.json:/app/config.json:ro
-```
+See the [web client guide](docs/web.md) for Docker and client configuration, or
+the [server mode guide](docs/server.md) to run Sable and its Matrix stores on
+your server.
 
 ## Apps
 
@@ -240,20 +249,6 @@ same release. Pushing a `v*` tag publishes a stable release the same way.
 The web build ships with every release as `sable-<version>-web.tar.gz`.
 Extract it into your web root to serve the app yourself; see
 [`Caddyfile`](Caddyfile) for an example configuration.
-
-### Console output
-
-Run with `--verbose` to print webview console messages to stderr (CEF and Wry).
-In development: `pnpm tauri dev -- -- --verbose`.
-Quit any running instance before restarting with the flag.
-
-### Proxy
-
-Start a desktop app with `--proxy` to send all of its traffic through an HTTP
-or SOCKS5 proxy, for example `--proxy=socks5://127.0.0.1:9050`. On Windows, add
-it to the end of the shortcut's Target, after the quoted path.
-A SOCKS5 proxy also resolves host names, so lookups do not leave the proxy. An
-invalid value shows an error and quits rather than starting without the proxy.
 
 ## Contributing
 

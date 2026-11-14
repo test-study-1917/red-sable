@@ -59,8 +59,8 @@
     return session.members.find((member) => member.identity === identity)?.user_id ?? identity;
   });
   const sharerProfile = new UserProfile(core, () => sharerId);
-  let sharerName = $derived(sharerProfile.current?.display_name ?? null);
-  let label = $derived(i18n.t('call.screenOf', { name: sharerName ?? sharerId ?? '' }));
+  let sharerName = $derived(sharerId ? (sharerProfile.current?.display_name ?? sharerId) : '');
+  let label = $derived(i18n.t('call.screenOf', { name: sharerName }));
 
   let video = $state<HTMLVideoElement | null>(null);
   let popped = $state<'document' | 'video' | null>(null);
@@ -267,12 +267,12 @@
 
   .top-left,
   .bottom-left {
-    left: max(var(--space-400), var(--safe-left));
+    inset-inline-start: max(var(--space-400), var(--safe-inline-start));
   }
 
   .top-right,
   .bottom-right {
-    right: max(var(--space-400), var(--safe-right));
+    inset-inline-end: max(var(--space-400), var(--safe-inline-end));
   }
 
   .stage {

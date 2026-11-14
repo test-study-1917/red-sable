@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { inlineKey } from '#lib/language.svelte.js';
   import { Dialog } from 'bits-ui';
   import { untrack } from 'svelte';
   import ArrowLeftIcon from 'phosphor-svelte/lib/ArrowLeftIcon';
@@ -11,8 +12,10 @@
 
   import { i18n } from '#lib/i18n.js';
   import { holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
-  import { preferences, type ImageMetadata } from '#lib/settings/preferences.svelte.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { type ImageMetadata } from '#lib/settings/definitions.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
+  import { mediaEvents } from '#lib/ui/media-events.js';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
   import Button from '#lib/ui/primitives/Button.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
@@ -49,6 +52,11 @@
   let failedId = $state<number | null>(null);
   let swipeX = $state(0);
   let swipeY = $state(0);
+
+  function markFailed(): void {
+    if (item) failedId = item.id;
+  }
+
   let swipe: {
     pointerId: number;
     startX: number;
@@ -83,8 +91,9 @@
 
   function handleKeydown(event: KeyboardEvent): void {
     if (event.target instanceof HTMLVideoElement) return;
-    if (event.key === 'ArrowLeft') go(-1);
-    else if (event.key === 'ArrowRight') go(1);
+    const key = inlineKey(event.key);
+    if (key === 'ArrowLeft') go(-1);
+    else if (key === 'ArrowRight') go(1);
     else return;
     event.preventDefault();
   }
@@ -186,7 +195,7 @@
               class="staged-viewer-nav staged-viewer-previous"
               label={i18n.t('viewer.previous')}
               size="large"
-              onclick={() => go(-1)}><ArrowLeftIcon /></IconButton
+              onclick={() => go(-1)}><ArrowLeftIcon class="mirror-rtl" /></IconButton
             >
           {/if}
           {#if item.spoiler}
@@ -210,9 +219,7 @@
                 preload="metadata"
                 aria-label={item.file.name}
                 {@attach objectSource(item.file)}
-                onerror={() => {
-                  if (item) failedId = item.id;
-                }}
+                {@attach mediaEvents({ error: markFailed })}
               ></video>
             {:else}
               <img
@@ -221,9 +228,7 @@
                 alt={item.file.name}
                 draggable="false"
                 {@attach objectSource(item.file)}
-                onerror={() => {
-                  if (item) failedId = item.id;
-                }}
+                {@attach mediaEvents({ error: markFailed })}
               />
             {/if}
           {/key}
@@ -232,7 +237,7 @@
               class="staged-viewer-nav staged-viewer-next"
               label={i18n.t('viewer.next')}
               size="large"
-              onclick={() => go(1)}><ArrowRightIcon /></IconButton
+              onclick={() => go(1)}><ArrowRightIcon class="mirror-rtl" /></IconButton
             >
           {/if}
         </div>
@@ -366,7 +371,8 @@
     font-size: var(--font-size-small);
     gap: var(--space-100);
     inset-block-start: var(--space-200);
-    inset-inline-start: 50%;
+    /* stylelint-disable-next-line csstools/use-logical -- centred, so the same in both directions */
+    left: 50%;
     padding: var(--space-100) var(--space-250);
     position: absolute;
     translate: -50% 0;

@@ -1,11 +1,14 @@
 import { expect, test } from 'vitest';
 
-import {
-  composerSeparatorCount,
-  preferences,
-  sanitize,
-  withComposerSeparatorCount,
-} from './preferences.svelte.js';
+import { preferences } from './preferences.svelte.js';
+import { composerSeparatorCount, sanitize, withComposerSeparatorCount } from './definitions.js';
+
+test('keeps a saved call input mode and rejects unknown values', () => {
+  expect(sanitize({ callInputMode: 'push-to-talk' }, preferences).callInputMode).toBe(
+    'push-to-talk'
+  );
+  expect(sanitize({ callInputMode: 'unknown' }, preferences).callInputMode).toBe('voice-activity');
+});
 
 test.each([
   [true, 'on'],
@@ -42,6 +45,12 @@ test('defaults to unmetered crawling and keeps the saved preference', () => {
   expect(sanitize({ searchUnmeteredOnly: false }, preferences).searchUnmeteredOnly).toBe(false);
 });
 
+test('shares directly between devices by default', () => {
+  const defaults = sanitize({}, preferences);
+  expect(defaults.searchSharing).toBe(true);
+  expect(sanitize({ searchSharing: false }, preferences).searchSharing).toBe(false);
+});
+
 test('keeps a notification volume inside its range', () => {
   expect(sanitize({ soundsNotificationVolume: 0.4 }, preferences).soundsNotificationVolume).toBe(
     0.4
@@ -70,6 +79,19 @@ test('threads default to full conversations and keep a saved panel choice', () =
   expect(sanitize({ threadPresentation: 'unknown' }, preferences).threadPresentation).toBe(
     'timeline'
   );
+});
+
+test('voice participants keep both displays by default and preserve a saved layout', () => {
+  expect(sanitize({}, preferences).voiceParticipantPlacement).toBe('both');
+  expect(
+    sanitize({ voiceParticipantPlacement: 'below' }, preferences).voiceParticipantPlacement
+  ).toBe('below');
+  expect(
+    sanitize({ voiceParticipantPlacement: 'inline' }, preferences).voiceParticipantPlacement
+  ).toBe('inline');
+  expect(
+    sanitize({ voiceParticipantPlacement: 'unknown' }, preferences).voiceParticipantPlacement
+  ).toBe('both');
 });
 
 test('reads a stored boolean enterForNewline as its enum equivalent', () => {

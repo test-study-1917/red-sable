@@ -166,7 +166,7 @@ pub(crate) async fn provision_stable(
     member_id: &str,
 ) -> Result<Provisioned, ProvisionError> {
     use matrix_sdk::ruma::api::client::rtc::livekit::get_token;
-    let mut request = get_token::v1::Request::new(
+    let mut request = get_token::msc4195::Request::new(
         url.to_owned(),
         room.room_id().to_owned(),
         "m.call#room".to_owned(),
@@ -298,6 +298,8 @@ impl std::fmt::Display for ProvisionError {
     }
 }
 
+impl std::error::Error for ProvisionError {}
+
 #[cfg(test)]
 mod tests {
     use matrix_sdk::ruma::{device_id, user_id};
@@ -312,8 +314,8 @@ mod tests {
     #[test]
     fn test_the_livekit_identity_pairs_with_the_legacy_endpoint() {
         assert_eq!(
-            livekit_identity(user_id!("@erwan:localhost"), device_id!("DEVICEID")),
-            "@erwan:localhost:DEVICEID"
+            livekit_identity(user_id!("@kris:localhost"), device_id!("DEVICEID")),
+            "@kris:localhost:DEVICEID"
         );
     }
 

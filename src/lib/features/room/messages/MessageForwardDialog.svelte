@@ -19,9 +19,6 @@
   let search = $state('');
   let includeMetadata = $state(true);
 
-  $effect(() => {
-    if (open) includeMetadata = true;
-  });
   let selected = $state.raw<string[]>([]);
   const fieldId = $props.id();
 
@@ -31,9 +28,7 @@
         (room) =>
           room.state === 'joined' && room.room_kind !== 'space' && room.room_id !== fromRoomId
       )
-      .filter((room) =>
-        (room.name ?? room.room_id).toLowerCase().includes(search.trim().toLowerCase())
-      )
+      .filter((room) => room.display_name.toLowerCase().includes(search.trim().toLowerCase()))
   );
 
   function send(): void {
@@ -62,13 +57,13 @@
       aria-label={i18n.t('common.searchRooms')}
     />
     {#if targets.length === 0}
-      <p class="empty">{i18n.t('common.noRoomsMatch')}</p>
+      <p class="empty-text">{i18n.t('common.noRoomsMatch')}</p>
     {:else}
       <RoomChecklist
         class="targets"
         rooms={targets}
         bind:selected
-        label={(room) => room.name ?? room.room_id}
+        label={(room) => room.display_name}
       />
     {/if}
 
@@ -81,7 +76,7 @@
       />
     </div>
     {#if metadataLocked}
-      <p class="empty">{i18n.t('timeline.forwardMetadataPreserved')}</p>
+      <p class="empty-text">{i18n.t('timeline.forwardMetadataPreserved')}</p>
     {/if}
 
     <div class="actions">
@@ -111,12 +106,6 @@
     margin: 0;
   }
 
-  .empty {
-    color: var(--surface-var-on-container);
-    font-size: var(--font-size-small);
-    margin: 0;
-  }
-
   .metadata {
     align-items: center;
     display: flex;
@@ -134,6 +123,6 @@
   .count {
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
-    margin-right: auto;
+    margin-inline-end: auto;
   }
 </style>

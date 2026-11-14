@@ -16,7 +16,7 @@
   import Button from '#lib/ui/primitives/Button.svelte';
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
-  import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import SearchField from '#lib/ui/primitives/SearchField.svelte';
 
   import ThemeTile from './ThemeTile.svelte';
   import {
@@ -27,6 +27,7 @@
     type CatalogEntry,
     type CatalogFilter,
   } from '#lib/settings/theme-catalog.js';
+  import { rovingFocus } from '#lib/ui/roving-focus.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
 
   interface Props {
@@ -73,23 +74,6 @@
     { value: 'theme', label: 'settings.themeCatalogThemesTab' },
     { value: 'tweak', label: 'settings.themeCatalogTweaksTab' },
   ] as const;
-
-  function moveTab(event: KeyboardEvent): void {
-    const next =
-      event.key === 'Home'
-        ? 'theme'
-        : event.key === 'End'
-          ? 'tweak'
-          : event.key === 'ArrowLeft' || event.key === 'ArrowRight'
-            ? tab === 'theme'
-              ? 'tweak'
-              : 'theme'
-            : null;
-    if (next === null) return;
-    event.preventDefault();
-    tab = next;
-    document.getElementById(`catalog-tab-${tab}`)?.focus();
-  }
 
   function modeName(kind: ResolvedTheme): string {
     return (
@@ -183,7 +167,12 @@
           >
         </div>
       </div>
-      <div class="tabs" role="tablist" aria-label={i18n.t('settings.themeCatalogTitle')}>
+      <div
+        class="tabs"
+        role="tablist"
+        aria-label={i18n.t('settings.themeCatalogTitle')}
+        {@attach rovingFocus({ selector: '[role="tab"]' })}
+      >
         {#each tabs as option (option.value)}
           {@const count = option.value === 'theme' ? themes.length : tweaks.length}
           <button
@@ -193,9 +182,8 @@
             class="tab"
             aria-selected={tab === option.value}
             aria-controls={`catalog-panel-${option.value}`}
-            tabindex={tab === option.value ? 0 : -1}
+            onfocus={() => (tab = option.value)}
             onclick={() => (tab = option.value)}
-            onkeydown={moveTab}
           >
             {i18n.t(option.label)}
             {#if !failed}<span class="tab-count">{count > 0 ? count : ''}</span>{/if}
@@ -204,12 +192,7 @@
       </div>
       <div class="filters">
         <div class="search">
-          <TextInput
-            type="search"
-            bind:value={filter.query}
-            placeholder={i18n.t('settings.themeCatalogSearch')}
-            aria-label={i18n.t('settings.themeCatalogSearch')}
-          />
+          <SearchField bind:value={filter.query} label={i18n.t('settings.themeCatalogSearch')} />
         </div>
         {#if tab === 'theme'}<div
             class="chips"
@@ -365,7 +348,7 @@
               {#each [0, 1, 2] as index (index)}<li class="tweak skeleton-row"></li>{/each}
             </ul>
           {:else}
-            <p class="empty">{i18n.t('settings.themeCatalogEmpty')}</p>
+            <p class="empty-text catalog-hint">{i18n.t('settings.themeCatalogEmpty')}</p>
           {/if}
         </div>
       {/if}

@@ -64,7 +64,7 @@ mod stable {
         }
 
         #[request]
-        pub struct Request {
+        pub(crate) struct Request {
             #[ruma_api(path)]
             pub room_id: OwnedRoomId,
             #[ruma_api(path)]
@@ -84,7 +84,7 @@ mod stable {
         }
 
         #[response]
-        pub struct Response {
+        pub(crate) struct Response {
             pub delay_id: String,
         }
     }
@@ -104,7 +104,7 @@ mod stable {
         }
 
         #[request]
-        pub struct Request {
+        pub(crate) struct Request {
             #[ruma_api(path)]
             pub delay_id: String,
             #[ruma_api(path)]
@@ -112,14 +112,14 @@ mod stable {
         }
 
         #[response]
-        pub struct Response {}
+        pub(crate) struct Response {}
     }
 }
 
 #[derive(Clone, Debug)]
-struct DelayedStickyRequest(delayed_message_event::unstable::Request, u32);
+struct DelayedStickyRequest(delayed_message_event::msc4140::Request, u32);
 
-type DelayedRequest = delayed_message_event::unstable::Request;
+type DelayedRequest = delayed_message_event::msc4140::Request;
 
 impl ruma::api::Metadata for DelayedStickyRequest {
     const METHOD: http::Method = DelayedRequest::METHOD;
@@ -193,7 +193,7 @@ pub(crate) async fn send(
 
     let parameters = DelayParameters::Timeout { timeout: delay };
     if let Some(state_key) = state_key {
-        let request = delayed_state_event::unstable::Request::new_raw(
+        let request = delayed_state_event::msc4140::Request::new_raw(
             room_id,
             state_key,
             StateEventType::from(event_type),
@@ -231,7 +231,7 @@ pub(crate) async fn update(
             .await?;
     } else {
         client
-            .send(update_delayed_event::unstable_v1::Request::new(
+            .send(update_delayed_event::msc4140_v1::Request::new(
                 delay_id, action,
             ))
             .await?;

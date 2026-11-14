@@ -38,6 +38,18 @@ const metrics: SearchMetricsView = {
   last_request_ms: 180,
   average_request_ms: 210,
   running_ms: 120_000,
+  sharing: {
+    state: 'off',
+    pause: null,
+    outcome: null,
+    peer: null,
+    transferred_rooms: 0,
+    total_rooms: 0,
+    last_copy: null,
+    automatic: false,
+    asked: 0,
+    candidates: [],
+  },
 };
 
 afterEach(() => {

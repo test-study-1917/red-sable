@@ -2,7 +2,9 @@
   import HeartIcon from 'phosphor-svelte/lib/HeartIcon';
   import HeartStraightIcon from 'phosphor-svelte/lib/HeartStraightIcon';
 
+  import { embedServiceUrl } from '#lib/config/embed-service.js';
   import { i18n } from '#lib/i18n.js';
+  import MediaImage from '#lib/ui/MediaImage.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
@@ -10,6 +12,7 @@
   import { GifSearch } from './gif-search.svelte';
   import {
     gifProvider,
+    isUploadedGifSource,
     type GifProviderSetting,
     type GifResult,
     type GifsConfig,
@@ -18,12 +21,13 @@
 
   interface Props {
     config: GifsConfig;
+    serviceUrl: string;
     providerSetting: GifProviderSetting;
     query: string;
     onPick: (gif: GifResult) => void;
   }
 
-  let { config, providerSetting, query, onPick }: Props = $props();
+  let { config, serviceUrl, providerSetting, query, onPick }: Props = $props();
 
   const search = new GifSearch();
 
@@ -33,7 +37,7 @@
   $effect(() => {
     const apiKey = provider.apiKey(config);
     if (apiKey === null) return;
-    search.search(provider, apiKey, query);
+    search.search(serviceUrl, provider, apiKey, query);
     return () => {
       search.cancel();
     };
@@ -67,15 +71,27 @@
                 onPick(gif);
               }}
             >
-              <img
-                src={gif.previewUrl}
-                alt=""
-                width={gif.width || 4}
-                height={gif.height || 3}
-                loading="lazy"
-                decoding="async"
-                referrerpolicy="no-referrer"
-              />
+              {#if isUploadedGifSource(gif.previewUrl)}
+                <MediaImage
+                  source={gif.previewUrl}
+                  alt=""
+                  width={gif.width || 4}
+                  height={gif.height || 3}
+                  intrinsicWidth={gif.width || null}
+                  intrinsicHeight={gif.height || null}
+                  mime={gif.mimetype}
+                />
+              {:else}
+                <img
+                  src={embedServiceUrl(serviceUrl, 'gifs/media', { url: gif.previewUrl })}
+                  alt=""
+                  width={gif.width || 4}
+                  height={gif.height || 3}
+                  loading="lazy"
+                  decoding="async"
+                  referrerpolicy="no-referrer"
+                />
+              {/if}
             </button>
           {/snippet}
         </Tooltip>
@@ -144,7 +160,7 @@
 
   .gif-grid ul {
     column-gap: var(--space-100);
-    columns: 2;
+    columns: 9rem;
     list-style: none;
     margin: 0;
     padding: 0;
@@ -189,9 +205,9 @@
     cursor: pointer;
     display: flex;
     height: var(--star-size);
+    inset-inline-end: 0.25rem;
     justify-content: center;
     position: absolute;
-    right: 0.25rem;
     top: 0.25rem;
     width: var(--star-size);
   }

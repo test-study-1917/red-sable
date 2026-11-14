@@ -2,6 +2,7 @@ package moe.sable.push
 
 import android.content.Context
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 
 internal sealed interface PushDecryptResult {
@@ -23,10 +24,22 @@ internal object PushPayloadDecryptor {
 
     private var loaded: Boolean? = null
 
+    private external fun nativePreviewBody(body: String, formatted: String): String?
+
+    fun previewBody(context: Context, content: JSONObject?): String? {
+        val body = (content?.opt("body") as? String)?.takeIf { it.isNotEmpty() } ?: return null
+        val formatted = (content.opt("formatted_body") as? String)?.takeIf { it.isNotBlank() }
+        if (content.optString("format") != "org.matrix.custom.html" || formatted == null) return body
+        if (!available(context)) return null
+        return runCatching { nativePreviewBody(body, formatted) }
+            .onFailure { Log.i(TAG, "Push preview unavailable: ${it.message}") }
+            .getOrNull()
+    }
+
     private external fun nativeMaintainPush(storeDir: String, operation: String): String?
 
     fun maintain(context: Context, operation: String): Boolean =
-        available() && runCatching { nativeMaintainPush(context.filesDir.absolutePath, operation) == "ok" }.getOrDefault(false)
+        available(context) && runCatching { nativeMaintainPush(context.filesDir.absolutePath, operation) == "ok" }.getOrDefault(false)
 
     private external fun nativeDecryptPush(
         storeDir: String,
@@ -62,12 +75,65 @@ internal object PushPayloadDecryptor {
         nativeFetchPush(storeDir, userId, deviceId, roomId, eventId)
     }
 
+    private external fun nativeActiveElsewhere(
+        storeDir: String,
+        userId: String,
+        deviceId: String,
+        roomId: String,
+    ): Boolean
+
+    fun activeElsewhere(context: Context, userId: String, deviceId: String, roomId: String): Boolean {
+        if (!available(context)) return false
+        return try {
+            nativeActiveElsewhere(context.dataDir.absolutePath, userId, deviceId, roomId)
+        } catch (error: Throwable) {
+            Log.i(TAG, "Device activity unavailable: ${error.message}")
+            false
+        }
+    }
+
+    private external fun nativeReadRooms(
+        storeDir: String,
+        userId: String,
+        deviceId: String,
+        seedRoomId: String,
+        roomIds: String,
+    ): String?
+
+    fun readRooms(
+        context: Context,
+        userId: String,
+        deviceId: String,
+        seedRoomId: String,
+        roomIds: List<String>,
+    ): List<String>? {
+        if (!available(context)) return null
+        val json = try {
+            nativeReadRooms(
+                context.dataDir.absolutePath,
+                userId,
+                deviceId,
+                seedRoomId,
+                JSONArray(roomIds).toString(),
+            )
+        } catch (error: Throwable) {
+            Log.i(TAG, "Read rooms unavailable: ${error.message}")
+            null
+        }
+        if (json.isNullOrEmpty()) return null
+        return runCatching {
+            val rooms = JSONArray(json)
+            List(rooms.length()) { rooms.getString(it) }
+        }.getOrNull()
+    }
+
     private external fun nativePushMedia(
         storeDir: String,
         userId: String,
         deviceId: String,
         roomId: String,
         sender: String,
+        payloadName: String,
         content: String,
     ): String?
 
@@ -77,13 +143,14 @@ internal object PushPayloadDecryptor {
         deviceId: String,
         roomId: String,
         sender: String?,
+        payloadName: String?,
         content: JSONObject?,
     ): JSONObject? {
-        if (!available()) return null
+        if (!available(context)) return null
         val json = try {
             nativePushMedia(
                 context.dataDir.absolutePath, userId, deviceId, roomId,
-                sender.orEmpty(), content?.toString().orEmpty(),
+                sender.orEmpty(), payloadName.orEmpty(), content?.toString().orEmpty(),
             )
         } catch (error: Throwable) {
             Log.i(TAG, "Push media unavailable: ${error.message}")
@@ -113,7 +180,7 @@ internal object PushPayloadDecryptor {
     ): Boolean
 
     fun reply(context: Context, action: ConversationAction, deviceId: String, privateReceipt: Boolean): Boolean =
-        available() && runCatching {
+        available(context) && runCatching {
             nativeReply(
                 context.dataDir.absolutePath, action.userId, deviceId, action.roomId,
                 action.text.orEmpty(), action.id, action.eventId, privateReceipt,
@@ -121,18 +188,19 @@ internal object PushPayloadDecryptor {
         }.onFailure { Log.i(TAG, "Reply not sent: ${it.message}") }.getOrDefault(false)
 
     fun markRead(context: Context, action: ConversationAction, deviceId: String, privateReceipt: Boolean): Boolean =
-        available() && runCatching {
+        available(context) && runCatching {
             nativeMarkRead(
                 context.dataDir.absolutePath, action.userId, deviceId, action.roomId,
                 action.eventId, privateReceipt,
             )
         }.onFailure { Log.i(TAG, "Receipt not sent: ${it.message}") }.getOrDefault(false)
 
-    private fun available(): Boolean {
+    private fun available(context: Context): Boolean {
         loaded?.let { return it }
 
         val result = try {
             System.loadLibrary(HOST_LIBRARY)
+            Secrets.install(context)
             true
         } catch (error: UnsatisfiedLinkError) {
             Log.i(TAG, "No native decryptor in this build: ${error.message}")
@@ -163,7 +231,7 @@ internal object PushPayloadDecryptor {
     }
 
     private fun run(context: Context, native: (String) -> String?): PushDecryptResult {
-        if (!available()) return PushDecryptResult.Failure(PushOutcome.NO_NATIVE_LIB)
+        if (!available(context)) return PushDecryptResult.Failure(PushOutcome.NO_NATIVE_LIB)
 
         val clear = try {
             native(context.dataDir.absolutePath)

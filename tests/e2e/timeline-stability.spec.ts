@@ -1286,7 +1286,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
   timeline,
   core,
   installRoomCore,
-  isMobile,
+  hasTouch,
 }) => {
   await installRoomCore('ready');
   await page.setViewportSize({ width: 900, height: 420 });
@@ -1316,7 +1316,8 @@ test('a message the reader sends from the bottom is followed on every frame', as
         .poll(() => app.composer.evaluate((node) => node.getBoundingClientRect().height))
         .toBeGreaterThan(initialComposerHeight);
     }
-    if (send.method === 'button' || isMobile) await app.sendMessage.click();
+    // Enter adds a line on touch screens, so only a keyboard-first browser sends with it.
+    if (send.method === 'button' || hasTouch) await app.sendMessage.click();
     else await app.composer.press('Enter');
     await expect
       .poll(
@@ -1360,7 +1361,7 @@ test('a message the reader sends from the bottom is followed on every frame', as
               diffs: [
                 {
                   op: 'set',
-                  index: Number(row.dataset.index),
+                  index: window.__e2eTimelineIndexOf(subscription, echo.id),
                   value: {
                     ...echo,
                     event_id: `$${echo.id}`,
@@ -1413,8 +1414,7 @@ test('deleting the last composer character keeps following latest', async ({
           kind: 'message',
           body: linkBody,
           html: 'A link preview <a href="https://example.test/article">https://example.test/article</a>',
-          emote: false,
-          notice: false,
+          msgtype: 'text',
           edited: false,
         },
       },
@@ -1527,8 +1527,7 @@ test('follows sent links after scrolling back to the bottom in Firefox', async (
           kind: 'message',
           body,
           html: 'Firefox regression <a href="https://example.test/article">https://example.test/article</a>',
-          emote: false,
-          notice: false,
+          msgtype: 'text',
           edited: false,
         },
       },
@@ -1724,4 +1723,105 @@ test('a reply target can be jumped to again after scrolling away', async ({
   await replyChip.click();
   await timeline.waitForScrollSettled();
   await expect(timeline.itemByEventId(target)).toBeInViewport();
+});
+
+test('a reply jump from a permalink context stays on its loaded target', async ({
+  page,
+  timeline,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await page.goto(
+    `/rooms/${encodeURIComponent('!room:example.test')}?event=${encodeURIComponent('$general-2:example.test')}`
+  );
+  await timeline.expectRevealed({ timeout: 15_000 });
+  await expect(page.locator('.message.highlighted')).toContainText('General message 2');
+
+  const target = '$general-3:example.test';
+  await core.emitTimelineDiff(await core.subscription(), [
+    {
+      op: 'push_back',
+      value: {
+        ...timelineItem('context-answer', 'Answering from a context'),
+        in_reply_to: {
+          event_id: target,
+          sender: '@bob:example.test',
+          sender_mentioned: false,
+          sender_name: 'Bob',
+          body: 'General message 3',
+          fallback: null,
+        },
+      },
+    },
+  ]);
+  await timeline.scrollToBottomAndNotify();
+  await timeline.waitForScrollSettled();
+
+  await timeline.container
+    .locator('.item')
+    .filter({ hasText: 'Answering from a context' })
+    .locator('.reply-preview')
+    .click();
+
+  await expect.poll(() => new URL(page.url()).searchParams.get('event')).toBe(target);
+  await timeline.waitForScrollSettled();
+  await expect(page.locator('.message.highlighted')).toContainText('General message 3');
+  await expect(timeline.itemByEventId(target)).toBeInViewport();
+  expect(await core.subscribeCount()).toBe(1);
+});
+
+test('returning to the latest message drops the jump target from the address', async ({
+  page,
+  app,
+  timeline,
+  core,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await app.openRoom('!room:example.test');
+  await timeline.expectAtLatest('General message 19');
+  const replyTo = (id: string, body: string, target: string) => ({
+    ...timelineItem(id, body),
+    in_reply_to: {
+      event_id: target,
+      sender: '@bob:example.test',
+      sender_mentioned: false,
+      sender_name: 'Bob',
+      body: 'Quoted',
+      fallback: null,
+    },
+  });
+  const subscription = await core.subscription();
+  await core.emitTimelineDiff(subscription, [
+    {
+      op: 'push_back',
+      value: replyTo('near-answer', 'Answering near', '$general-19:example.test'),
+    },
+  ]);
+  await timeline.expectAtLatest('Answering near');
+  const chip = (body: string) =>
+    timeline.container.locator('.item').filter({ hasText: body }).locator('.reply-preview');
+  const target = () => new URL(page.url()).searchParams.get('event');
+
+  await chip('Answering near').click();
+  await expect.poll(target).toBe('$general-19:example.test');
+  await core.emitTimelineDiff(subscription, [
+    { op: 'push_back', value: replyTo('far-answer', 'Answering far', '$general-3:example.test') },
+  ]);
+  await timeline.expectAtLatest('Answering far');
+  expect(target()).toBe('$general-19:example.test');
+  await expect(page.locator('.message.highlighted')).toContainText('General message 19');
+
+  await chip('Answering far').click();
+  await expect.poll(target).toBe('$general-3:example.test');
+  await timeline.waitForScrollSettled();
+  await expect(timeline.itemByEventId('$general-3:example.test')).toBeInViewport();
+
+  await timeline.scrollToBottomAndNotify();
+  await expect.poll(target).toBeNull();
+  await expect(page.locator('.message.highlighted')).toHaveCount(0);
+  await timeline.expectAtLatest('Answering far');
 });

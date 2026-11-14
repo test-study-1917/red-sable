@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { currentDirection } from '#lib/language.svelte.js';
   import { ContextMenu } from 'bits-ui';
   import IconContext from 'phosphor-svelte/lib/IconContext';
 
   import { i18n } from '#lib/i18n.js';
   import '#lib/ui/primitives/menu.css';
   import { overlayLayer } from '#lib/ui/overlay-layer.js';
+  import { collisionPadding } from '#lib/ui/titlebar-inset.svelte.js';
 
   import { messageMenuRows } from './message-menu-items';
   import type { OpenMessageMenu } from './message-menu-open.svelte.js';
@@ -21,6 +23,7 @@
 </script>
 
 <ContextMenu.Root
+  dir={currentDirection()}
   bind:open={
     () => open,
     (next: boolean) => {
@@ -32,10 +35,11 @@
     {@const actions = menu.actions()}
     <ContextMenu.Portal>
       <ContextMenu.Content
+        dir={currentDirection()}
         class="menu-surface message-menu"
         {...overlayLayer()}
         loop
-        collisionPadding={8}
+        collisionPadding={collisionPadding(8)}
         customAnchor={anchor}
         preventScroll={false}
       >
@@ -64,7 +68,7 @@
                 ]}
                 onclick={row.run}
               >
-                <RowIcon />
+                <RowIcon class={row.mirrored ? 'mirror-rtl' : undefined} />
                 <span>{i18n.t(row.label)}</span>
               </ContextMenu.Item>
             {/each}

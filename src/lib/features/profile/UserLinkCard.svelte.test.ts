@@ -7,7 +7,7 @@ import type { RoomListItemView } from '#src/generated/protocol';
 
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
 vi.mock('#lib/core/context.js');
-const roomList = vi.hoisted(() => ({ rooms: [] as RoomListItemView[] }));
+const roomList = vi.hoisted(() => ({ rooms: [] as RoomListItemView[], settled: true }));
 vi.mock('#lib/rooms/room-list.svelte.js', async (original) => ({
   ...(await original<typeof import('#lib/rooms/room-list.svelte.js')>()),
   useRoomList: () => roomList,
@@ -24,7 +24,17 @@ beforeEach(() => {
 });
 afterEach(() => {
   roomList.rooms = [];
+  roomList.settled = true;
   core.rpc.rooms.createDm.mockReset();
+});
+
+test('waits for the room list before deciding whether to create a DM', async () => {
+  roomList.settled = false;
+  render(UserLinkCard, { props: { userId: '@alice:example.org', startChat: true } });
+  await screen.findByRole('heading', { name: 'Alice' });
+
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(core.rpc.rooms.createDm).not.toHaveBeenCalled();
 });
 
 test('a chat action asks before creating a DM, then navigates after confirmation', async () => {
@@ -38,6 +48,7 @@ test('a chat action asks before creating a DM, then navigates after confirmation
     expect(core.rpc.rooms.createDm).toHaveBeenCalledWith({
       user_id: '@alice:example.org',
       encrypted: null,
+      encrypt_new: true,
     });
   });
   await vi.waitFor(() => {
@@ -62,6 +73,24 @@ test('cancelling a chat action leaves the profile open without creating a room',
   });
   expect(core.rpc.rooms.createDm).not.toHaveBeenCalled();
   expect(goto.mock.calls.some(([path]) => path.startsWith('/direct/'))).toBe(false);
+});
+
+test('a cancelled chat action is not asked again when the room list reconnects', async () => {
+  const { rerender } = render(UserLinkCard, {
+    props: { userId: '@alice:example.org', startChat: true },
+  });
+  await screen.findByRole('dialog');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.cancel') }));
+  await vi.waitFor(() => {
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  roomList.settled = false;
+  await rerender({ userId: '@alice:example.org', startChat: true });
+  roomList.settled = true;
+  await rerender({ userId: '@alice:example.org', startChat: true });
+
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
 test('a chat action opens an existing joined DM without creating one or asking again', async () => {

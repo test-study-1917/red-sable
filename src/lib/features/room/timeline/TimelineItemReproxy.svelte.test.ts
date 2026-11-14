@@ -52,8 +52,7 @@ function plainMultiline(): TimelineItemView {
       kind: 'message',
       body: 'one\ntwo',
       html: '<span data-plain-body>one\ntwo</span>',
-      emote: false,
-      notice: false,
+      msgtype: 'text',
       edited: false,
       jumbo: null,
     },
@@ -70,6 +69,7 @@ function plainMultiline(): TimelineItemView {
     mention: 'none',
     forwarded: null,
     forum_title: null,
+    shield: null,
   });
 }
 

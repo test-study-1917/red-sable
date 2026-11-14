@@ -17,7 +17,6 @@
   import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
-  import MediaImage from '#lib/ui/MediaImage.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import FormField from '#lib/ui/primitives/FormField.svelte';
   import OptionCards from '#lib/ui/primitives/OptionCards.svelte';
@@ -25,7 +24,7 @@
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import TextArea from '#lib/ui/primitives/TextArea.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
-  import { uprightJpeg } from '#lib/ui/upright-jpeg.js';
+  import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
 
   import '#lib/ui/primitives/settings-row.css';
 
@@ -38,10 +37,12 @@
   import RoomAddressSettings from './RoomAddressSettings.svelte';
   import RoomEncryptionSettings from './RoomEncryptionSettings.svelte';
   import RoomHistorySettings from './RoomHistorySettings.svelte';
+  import RoomPresenceSettings from './RoomPresenceSettings.svelte';
   import RoomPublishSettings from './RoomPublishSettings.svelte';
   import RoomSpacesSettings from './RoomSpacesSettings.svelte';
   import RoomUpgradeSettings from './RoomUpgradeSettings.svelte';
   import { canSendState } from './permission-groups';
+  import Banner from '#lib/ui/primitives/Banner.svelte';
 
   interface Props {
     room: RoomListItemView | null;
@@ -184,9 +185,8 @@
     if (!file || !target || !canEditAvatar) return;
 
     await run(async () => {
-      const upright = await uprightJpeg(file);
-      const bytes = new Uint8Array(await upright.arrayBuffer());
-      await core.uploadRoomAvatar(target, upright.type || 'image/*', bytes);
+      const { mime, bytes } = await uprightImageBytes(file);
+      await core.uploadRoomAvatar(target, mime, bytes);
     });
   }
 
@@ -239,7 +239,9 @@
 
 {#snippet bannerPreview()}
   {#if banner}
-    <MediaImage source={banner} alt="" width={160} height={90} class="banner-preview" />
+    <div class="banner-preview">
+      <Banner source={banner} {name} width={160} height={90} />
+    </div>
   {/if}
 {/snippet}
 
@@ -255,7 +257,12 @@
         description={i18n.t('room.settingsAvatarHint')}
       >
         {#snippet before()}
-          <Avatar id={roomId} src={room?.avatar_url ?? null} name={room?.name ?? ''} />
+          <Avatar
+            id={roomId}
+            src={room?.avatar_url ?? null}
+            openable={true}
+            name={room?.name ?? ''}
+          />
         {/snippet}
         {#if canEditAvatar}
           <Button size="small" disabled={saving} onclick={() => avatarInput?.click()}>
@@ -399,6 +406,7 @@
       {#if room?.room_kind !== 'space'}
         <RoomHistorySettings {room} {levels} {ownPowerLevel} />
         <RoomEncryptionSettings {room} {levels} {ownPowerLevel} />
+        <RoomPresenceSettings {room} {levels} {ownPowerLevel} />
       {/if}
       <RoomPublishSettings {room} {levels} {ownPowerLevel} />
       <RoomSpacesSettings {room} {levels} {ownPowerLevel} />
@@ -457,14 +465,13 @@
     margin: 0;
   }
 
-  .section :global(.media-image.banner-preview) {
+  .section .banner-preview :global(.media-image) {
     border-radius: var(--radius);
     flex: none;
     height: 2.5rem;
     max-width: none;
     object-fit: cover;
     overflow: hidden;
-    width: 4.5rem;
   }
 
   .avatar-input {
@@ -498,7 +505,7 @@
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
     margin: 0;
-    margin-right: auto;
+    margin-inline-end: auto;
   }
 
   .save-bar.pending .save-status:not(.error) {

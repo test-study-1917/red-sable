@@ -10,7 +10,9 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { createRoom } from '#lib/core/api/rooms.js';
+  import { loadE2eePolicy } from '#lib/deployment/e2ee-policy.svelte.js';
   import { i18n } from '#lib/i18n.js';
+  import { isUserId } from '#lib/guards.js';
   import { roomPathParamFromId } from '#lib/rooms/room-list.svelte.js';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -42,7 +44,6 @@
 
   let { room, levels, ownPowerLevel, onClose }: Props = $props();
   const core = useCoreClient();
-  const userIdPattern = /^@[^:\s]+:\S+$/;
 
   let version = $state<string | null>(null);
   let predecessor = $state<string | null>(null);
@@ -54,6 +55,7 @@
   let target = $state('');
   let mode = $state<'server' | 'custom' | 'redirect'>('server');
   let encrypted = $state(true);
+  const policy = loadE2eePolicy(core);
   let replacementDraft = $state('');
   let messageDraft = $state('');
   let creators = $state.raw<string[]>([]);
@@ -166,7 +168,7 @@
   function addCreator(): void {
     const candidate = creatorDraft.trim();
     if (candidate === '') return;
-    if (!userIdPattern.test(candidate)) {
+    if (!isUserId(candidate)) {
       creatorInvalid = true;
       return;
     }
@@ -182,8 +184,8 @@
       topic: room?.topic,
       kind,
       public: room?.join_rule === 'public',
-      encrypted,
-      roomVersion: target,
+      encrypted: encrypted && !(await core.e2eePolicy()).forceDisabled,
+      room_version: target,
       predecessor: id,
     });
     await core.rpc.rooms.setTombstone({
@@ -339,7 +341,7 @@
       </FormField>
     {/if}
 
-    {#if mode === 'custom'}
+    {#if mode === 'custom' && !policy.current.forceDisabled}
       <div class="toggle-row">
         <div>
           <p class="toggle-label">{i18n.t('common.endToEndEncryption')}</p>

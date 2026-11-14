@@ -43,6 +43,8 @@ import RoomMembersSettings from './RoomMembersSettings.svelte';
 const alice: MemberView = {
   user_id: '@alice:example.org',
   display_name: 'Alice',
+  real_name: 'Alice',
+  real_avatar_url: null,
   avatar_url: null,
   power_level: 0,
   membership: 'join',
@@ -165,8 +167,20 @@ test('searches the directory and invites from the members list', async () => {
   searchUserDirectory.mockResolvedValue({
     limited: false,
     results: [
-      { user_id: '@alice:example.org', display_name: 'Alice', avatar_url: null },
-      { user_id: '@bob:example.org', display_name: 'Bob', avatar_url: null },
+      {
+        user_id: '@alice:example.org',
+        display_name: 'Alice',
+        avatar_url: null,
+        real_name: 'Alice',
+        real_avatar_url: null,
+      },
+      {
+        user_id: '@bob:example.org',
+        display_name: 'Bob',
+        avatar_url: null,
+        real_name: 'Bob',
+        real_avatar_url: null,
+      },
     ],
   });
   core.rpc.rooms.invite.mockResolvedValue(null);
@@ -223,7 +237,7 @@ test('keeps a changed power level when the reload still returns the old one', as
     );
   expect(names()).toEqual(['Alice', 'Bob']);
 
-  const [, bobRole] = screen.getAllByRole('button', { name: 'Change role' });
+  const [, bobRole] = screen.getAllByRole('combobox', { name: 'Change role' });
   await user.click(bobRole);
   await user.click(await screen.findByRole('option', { name: /Moderator/ }));
 
@@ -248,7 +262,7 @@ test('offers the roles created in the room alongside the default ones', async ()
   });
   const user = await renderMembers({ ...permissions, can_change_power_levels: true });
 
-  const [, bobRole] = screen.getAllByRole('button', { name: 'Change role' });
+  const [, bobRole] = screen.getAllByRole('combobox', { name: 'Change role' });
   await user.click(bobRole);
   await user.click(await screen.findByRole('option', { name: /Helper/ }));
 
@@ -266,6 +280,8 @@ test('offers no role above your own and asks before lowering your own', async ()
     ...alice,
     user_id: '@me:example.org',
     display_name: 'Me',
+    real_name: 'Me',
+    real_avatar_url: null,
     power_level: 50,
   };
   core.session = { user_id: '@me:example.org' };
@@ -277,7 +293,7 @@ test('offers no role above your own and asks before lowering your own', async ()
     can_change_power_levels: true,
   });
   const roleOf = (name: string) =>
-    within(screen.getByText(name).closest('li') ?? document.body).getByRole('button', {
+    within(screen.getByText(name).closest('li') ?? document.body).getByRole('combobox', {
       name: 'Change role',
     });
 

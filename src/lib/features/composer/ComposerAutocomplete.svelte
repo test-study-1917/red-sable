@@ -1,6 +1,10 @@
 <script lang="ts">
+  import { cubicOut } from 'svelte/easing';
+  import { fly } from 'svelte/transition';
+
   import '#lib/ui/primitives/menu.css';
   import { i18n } from '#lib/i18n.js';
+  import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
   import { suppressBanners } from '#lib/ui/banner-suppression.svelte.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
@@ -25,7 +29,10 @@
   }
 </script>
 
-<div class="autocomplete composer-autocomplete">
+<div
+  class="autocomplete composer-autocomplete"
+  in:fly={{ y: 4, duration: motionMs(MOTION_MS.quick), easing: cubicOut }}
+>
   <p class="heading" id="{id}-heading">{heading}</p>
   {#if suggestions.length === 0}
     <p class="empty">{i18n.t('composer.noSuggestions')}</p>
@@ -85,11 +92,10 @@
     color: var(--surface-on-container);
     display: flex;
     flex-direction: column;
-    left: 0;
+    inset-inline: 0;
     max-height: min(30dvh, calc((100dvh - var(--keyboard-overlap)) / 3));
     overflow: hidden;
     position: absolute;
-    right: 0;
     z-index: var(--layer-overlay);
   }
 

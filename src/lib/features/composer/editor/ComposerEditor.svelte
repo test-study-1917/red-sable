@@ -28,6 +28,7 @@
 <div
   class={['editor', { empty: showPlaceholder, expanded }]}
   data-placeholder={placeholder}
+  data-focus-region="composer"
   {@attach mount}
 ></div>
 
@@ -64,7 +65,17 @@
     margin: 0;
   }
 
-  @media (width >= 48rem) and (any-pointer: fine) {
+  .editor :global([contenteditable='true']),
+  .editor :global([contenteditable='true'] :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, td, th)) {
+    unicode-bidi: plaintext;
+  }
+
+  /* WebKit aligns a plaintext li to the list's direction without this. */
+  .editor :global(li) {
+    text-align: start;
+  }
+
+  @media (--app-layout) and (any-pointer: fine) {
     .editor {
       max-height: clamp(10rem, 30dvh, 20rem);
     }
@@ -73,6 +84,17 @@
   .editor.expanded {
     height: clamp(10rem, calc((100dvh - var(--keyboard-overlap)) / 2), 40rem);
     max-height: none;
+  }
+
+  @media (--compact-height) {
+    .editor,
+    .editor.expanded {
+      max-height: max(var(--target), calc((100dvh - var(--keyboard-overlap)) / 3));
+    }
+
+    .editor.expanded {
+      height: max(var(--target), calc((100dvh - var(--keyboard-overlap)) / 3));
+    }
   }
 
   .editor :global([contenteditable='true'] p + p) {
@@ -132,6 +154,7 @@
     border: var(--border-width) solid var(--bg-container-line);
     border-radius: var(--radius);
     color: var(--bg-on-container);
+    direction: ltr;
     font-family: var(--font-family-mono);
     font-variant-ligatures: none;
     margin: 0;
@@ -258,6 +281,7 @@
     position: absolute;
     text-overflow: ellipsis;
     top: var(--space-200);
+    unicode-bidi: plaintext;
     white-space: nowrap;
   }
 
@@ -273,6 +297,7 @@
     align-items: center;
     display: inline-flex;
     gap: var(--space-050);
+    user-select: none;
   }
 
   .editor :global(.composer-mention-remove) {
