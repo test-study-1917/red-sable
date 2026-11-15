@@ -49,7 +49,7 @@ const widgets: RoomWidget[] = [
     id: 'widget-1',
     type: 'm.custom',
     url: 'https://widget.example/app?user=$matrix_user_id&wid=$matrix_widget_id',
-    name: 'Jitsi',
+    name: 'Example widget',
     data: {},
   },
   {
@@ -88,7 +88,7 @@ test('lists the widgets without starting any', () => {
     onClose: vi.fn(),
   });
 
-  expect(screen.getByRole('button', { name: 'Jitsi' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Example widget' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Other' })).toBeInTheDocument();
   expect(container.querySelector('iframe')).not.toBeInTheDocument();
 });
@@ -96,9 +96,9 @@ test('lists the widgets without starting any', () => {
 test('renders a sandboxed iframe for the chosen widget, templated', async () => {
   const user = userEvent.setup();
   renderWithTooltips(WidgetsPanel, { ...commonProps, widgets, onClose: vi.fn() });
-  await user.click(screen.getByRole('button', { name: 'Jitsi' }));
+  await user.click(screen.getByRole('button', { name: 'Example widget' }));
 
-  const iframe = screen.getByTitle<HTMLIFrameElement>('Jitsi');
+  const iframe = screen.getByTitle<HTMLIFrameElement>('Example widget');
   expect(iframe.tagName).toBe('IFRAME');
   expect(iframe).toHaveAttribute('sandbox', expect.stringContaining('allow-scripts'));
   expect(iframe.getAttribute('sandbox')?.split(' ')).toContain('allow-modals');
@@ -122,13 +122,13 @@ test('the back button stops the widget and returns to the list', async () => {
   await user.click(screen.getByRole('button', { name: 'Back to widgets' }));
 
   expect(container.querySelector('iframe')).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Jitsi' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Example widget' })).toBeInTheDocument();
 });
 
 test('remembers selected permissions and asks for additional ones', async () => {
   const user = userEvent.setup();
   renderWithTooltips(WidgetsPanel, { ...commonProps, widgets, onClose: vi.fn() });
-  await user.click(screen.getByRole('button', { name: 'Jitsi' }));
+  await user.click(screen.getByRole('button', { name: 'Example widget' }));
 
   const send = 'org.matrix.msc2762.send.event:m.room.message#m.image';
   const openid = 'm.allow_openid';
@@ -147,7 +147,7 @@ test('remembers selected permissions and asks for additional ones', async () => 
   });
 
   await user.click(screen.getByRole('button', { name: 'Back to widgets' }));
-  await user.click(screen.getByRole('button', { name: 'Jitsi' }));
+  await user.click(screen.getByRole('button', { name: 'Example widget' }));
   const driver = latestDriver();
   await expect(driver.validateCapabilities(new Set([send]))).resolves.toEqual(new Set([send]));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -163,7 +163,7 @@ test('remembers selected permissions and asks for additional ones', async () => 
 test('forgetting permissions stops the widget and asks again on its next load', async () => {
   const user = userEvent.setup();
   renderWithTooltips(WidgetsPanel, { ...commonProps, widgets, onClose: vi.fn() });
-  await user.click(screen.getByRole('button', { name: 'Jitsi' }));
+  await user.click(screen.getByRole('button', { name: 'Example widget' }));
 
   const requested = new Set(['m.sticker']);
   const first = latestDriver().validateCapabilities(requested);
@@ -176,8 +176,8 @@ test('forgetting permissions stops the widget and asks again on its next load', 
   });
 
   await user.click(screen.getByRole('button', { name: 'Forget widget permissions' }));
-  expect(screen.queryByTitle('Jitsi')).not.toBeInTheDocument();
-  await user.click(screen.getByRole('button', { name: 'Jitsi' }));
+  expect(screen.queryByTitle('Example widget')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Example widget' }));
   const reloaded = latestDriver().validateCapabilities(requested);
   const next = await screen.findByRole('dialog');
   await user.click(within(next).getByRole('button', { name: 'Refuse all' }));
@@ -188,8 +188,8 @@ test('a changed widget cancels pending approval and starts a new frame', async (
   const user = userEvent.setup();
   const props = { ...commonProps, widgets, onClose: vi.fn() };
   const { rerender } = render(WidgetsPanel, props, { wrapper: TooltipProvider });
-  await user.click(screen.getByRole('button', { name: 'Jitsi' }));
-  const iframe = screen.getByTitle('Jitsi');
+  await user.click(screen.getByRole('button', { name: 'Example widget' }));
+  const iframe = screen.getByTitle('Example widget');
   const requested = new Set(['m.sticker']);
   const pending = latestDriver().validateCapabilities(requested);
   const dialog = await screen.findByRole('dialog');
@@ -198,11 +198,11 @@ test('a changed widget cancels pending approval and starts a new frame', async (
   await rerender({ widgets: [{ ...widgets[0], type: 'other' }] });
 
   await vi.waitFor(() => {
-    expect(screen.getByTitle('Jitsi')).not.toBe(iframe);
+    expect(screen.getByTitle('Example widget')).not.toBe(iframe);
   });
   await expect(pending).resolves.toEqual(new Set());
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByTitle('Jitsi')).not.toBe(iframe);
+  expect(screen.getByTitle('Example widget')).not.toBe(iframe);
   const changed = latestDriver().validateCapabilities(requested);
   const next = await screen.findByRole('dialog');
   await user.click(within(next).getByRole('button', { name: 'Refuse all' }));
@@ -220,11 +220,11 @@ test('shows a remove action only when the caller can manage widgets', async () =
     onRemove,
   });
 
-  await user.click(within(panel()).getByRole('button', { name: 'Remove Jitsi' }));
+  await user.click(within(panel()).getByRole('button', { name: 'Remove Example widget' }));
   expect(onRemove).not.toHaveBeenCalled();
 
   const dialog = await screen.findByRole('dialog');
-  await user.click(within(dialog).getByRole('button', { name: 'Remove Jitsi' }));
+  await user.click(within(dialog).getByRole('button', { name: 'Remove Example widget' }));
 
   expect(onRemove).toHaveBeenCalledWith('widget-1');
 });

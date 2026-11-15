@@ -596,9 +596,9 @@ test('media is held behind a prompt where the media preview setting says so (MSC
     props: { item: item(attachment('image')), joinRule: 'public' },
   });
 
-  await user.click(screen.getByRole('button', { name: 'Show media' }));
+  await user.click(screen.getByRole('button', { name: /Show media/ }));
 
-  expect(screen.queryByRole('button', { name: 'Show media' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Show media/ })).not.toBeInTheDocument();
   mediaPreviewSettings.global = {};
 });
 
@@ -608,6 +608,6 @@ test('media shows at once in a private room under the private setting', () => {
     props: { item: item(attachment('image')), joinRule: 'invite' },
   });
 
-  expect(screen.queryByRole('button', { name: 'Show media' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Show media/ })).not.toBeInTheDocument();
   mediaPreviewSettings.global = {};
 });

@@ -20,7 +20,9 @@ export function withSelectedText(base: MessageActions, text: string): MessageAct
     return {
       ...base,
       onCopyText: undefined,
-      onQuoteSelection: () => quote(text),
+      onQuoteSelection: () => {
+        quote(text);
+      },
     };
   }
   // Read-only rooms retain the existing copy-selection option.

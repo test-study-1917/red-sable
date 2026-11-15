@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { on } from 'svelte/events';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
   import { useCoreClient } from '#lib/core/context.js';
@@ -31,32 +32,46 @@
   let focusedInboxCount = $state(0);
   $effect(() => {
     const account = focusedCore.session?.account_id;
-    if (!account) { focusedInboxCount = 0; return; }
+    if (!account) {
+      focusedInboxCount = 0;
+      return;
+    }
     let active = true;
     let serial = 0;
     async function refresh(): Promise<void> {
       const current = ++serial;
       try {
         const response = await focusedCore.rpc.notifications.inbox({
-          filter: 'all', include_read: false, limit: 20000, before_ts: null,
+          filter: 'all',
+          include_read: false,
+          limit: 20000,
+          before_ts: null,
         });
         if (active && current === serial) {
-          focusedInboxCount = response.items.filter((item) =>
-            item.kind === 'reaction' || item.kind === 'mention' ||
-            item.kind === 'keyword' || (!item.kind && item.highlight)).length;
+          focusedInboxCount = response.items.filter(
+            (item) =>
+              item.kind === 'reaction' ||
+              item.kind === 'mention' ||
+              item.kind === 'keyword' ||
+              (!item.kind && item.highlight)
+          ).length;
         }
-      } catch (cause) { console.warn('[sable inbox bell] unread check failed', cause); }
+      } catch (cause) {
+        console.warn('[sable inbox bell] unread check failed', cause);
+      }
     }
     const stop = focusedCore.subscribeEvents((event) => {
       if (event.type === 'inbox_changed' || event.type === 'room_list_diff') void refresh();
     });
-    const localChange = () => { void refresh(); };
-    window.addEventListener('sable-focused-inbox-changed', localChange);
+    const localChange = () => {
+      void refresh();
+    };
+    const stopLocal = on(window, 'sable-focused-inbox-changed', localChange);
     void refresh();
     return () => {
       active = false;
       stop();
-      window.removeEventListener('sable-focused-inbox-changed', localChange);
+      stopLocal();
     };
   });
 
@@ -156,7 +171,8 @@
               ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
             >
             {#if item.href === '/inbox'}
-              {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"></span>{/if}
+              {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"
+                ></span>{/if}
             {/if}
           </a>
           <!-- eslint-enable svelte/no-navigation-without-resolve -->
@@ -195,7 +211,8 @@
             ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
           >
           {#if item.href === '/inbox'}
-            {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"></span>{/if}
+            {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"
+              ></span>{/if}
           {/if}
         </a>
         <!-- eslint-enable svelte/no-navigation-without-resolve -->
@@ -231,7 +248,8 @@
               ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
             >
             {#if item.href === '/inbox'}
-              {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"></span>{/if}
+              {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"
+                ></span>{/if}
             {/if}
           </a>
           <!-- eslint-enable svelte/no-navigation-without-resolve -->
@@ -244,17 +262,18 @@
 
 <style>
   .sable-inbox-red-dot {
-    position: absolute;
-    top: .36rem;
-    right: .36rem;
-    width: .55rem;
-    height: .55rem;
-    border-radius: 50%;
     background: var(--supporter-red);
+    border-radius: 50%;
     box-shadow: 0 0 0 2px var(--surface-container);
+    height: 0.55rem;
+    inset-inline-end: 0.36rem;
     pointer-events: none;
+    position: absolute;
+    top: 0.36rem;
+    width: 0.55rem;
     z-index: 2;
   }
+
   .quick-tool {
     position: relative;
   }

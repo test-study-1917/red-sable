@@ -7,4 +7,6 @@ export interface RoomHistoryExportContext {
   timelineItems: () => readonly unknown[];
   members: () => readonly unknown[];
   loadOlder: (count: number) => Promise<boolean>;
+  openMedia: (eventId: string) => void;
+  jumpToMessage: (eventId: string) => void;
 }

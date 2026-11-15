@@ -259,11 +259,7 @@ impl Core {
             move |raw: Raw<AnySyncTimelineEvent>, room: matrix_sdk::Room| {
                 let core = core.clone();
                 async move {
-                    if core
-                        .session_generation
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        != generation
-                    {
+                    if !core.is_current(generation) {
                         return;
                     }
                     if matches!(

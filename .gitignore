@@ -78,3 +78,6 @@ packaging/flatpak/moe.sable.client.yml
 # cargo-mutants output
 mutants.out/
 mutants.out.old/
+
+# Local snapshots of custom UI files
+/.sable-ui-fix-backups/

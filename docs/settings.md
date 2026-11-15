@@ -24,6 +24,7 @@ except those marked deployment only.
 - `alwaysShowAltText` (Always show image descriptions): `true` or `false`. Default `false`.
 - `nameColorCorrection` (Improve name colour readability): One of `strong`, `weak`, `off`. Default `strong`.
 - `showRoomIcon` (Room icons): One of `always`, `sometimes`, `collapsed`, `never`. Default `always`.
+- `voiceParticipantPlacement` (Voice room participants): One of `both`, `below`, `inline`. Default `both`.
 - `showRoomBanners` (Room banners above the list): `true` or `false`. Default `true`.
 - `showDmTopics` (Show topics in direct messages): `true` or `false`. Default `true`.
 - `messagePreviews` (Message previews): One of `off`, `direct`, `rooms`, `all`. Default `off`.

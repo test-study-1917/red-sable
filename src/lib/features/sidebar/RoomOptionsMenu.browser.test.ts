@@ -38,7 +38,6 @@ const currentRoom = withCounts({
   highlight: 0,
   marked_unread: false,
   notification: { room: null, default: 'mentions' },
-  counts: { unread: 0, notifying: 0, highlight: 0, marked: false },
   latest_event: null,
 });
 

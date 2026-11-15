@@ -22,7 +22,7 @@ import { core } from '#lib/core/__mocks__/context.js';
 import { item } from '../room/timeline/timeline-item-fixtures';
 import BookmarkListHarness from './BookmarkListHarness.test.svelte';
 
-test('a cold bookmark preview keeps its room sender and loads global colors without revisiting', async () => {
+test('a cold compact bookmark keeps its room sender and loads global colors without revisiting', async () => {
   const event = Promise.withResolvers<TimelineItemView[]>();
   const profile = Promise.withResolvers<unknown>();
   core.rpc.account.bookmarks.mockResolvedValue([
@@ -43,16 +43,20 @@ test('a cold bookmark preview keeps its room sender and loads global colors with
   render(BookmarkListHarness);
 
   await screen.findByText('Former room');
+  expect(document.querySelector('.feed li.compact')).toBeInTheDocument();
+  expect(document.querySelector('.feed .preview')?.textContent).toContain('Fallback body');
   await vi.waitFor(() => {
     expect(core.rpc.timeline.eventItems).toHaveBeenCalled();
   });
   event.resolve([{ ...item(false), sender_name: 'Room Alice' }]);
-  await screen.findByText('waves');
-  await screen.findByText('Room Alice');
+  await vi.waitFor(() => {
+    expect(document.querySelector('.feed .preview')?.textContent).toContain('waves');
+    expect(document.querySelector('.feed .sender-identity-name')?.textContent).toBe('Room Alice');
+  });
   profile.resolve({ display_name: 'Alice on the bridge', name_color_light: '#2244aa' });
 
   await vi.waitFor(() => {
-    const name = document.querySelector<HTMLElement>('.message .sender-identity-name');
+    const name = document.querySelector<HTMLElement>('.feed .sender-identity-name');
     expect(name?.style.getPropertyValue('--name-color-on-light')).toBe('#2244aa');
     expect(name?.textContent).toBe('Room Alice');
   });

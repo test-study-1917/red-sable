@@ -28,49 +28,13 @@ afterEach(() => {
   localStorage.clear();
 });
 
-test.each(['web', 'ios'])('donation links on %s', (platform) => {
-  const native = platform === 'ios';
-  vi.mocked(isTauri).mockReturnValue(native);
-  render(HomeLanding, { titleKey: 'nav.unspaced' });
-
-  expect(screen.getByRole('link', { name: 'Get support' })).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'View source' })).toBeInTheDocument();
-  if (native) {
-    expect(screen.queryByRole('link', { name: 'Donate' })).not.toBeInTheDocument();
-  } else {
-    expect(screen.getByRole('link', { name: 'Donate' })).toBeInTheDocument();
-  }
-});
-
-test('opens Get support in the Sable general room', () => {
-  render(HomeLanding, { titleKey: 'nav.unspaced' });
-
-  expect(screen.getByRole('link', { name: 'Get support' })).toHaveAttribute(
-    'href',
-    '/to/%23general%3Asable.moe'
-  );
-  expect(screen.getByRole('link', { name: 'Get support' })).not.toHaveAttribute('target');
-});
-
-test('drops the resources section when the deployment hides community links', () => {
-  vi.mocked(deployment).mockReturnValue(parseRuntimeConfig({ hideCommunityLinks: true }));
+test('omits all three landing resource buttons', () => {
   render(HomeLanding, { titleKey: 'nav.unspaced' });
 
   expect(screen.queryByRole('link', { name: 'Get support' })).not.toBeInTheDocument();
   expect(screen.queryByRole('link', { name: 'View source' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Donate' })).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Sable resources')).not.toBeInTheDocument();
-});
-
-test('keeps the deployment support room when community links are hidden', () => {
-  vi.mocked(deployment).mockReturnValue(
-    parseRuntimeConfig({ hideCommunityLinks: true, links: { supportRoom: '#help:acme.example' } })
-  );
-  render(HomeLanding, { titleKey: 'nav.unspaced' });
-
-  expect(screen.getByRole('link', { name: 'Get support' })).toHaveAttribute(
-    'href',
-    '/to/%23help%3Aacme.example'
-  );
 });
 
 test('welcomes a returning user back', () => {

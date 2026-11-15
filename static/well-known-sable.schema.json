@@ -281,6 +281,15 @@
           ],
           "default": "always"
         },
+        "voiceParticipantPlacement": {
+          "title": "Voice room participants",
+          "enum": [
+            "both",
+            "below",
+            "inline"
+          ],
+          "default": "both"
+        },
         "showRoomBanners": {
           "title": "Room banners above the list",
           "type": "boolean",
@@ -1098,6 +1107,15 @@
             "never"
           ],
           "default": "always"
+        },
+        "voiceParticipantPlacement": {
+          "title": "Voice room participants",
+          "enum": [
+            "both",
+            "below",
+            "inline"
+          ],
+          "default": "both"
         },
         "showRoomBanners": {
           "title": "Room banners above the list",

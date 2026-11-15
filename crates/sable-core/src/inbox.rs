@@ -878,7 +878,10 @@ impl Core {
                 } else {
                     entry.kind
                 },
-                jump_event_id: entry.target_event_id.unwrap_or_else(|| entry.event_id.clone()).to_string(),
+                jump_event_id: entry
+                    .target_event_id
+                    .unwrap_or_else(|| entry.event_id.clone())
+                    .to_string(),
                 reaction_key: entry.reaction_key,
                 keyword: entry.keyword,
             });
@@ -894,7 +897,10 @@ impl Core {
         let client = self.client().await?;
         let mut inbox = self.loaded_inbox(&client).await?;
         let stored = inbox.stored();
-        let changed = stored.entries.iter().any(|entry| entry.event_id == event_id)
+        let changed = stored
+            .entries
+            .iter()
+            .any(|entry| entry.event_id == event_id)
             && stored.seen_notifications.insert(event_id);
         if changed {
             inbox.revision += 1;

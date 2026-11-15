@@ -9,6 +9,10 @@ import type { CoreClient } from '#lib/core/client.svelte.js';
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
 vi.mock('#lib/core/context.js');
+vi.mock('#lib/rooms/bookmarks.svelte.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useBookmarks: () => ({ entries: [], load: () => Promise.resolve() }),
+}));
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useRoomList: () => roomList,
@@ -19,7 +23,7 @@ import { RoomList } from '#lib/rooms/room-list.svelte.js';
 import { goto } from '#lib/test-support/app-navigation.js';
 import { visit } from '#lib/test-support/app-state.js';
 import { withCounts } from '#lib/rooms/summary-fixtures.js';
-import InboxView from './InboxView.svelte';
+import InboxViewHarness from './InboxViewHarness.test.svelte';
 
 const roomList = new RoomList(core as unknown as CoreClient);
 const room = withCounts({
@@ -71,7 +75,7 @@ beforeEach(() => {
 });
 
 test('switches between notifications, invites and actionable join requests', async () => {
-  render(InboxView);
+  render(InboxViewHarness);
   const user = userEvent.setup();
   expect(screen.getByRole('main')).toBeInTheDocument();
   expect(screen.getByRole('tab', { name: 'Notifications' })).toHaveAttribute(
@@ -90,16 +94,22 @@ test('switches between notifications, invites and actionable join requests', asy
 
 test('opens the requests tab directly from its URL', async () => {
   visit('/inbox?tab=requests');
-  render(InboxView);
+  render(InboxViewHarness);
   expect(screen.getByRole('tab', { name: 'Requests' })).toHaveAttribute('aria-selected', 'true');
   expect(await screen.findByText('Alice')).toBeInTheDocument();
 });
 
 test('keeps the notification filter while navigating tabs with the keyboard', async () => {
   visit('/inbox?filter=mentions');
-  render(InboxView);
+  render(InboxViewHarness);
   const user = userEvent.setup();
   screen.getByRole('tab', { name: 'Notifications' }).focus();
+  await user.keyboard('{ArrowRight}');
+  expect(screen.getByRole('tab', { name: 'Bookmarks' })).toHaveFocus();
+  expect(goto).toHaveBeenLastCalledWith('/inbox?filter=mentions&tab=bookmarks', {
+    replace: true,
+    reset: false,
+  });
   await user.keyboard('{ArrowRight}');
   expect(screen.getByRole('tab', { name: 'Invites' })).toHaveFocus();
   expect(goto).toHaveBeenLastCalledWith('/inbox?filter=mentions&tab=invites', {
@@ -114,13 +124,13 @@ test('shows the pending invite count on the invites tab', () => {
     { ...room, room_id: '!a:example.org', state: 'invited' },
     { ...room, room_id: '!b:example.org', state: 'invited' },
   ];
-  render(InboxView);
+  render(InboxViewHarness);
   expect(screen.getByRole('tab', { name: /Invites/ })).toHaveTextContent('2');
 });
 
 test('lands on the invites tab when only invites are waiting', () => {
   roomList.rooms = [room, { ...room, room_id: '!a:example.org', state: 'invited' }];
-  render(InboxView);
+  render(InboxViewHarness);
   expect(screen.getByRole('tab', { name: /Invites/ })).toHaveAttribute('aria-selected', 'true');
 });
 
@@ -129,14 +139,14 @@ test('lands on the invites tab ahead of notifications', () => {
     withCounts({ ...room, unread: 1, notifying: 1, highlight: 1 }),
     { ...room, room_id: '!a:example.org', state: 'invited' },
   ];
-  render(InboxView);
+  render(InboxViewHarness);
   expect(screen.getByRole('tab', { name: /Invites/ })).toHaveAttribute('aria-selected', 'true');
 });
 
 test('keeps an explicit tab over pending invites', () => {
   visit('/inbox?tab=notifications');
   roomList.rooms = [room, { ...room, room_id: '!a:example.org', state: 'invited' }];
-  render(InboxView);
+  render(InboxViewHarness);
   expect(screen.getByRole('tab', { name: /Notifications/ })).toHaveAttribute(
     'aria-selected',
     'true'
@@ -157,7 +167,7 @@ test('a room behind the badge with nothing in the feed still gets a row', async 
   Object.assign(roomList, {
     badgeUnreadFor: () => ({ unread: 2, notifying: 2, highlight: 0, marked: false }),
   });
-  render(InboxView);
+  render(InboxViewHarness);
   const user = userEvent.setup();
 
   expect(await screen.findByText('2 unread notifications')).toBeInTheDocument();

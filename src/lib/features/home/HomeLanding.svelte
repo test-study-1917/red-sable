@@ -3,17 +3,12 @@
   import { resolve } from '$app/paths';
   import ChatCircleDotsIcon from 'phosphor-svelte/lib/ChatCircleDotsIcon';
   import CompassIcon from 'phosphor-svelte/lib/CompassIcon';
-  import GithubLogoIcon from 'phosphor-svelte/lib/GithubLogoIcon';
-  import HeartIcon from 'phosphor-svelte/lib/HeartIcon';
   import PlusCircleIcon from 'phosphor-svelte/lib/PlusCircleIcon';
 
-  import { donateUrl, sourceUrl, supportRoom } from '#lib/deployment/links.js';
   import { readReturningUser } from '#lib/features/auth/flow/auth-flow.svelte.js';
   import { i18n } from '#lib/i18n.js';
-  import { roomPathParamFromId } from '#lib/rooms/room-list.svelte.js';
   import ActionCard from '#lib/ui/ActionCard.svelte';
   import SableBrandMark from '#lib/ui/SableBrandMark.svelte';
-  import LinkButton from '#lib/ui/primitives/LinkButton.svelte';
   import SettingsChangesCard from './SettingsChangesCard.svelte';
 
   interface Props {
@@ -22,12 +17,6 @@
 
   let { titleKey = 'nav.home' }: Props = $props();
   const hasLoggedInBefore = readReturningUser();
-  let room = $derived(supportRoom());
-  let supportHref = $derived(
-    room ? resolve('/(app)/to/[...permalink]', { permalink: roomPathParamFromId(room) }) : null
-  );
-  let source = $derived(sourceUrl());
-  let donate = $derived(donateUrl());
 
   const startCards = [
     {
@@ -59,29 +48,6 @@
     <h1 id="home-title">
       {i18n.t(hasLoggedInBefore ? 'auth.welcomeBack' : 'auth.welcome')}
     </h1>
-
-    {#if supportHref || source || donate}
-      <div class="hero-actions" aria-label={i18n.t('home.resourcesLabel')}>
-        {#if supportHref}
-          <LinkButton href={supportHref} variant="primary">
-            <ChatCircleDotsIcon aria-hidden="true" />
-            {i18n.t('home.getSupport')}
-          </LinkButton>
-        {/if}
-        {#if source}
-          <LinkButton href={source} target="_blank" rel="noreferrer noopener" variant="ghost">
-            <GithubLogoIcon aria-hidden="true" />
-            {i18n.t('common.viewSource')}
-          </LinkButton>
-        {/if}
-        {#if donate}
-          <LinkButton href={donate} target="_blank" rel="noreferrer noopener" variant="secondary">
-            <HeartIcon aria-hidden="true" />
-            {i18n.t('home.supportDevelopment')}
-          </LinkButton>
-        {/if}
-      </div>
-    {/if}
   </section>
 
   <SettingsChangesCard />
@@ -140,29 +106,6 @@
     font-size: var(--font-size-heading);
     line-height: var(--line-height-heading);
     margin: var(--space-400) 0 0;
-  }
-
-  .hero-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-300);
-    justify-content: center;
-    margin-top: var(--space-500);
-  }
-
-  .hero-actions :global(.btn) {
-    flex: 0 0 11rem;
-    width: 11rem;
-  }
-
-  .hero-actions :global(.btn:not(:disabled)) {
-    cursor: pointer;
-    pointer-events: auto;
-  }
-
-  .hero-actions :global(.btn:disabled) {
-    cursor: default;
-    pointer-events: none;
   }
 
   .start-section {

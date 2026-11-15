@@ -2,6 +2,7 @@
 
 import { screen, within } from '@testing-library/svelte';
 import { renderWithTooltips } from '#lib/test-support/render-with-tooltips.js';
+import { currentLocale } from '#lib/i18n.js';
 import { userEvent } from '@testing-library/user-event';
 import { expect, test, vi } from 'vitest';
 
@@ -199,7 +200,7 @@ test("the month view lists the selected day's events", async () => {
   const user = userEvent.setup();
   renderWithTooltips(CalendarPage, { roomId: '!cal:x' });
   await user.click(await screen.findByRole('button', { name: 'Month' }));
-  const date = soon.toLocaleDateString(undefined, { dateStyle: 'full' });
+  const date = soon.toLocaleDateString(currentLocale(), { dateStyle: 'full' });
   const cell = await screen.findByRole('gridcell', { name: `${date}, 1 event` });
   expect(cell).toHaveAttribute('aria-selected', 'false');
   expect(within(cell).getByText('Raid')).toBeTruthy();
@@ -211,14 +212,14 @@ test('arrow keys move the selected day and Enter opens a new event on it', async
   const user = userEvent.setup();
   renderWithTooltips(CalendarPage, { roomId: '!cal:x' });
   await user.click(await screen.findByRole('button', { name: 'Month' }));
-  const date = soon.toLocaleDateString(undefined, { dateStyle: 'full' });
+  const date = soon.toLocaleDateString(currentLocale(), { dateStyle: 'full' });
   const cell = await screen.findByRole('gridcell', { name: `${date}, 1 event` });
   await user.click(cell);
   cell.focus();
   await user.keyboard('{ArrowRight}');
   const next = new Date(soon.getFullYear(), soon.getMonth(), soon.getDate() + 1);
   const moved = await screen.findByRole('gridcell', {
-    name: next.toLocaleDateString(undefined, { dateStyle: 'full' }),
+    name: next.toLocaleDateString(currentLocale(), { dateStyle: 'full' }),
   });
   expect(moved).toHaveAttribute('aria-selected', 'true');
   await user.keyboard('{Enter}');

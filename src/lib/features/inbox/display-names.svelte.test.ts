@@ -15,6 +15,7 @@ test('shows the localpart until the profile resolves, then the display name', as
     expect(names.name('@ada:example.org')).toBe('Ada Lovelace');
   });
   expect(userProfile).toHaveBeenCalledOnce();
+  expect(names.profile('@ada:example.org')?.display_name).toBe('Ada Lovelace');
 });
 
 test('keeps the localpart when the profile has no name or fails', async () => {

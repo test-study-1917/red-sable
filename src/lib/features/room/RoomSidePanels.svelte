@@ -1,6 +1,9 @@
 <script lang="ts">
   import { setContext } from 'svelte';
-  import { HISTORY_EXPORT_CONTEXT, type RoomHistoryExportContext } from './room-history-export-context.js';
+  import {
+    HISTORY_EXPORT_CONTEXT,
+    type RoomHistoryExportContext,
+  } from './room-history-export-context.js';
   import type { MemberView, MembershipView, RoomListItemView } from '#src/generated/protocol';
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
@@ -25,6 +28,8 @@
     roomName: string;
     historyItems: readonly unknown[];
     onLoadHistory: (count: number) => Promise<boolean>;
+    onOpenHistoryMedia: (eventId: string) => void;
+    onJumpToHistoryMessage: (eventId: string) => void;
     desktop: boolean;
     memberLoader: RoomMemberLoader;
     roomSession: RoomSession;
@@ -44,6 +49,8 @@
     roomName,
     historyItems,
     onLoadHistory,
+    onOpenHistoryMedia,
+    onJumpToHistoryMessage,
     desktop,
     memberLoader,
     roomSession,
@@ -63,6 +70,8 @@
     timelineItems: () => historyItems,
     members: () => memberLoader.members,
     loadOlder: (count: number) => onLoadHistory(count),
+    openMedia: (eventId: string) => onOpenHistoryMedia(eventId),
+    jumpToMessage: (eventId: string) => onJumpToHistoryMessage(eventId),
   } satisfies RoomHistoryExportContext);
 
   let ownMember = $derived(
