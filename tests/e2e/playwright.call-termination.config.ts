@@ -17,7 +17,7 @@ export default defineConfig({
   use: {
     ...devices['Desktop Chrome'],
     baseURL: origin,
-    contextOptions: { reducedMotion: 'reduce' },
+    contextOptions: { locale: 'en-US', reducedMotion: 'reduce' },
   },
   webServer: {
     command: `pnpm exec vite --config tests/e2e/fixtures/call-termination.vite.config.ts --host 127.0.0.1 --port ${port} --strictPort`,

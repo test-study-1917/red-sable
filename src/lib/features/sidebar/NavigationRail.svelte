@@ -4,12 +4,15 @@
 
   import RoomOptionsMenu from './RoomOptionsMenu.svelte';
   import type { Component } from 'svelte';
-  import type { RoomListItemView } from '#src/generated/protocol';
+  import type { BridgeView, RoomListItemView } from '#src/generated/protocol';
   import { resolve } from '$app/paths';
   import { afterNavigate, goto } from '$app/navigation';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
+  import { isPlainClick } from '#lib/ui/plain-click.js';
   import { isRoomSwitch } from '#lib/features/room/room-navigation.js';
+  import { openFindOrJoin } from '#lib/ui/find-or-join-state.svelte.js';
+  import { isBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
   import { findRoomByPathId, roomPathParam, useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { addUnread } from '#lib/rooms/spaces.js';
   import type { UnreadCount } from '#lib/rooms/unread.js';
@@ -59,7 +62,10 @@
   import PencilSimpleIcon from 'phosphor-svelte/lib/PencilSimpleIcon';
   import PlusIcon from 'phosphor-svelte/lib/PlusIcon';
   import UsersIcon from 'phosphor-svelte/lib/UsersIcon';
+  import BridgeBadge from './BridgeBadge.svelte';
   import UserQuickTools from './UserQuickTools.svelte';
+  import ResponsivePopover from '#lib/ui/primitives/ResponsivePopover.svelte';
+  import AlertList, { alertListState } from './AlertList.svelte';
 
   type RailSection = 'home' | 'unspaced' | 'direct';
 
@@ -88,6 +94,7 @@
     spaces: readonly RoomListItemView[];
     spaceUnread?: ReadonlyMap<string, UnreadCount>;
     callSpaces?: ReadonlySet<string>;
+    voiceSpaces?: ReadonlySet<string>;
     homeUnread?: UnreadCount;
     unspacedUnread?: UnreadCount;
     directRooms?: readonly RoomListItemView[];
@@ -117,6 +124,7 @@
     spaces,
     spaceUnread = new Map(),
     callSpaces = new Set(),
+    voiceSpaces = new Set(),
     homeUnread = NO_UNREAD,
     unspacedUnread = NO_UNREAD,
     directRooms = [],
@@ -146,6 +154,10 @@
 
   function unreadId(key: string): string {
     return `${uid}-unread-${key}`;
+  }
+
+  function voiceId(key: string): string {
+    return `${uid}-voice-${key}`;
   }
 
   function unreadLabel(count: UnreadCount | undefined): string | undefined {
@@ -247,11 +259,7 @@
   const createEntries = [
     { href: resolve('create-room'), label: 'common.createRoom', icon: PlusIcon },
     { href: resolve('create-space'), label: 'common.createSpace', icon: HouseIcon },
-    {
-      href: `${resolve('explore')}#explore-join-by-address`,
-      label: 'nav.joinWithAddress',
-      icon: LinkIcon,
-    },
+    { href: null, label: 'nav.findOrJoin', icon: LinkIcon },
     { href: resolve('explore'), label: 'nav.explore', icon: CompassIcon },
   ] as const;
   let createOpen = $state(false);
@@ -306,6 +314,8 @@
   function outlined(item: RailItem): boolean {
     return item.icon !== undefined || item.dm === true;
   }
+
+  let alertListPopoverAnchor = $state.raw<HTMLElement | null>(null);
 
   let displayAnchor = $state.raw<CursorAnchor | null>(null);
   let displayOpen = $state(false);
@@ -410,6 +420,18 @@
     contextOpen = true;
   }
 
+  function spaceBridge(roomId: string): BridgeView | null {
+    if (!preferences.showBridgeBadges || !isBridgedSpace(roomId)) return null;
+    const space = spacesById.get(roomId);
+    if (space === undefined) return null;
+    if (space.bridge) return space.bridge;
+    for (const child of space.space_children) {
+      const bridge = roomList.byId(child.room_id)?.bridge;
+      if (bridge) return bridge;
+    }
+    return null;
+  }
+
   function spaceItem(roomId: string): SpaceRailItem | null {
     const space = spacesById.get(roomId);
     if (space === undefined) return null;
@@ -474,15 +496,19 @@
     return pathname.startsWith(item.activePrefix);
   }
 
+  function itemHref(item: RailItem, active: boolean): string {
+    const inside = active && (item.section === 'home' || item.section === 'unspaced');
+    const landing = !mobile && inside && pathname !== item.href;
+    return landing ? item.href : (item.navigateHref ?? item.href);
+  }
+
   function navigate(item: RailItem, event: MouseEvent): void {
     const href = item.navigateHref ?? item.href;
     if (onNavigate) {
       onNavigate(href);
       return;
     }
-    const plain =
-      event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-    if (href === item.href || !plain) return;
+    if (href === item.href || !isPlainClick(event)) return;
     event.preventDefault();
     if (new URL(href, page.url.href).pathname === page.url.pathname) return;
     // eslint-disable-next-line svelte/no-navigation-without-resolve -- every rail href is built with resolve()
@@ -600,8 +626,18 @@
       unreadId(item.roomId ?? item.href)
     )}
   {/if}
+  {#if item.space && item.roomId}
+    {@const bridge = spaceBridge(item.roomId)}
+    {#if bridge}<BridgeBadge {bridge} />{/if}
+  {/if}
   {#if item.space && item.roomId ? callSpaces.has(item.roomId) : item.inCall}
     <span class="call-mark" aria-hidden="true"><SpeakerHighIcon weight="fill" /></span>
+  {:else if item.space && item.roomId && voiceSpaces.has(item.roomId)}
+    <span class="call-mark others" id={voiceId(item.roomId)}
+      ><SpeakerHighIcon aria-hidden="true" /><span class="screen-reader-only"
+        >{i18n.t('nav.voiceActive')}</span
+      ></span
+    >
   {/if}
 {/snippet}
 
@@ -615,7 +651,7 @@
       'rail-item nav-tab nav-tab-side selection-layer',
       { 'nav-tab-outlined': outlined(item), 'space-item': Boolean(item.initial) },
     ]}
-    href={item.navigateHref ?? item.href}
+    href={itemHref(item, active)}
     draggable="false"
     onclick={mobile
       ? (event) => {
@@ -623,7 +659,12 @@
         }
       : undefined}
     aria-label={i18n.t(item.label)}
-    aria-describedby={describedBy(props, unreadId(item.roomId ?? item.href))}
+    aria-describedby={describedBy(
+      props,
+      item.space && item.roomId && voiceSpaces.has(item.roomId)
+        ? `${unreadId(item.roomId)} ${voiceId(item.roomId)}`
+        : unreadId(item.roomId ?? item.href)
+    )}
     aria-current={active ? 'page' : undefined}
   >
     <span class="nav-tab-hit-area" aria-hidden="true"></span>
@@ -829,11 +870,11 @@
     {@attach dropTarget(ref, false)}
   >
     <div class="folder-card">
-      <!-- svelte-ignore a11y_role_has_required_aria_props -->
       <button
         type="button"
         role="treeitem"
         aria-level="1"
+        aria-selected="false"
         aria-owns={`folder-children-${folder.id}`}
         class="folder-collapse"
         aria-expanded="true"
@@ -867,7 +908,7 @@
   oncontextmenu={mouseContextMenu(openDisplayMenu)}
 >
   <div
-    class="rail-scroll"
+    class="rail-scroll scrollbar-hidden"
     role="tree"
     data-focus-region="spaces"
     aria-orientation="vertical"
@@ -920,7 +961,23 @@
     </ul>
   </div>
   {#if !mobile && compact}
-    <UserQuickTools compact />
+    {#if alertListPopoverAnchor}
+      <ResponsivePopover
+        label={i18n.t('nav.alerts')}
+        closeLabel={i18n.t('common.close')}
+        side="right"
+        align="start"
+        class="sidebar-popover alert-popover menu-surface"
+        sideOffset={8}
+        anchor={alertListPopoverAnchor}
+        bind:open={alertListState.open}
+      >
+        <AlertList isDrawer={false} />
+      </ResponsivePopover>
+    {/if}
+    <div bind:this={alertListPopoverAnchor}>
+      <UserQuickTools compact />
+    </div>
   {/if}
 </nav>
 
@@ -984,7 +1041,8 @@
   {#each createEntries as entry (entry.label)}
     <ActionMenuItem
       onSelect={() => {
-        navigateTo(entry.href);
+        if (entry.href === null) openFindOrJoin();
+        else navigateTo(entry.href);
       }}
     >
       <entry.icon />
@@ -1141,12 +1199,18 @@
     border-radius: var(--radii-pill);
     color: var(--success-on-main);
     display: flex;
+    inset-inline-end: -0.25rem;
     justify-content: center;
     padding: var(--space-050);
     position: absolute;
-    right: -0.25rem;
     top: -0.25rem;
     z-index: 1;
+  }
+
+  .call-mark.others {
+    background: var(--bg-container);
+    border-color: var(--success-main);
+    color: var(--success-main);
   }
 
   .call-mark :global(svg) {
@@ -1156,7 +1220,7 @@
 
   .rail {
     background: var(--bg-container);
-    border-right: var(--border-width) solid var(--bg-container-line);
+    border-inline-end: var(--border-width) solid var(--bg-container-line);
     box-sizing: border-box;
     color: var(--bg-on-container);
     display: flex;
@@ -1172,11 +1236,6 @@
     flex: 1;
     min-height: 0;
     overflow: hidden auto;
-    scrollbar-width: none;
-  }
-
-  .rail-scroll::-webkit-scrollbar {
-    display: none;
   }
 
   .rail-separator {
@@ -1225,10 +1284,9 @@
     border-radius: var(--radius-pill);
     content: '';
     height: 2px;
-    left: 0;
+    inset-inline: 0;
     pointer-events: none;
     position: absolute;
-    right: 0;
   }
 
   .rail-slot.drop-above::after,
@@ -1327,5 +1385,9 @@
   .folder-collapse:focus-visible {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: var(--focus-ring-offset);
+  }
+
+  :global(.sidebar-popover) {
+    margin-bottom: var(--space-200);
   }
 </style>

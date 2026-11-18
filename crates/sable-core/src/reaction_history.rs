@@ -2,7 +2,7 @@ use sable_model::emote_picker::{reaction_identity as identity, rememberable_reac
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::protocol::{CoreEvent, RpcError};
+use crate::protocol::{CoreEvent, RpcCode, RpcError};
 use crate::{Core, ResultExt};
 
 const EVENT_TYPE: &str = "m.recent_emoji";
@@ -311,7 +311,7 @@ impl Core {
             history.seed(key, now);
         }
         if let Some(key) = key {
-            let device = client.device_id().ok_or(RpcError::Unavailable)?;
+            let device = client.device_id().ok_or(RpcCode::Unavailable)?;
             history.remember(key, device.as_str(), now);
         }
         let content = history.content();
@@ -328,14 +328,21 @@ impl Core {
         }
         // Keep local counters even offline. A later read merges them before retrying the upload.
         if let Ok(remote) = remote {
-            let previous = remote.and_then(|raw| raw.deserialize_as::<Value>().ok());
+            let previous = remote.map(|raw| raw.deserialize_as::<Value>());
+            if previous.as_ref().is_some_and(Result::is_err) {
+                tracing::warn!(
+                    "reaction history was saved locally but the server copy is unreadable"
+                );
+                return Ok(history.keys());
+            }
+            let previous = previous.and_then(Result::ok);
             if previous.as_ref() != Some(&content)
                 && (previous.is_some() || !history.entries.is_empty())
                 && let Err(error) = client
                     .account()
                     .set_account_data_raw(
                         EVENT_TYPE.into(),
-                        matrix_sdk::ruma::serde::Raw::new(&content)
+                        ruma::serde::Raw::new(&content)
                             .or_failed(self, "reaction_history")?
                             .cast_unchecked(),
                     )
@@ -587,13 +594,14 @@ mod tests {
             .mount(server.server())
             .await;
         let (core, _events) = Core::new("history-test", Box::new(MemorySessionStore::default()));
-        *core.session.write().await = Some(Session {
+        let session = Session {
             account_id: "test".into(),
             client: client.clone(),
             sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
             homeserver: server.server().uri(),
             oauth: false,
-        });
+        };
+        *core.session.write().await = Some(session.clone());
         let react = || ReactParams {
             room_id: room_id.to_owned(),
             event_id: target.to_owned(),
@@ -622,13 +630,7 @@ mod tests {
 
         let (restored, _events) =
             Core::new("history-test", Box::new(MemorySessionStore::default()));
-        *restored.session.write().await = Some(Session {
-            account_id: "test".into(),
-            client: client.clone(),
-            sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
-            homeserver: server.server().uri(),
-            oauth: false,
-        });
+        *restored.session.write().await = Some(session);
         assert_eq!(
             restored.frequent_reactions(None, &[]).await.unwrap(),
             ["🔥"]

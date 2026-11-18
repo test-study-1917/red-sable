@@ -15,6 +15,7 @@ import {
   recentGifs,
 } from '#lib/gif/favorites.svelte.js';
 import { adoptRoomIconOverrides, roomIconOverrides } from '#lib/rooms/room-appearance.svelte.js';
+import { adoptBridgedSpaces, bridgedSpaces } from '#lib/rooms/bridged-spaces.svelte.js';
 import { adoptQuietRooms, quietRooms } from '#lib/rooms/quiet-rooms.svelte.js';
 import { readRecentStickers, writeRecentStickers } from '#lib/emoji/recent-packs.svelte.js';
 import { SpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
@@ -41,6 +42,7 @@ function reset(): void {
   adoptRecentGifs([]);
   adoptRoomIconOverrides([]);
   adoptQuietRooms([]);
+  adoptBridgedSpaces([]);
   clearDrafts();
   localStorage.clear();
 }
@@ -58,6 +60,7 @@ describe('the workspace document', () => {
     adoptRecentGifs([gif]);
     adoptRoomIconOverrides([['!room:example.org', 'never']]);
     adoptQuietRooms(['!space:example.org']);
+    adoptBridgedSpaces(['!bridged:example.org']);
     sidebar.adoptOpenFolders(['folder-1']);
     const { content } = document.snapshot();
 
@@ -71,6 +74,7 @@ describe('the workspace document', () => {
     expect(recentGifs()).toEqual([gif]);
     expect(roomIconOverrides()).toEqual({ '!room:example.org': 'never' });
     expect(quietRooms()).toEqual(['!space:example.org']);
+    expect(bridgedSpaces()).toEqual(['!bridged:example.org']);
     expect([...sidebar.openFolders]).toEqual(['folder-1']);
   });
 
@@ -84,6 +88,16 @@ describe('the workspace document', () => {
       })
     ).toBe(true);
     expect(favoriteGifs()).toEqual([gif]);
+  });
+
+  it('keeps what it holds for a field an older build left out', () => {
+    const document = workspaceDocument(new SpaceSidebar());
+    adoptBridgedSpaces(['!bridged:example.org']);
+
+    expect(document.adopt({ v: 1, quietRooms: ['!space:example.org'] })).toBe(true);
+
+    expect(quietRooms()).toEqual(['!space:example.org']);
+    expect(bridgedSpaces()).toEqual(['!bridged:example.org']);
   });
 
   it('asks to be seeded only when there is something local to seed with', () => {

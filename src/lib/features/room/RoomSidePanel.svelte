@@ -43,8 +43,14 @@
 </script>
 
 {#snippet body()}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <aside
     class={['side-panel', { modal }]}
+    onkeydown={(event) => {
+      if (modal || event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
+    }}
     aria-label={title}
     data-focus-region="panel"
     style:width={modal ? null : `${panelWidth.width}rem`}
@@ -105,7 +111,7 @@
     --ghost-active: var(--bg-container-active);
 
     background: var(--bg-container);
-    border-left: var(--border-width) solid var(--bg-container-line);
+    border-inline-start: var(--border-width) solid var(--bg-container-line);
     color: var(--bg-on-container);
     display: flex;
     flex: 0 0 auto;
@@ -115,13 +121,13 @@
   }
 
   .side-panel.modal {
-    border-left: none;
+    border-inline-start: none;
     height: 100%;
     width: 100%;
   }
 
   .side-panel :global(.resize-handle) {
-    left: -0.25rem;
+    inset-inline-start: -0.25rem;
     z-index: 1;
   }
 

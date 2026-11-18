@@ -21,7 +21,7 @@ use matrix_sdk_ui::sync_service::State as SyncState;
 use tracing::Instrument as _;
 use web_time::Instant;
 
-use crate::protocol::{CoreEvent, RpcError, SyncStatus};
+use crate::protocol::{CoreEvent, RpcCode, RpcError, SyncStatus};
 use matrix_sdk_base::deserialized_responses::RawAnySyncOrStrippedTimelineEvent;
 use matrix_sdk_base::sync::Notification;
 use matrix_sdk_ui::notification_client::{NotificationClient, NotificationProcessSetup};
@@ -30,6 +30,7 @@ use crate::Core;
 use crate::notifications;
 use crate::search::ignored_user_ids;
 use crate::spaces::{self, SidebarSpacesEvent};
+use crate::timeline_overlay::BanRedaction;
 
 type NotificationSender = tokio::sync::mpsc::UnboundedSender<(Notification, matrix_sdk::Room)>;
 pub(crate) type NotificationRoute = Arc<parking_lot::Mutex<Option<NotificationSender>>>;
@@ -149,12 +150,15 @@ impl Core {
                         }
                         if matches!(
                             core.require_sliding_sync(&support_client).await,
-                            Err(RpcError::SlidingSyncUnsupported)
+                            Err(RpcError {
+                                code: RpcCode::SlidingSyncUnsupported,
+                                ..
+                            })
                         ) {
                             restarted.stop().await;
                             core.emit_if_current(
                                 generation,
-                                CoreEvent::SyncStatus(crate::protocol::SyncStatus::Error {
+                                CoreEvent::SyncStatus(SyncStatus::Error {
                                     message: "This homeserver does not support Sliding Sync."
                                         .to_owned(),
                                 }),
@@ -164,7 +168,7 @@ impl Core {
                         if steady {
                             failures = 0;
                         }
-                        crate::watchers::retry_backoff(failures).await;
+                        retry_backoff(failures).await;
                         failures = failures.saturating_add(1);
                         core.resume_sync(&restarted).await;
                     }
@@ -250,13 +254,7 @@ impl Core {
         generation: u64,
     ) {
         let (sender, mut pending) = tokio::sync::mpsc::unbounded_channel();
-        let Some(account_id) = self
-            .session
-            .read()
-            .await
-            .as_ref()
-            .map(|session| session.account_id.clone())
-        else {
+        let Some(account_id) = self.session.current(|session| session.account_id.clone()) else {
             return;
         };
         let mut routes = self.notification_routes.lock().await;
@@ -357,61 +355,62 @@ impl Core {
                     return;
                 };
                 let mut changes = rules.subscribe();
-                loop {
-                    while changes.try_recv().is_ok() {}
+                while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+                    changes.recv().await
+                {
                     core.emit_if_current(generation, CoreEvent::NotificationSettingsChanged);
-                    let retry = match rules.reconcile_direct_default().await {
-                        Ok(()) => false,
-                        Err(error) => {
-                            tracing::warn!(%error, "could not reconcile DM notification defaults");
-                            true
-                        }
-                    };
-                    if retry {
-                        matrix_sdk::sleep::sleep(std::time::Duration::from_secs(30)).await;
-                        continue;
-                    }
-                    let received = changes.recv().await;
-                    if matches!(
-                        received,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed)
-                    ) {
-                        return;
-                    }
                 }
             })
             .abort_on_drop(),
         );
     }
 
-    pub(crate) async fn watch_room_keys(self: &Arc<Self>, client: &matrix_sdk::Client) {
-        let Some(keys) = client.encryption().room_keys_received_stream().await else {
-            return;
-        };
+    pub(crate) fn watch_room_keys(self: &Arc<Self>, client: &matrix_sdk::Client) {
         let core = self.clone();
+        let client = client.clone();
         self.track_session_task(
             spawn(async move {
-                pin_mut!(keys);
-                while let Some(received) = keys.next().await {
-                    match received {
-                        Ok(keys) => {
-                            let rooms: BTreeSet<&RoomId> =
-                                keys.iter().map(|key| &*key.room_id).collect();
-                            for room in rooms {
-                                core.refresh_encrypted_replies(Some(room), |session| {
-                                    keys.iter().any(|key| {
-                                        &*key.room_id == room && key.session_id == session
+                // The stream ends when the SDK rebuilds its crypto machine, which it does after
+                // another process wrote to the crypto store.
+                while let Some(keys) = client.encryption().room_keys_received_stream().await {
+                    pin_mut!(keys);
+                    while let Some(received) = keys.next().await {
+                        match received {
+                            Ok(keys) => {
+                                let rooms: BTreeSet<&RoomId> =
+                                    keys.iter().map(|key| &*key.room_id).collect();
+                                for room in rooms {
+                                    core.refresh_encrypted_replies(Some(room), |session| {
+                                        keys.iter().any(|key| {
+                                            &*key.room_id == room && key.session_id == session
+                                        })
                                     })
-                                })
-                                .await;
+                                    .await;
+                                }
                             }
+                            Err(_) => core.refresh_encrypted_replies(None, |_| true).await,
                         }
-                        Err(_) => core.refresh_encrypted_replies(None, |_| true).await,
                     }
+                    core.refresh_encrypted_replies(None, |_| true).await;
                 }
             })
             .abort_on_drop(),
         );
+    }
+
+    /// `Encryption::devices_stream` owns the crypto machine it came from. A machine the SDK
+    /// replaced then never closes its room key stream, so the redecryptor keeps listening to it
+    /// and events stay undecryptable after their key arrives.
+    async fn identity_changes(&self) -> Option<impl futures_util::Stream<Item = ()> + use<>> {
+        let base = self.base_client().await.ok()?;
+        let machine = base.olm_machine().await;
+        Some(
+            machine
+                .as_ref()?
+                .store()
+                .identities_stream_raw()
+                .map(|_| ()),
+        )
     }
 
     /// Re-read the full status when verification, recovery, or backup changes.
@@ -490,22 +489,29 @@ impl Core {
         let watched = client.clone();
         self.track_session_task(
             spawn(async move {
-                let Ok(updates) = watched.encryption().devices_stream().await else {
-                    return;
-                };
-                pin_mut!(updates);
-                let mut known = crate::verification::local_own_devices(&watched).await;
-                while updates.next().await.is_some() {
-                    let devices = crate::verification::local_own_devices(&watched).await;
-                    if devices != known {
-                        known.clone_from(&devices);
-                        core.emit_if_current(
-                            generation,
-                            CoreEvent::EncryptionStatus {
-                                status: crate::verification::encryption_status(&watched).await,
-                            },
-                        );
-                        core.emit_if_current(generation, CoreEvent::DevicesChanged { devices });
+                let mut known = None;
+                while let Some(updates) = core.identity_changes().await {
+                    pin_mut!(updates);
+                    loop {
+                        let devices = crate::verification::local_own_devices(&watched).await;
+                        if known.as_ref().is_some_and(|known| *known != devices) {
+                            core.emit_if_current(
+                                generation,
+                                CoreEvent::EncryptionStatus {
+                                    status: crate::verification::encryption_status(&watched).await,
+                                },
+                            );
+                            core.emit_if_current(
+                                generation,
+                                CoreEvent::DevicesChanged {
+                                    devices: devices.clone(),
+                                },
+                            );
+                        }
+                        known = Some(devices);
+                        if updates.next().await.is_none() {
+                            break;
+                        }
                     }
                 }
             })
@@ -604,6 +610,16 @@ impl Core {
                     if event.prev_content().is_none() {
                         core.emit_profile_changed(generation, &room, &event).await;
                     }
+                    let ban = room.power_levels().await.ok().and_then(|power_levels| {
+                        BanRedaction::from_membership(
+                            &event.sender,
+                            &event.state_key,
+                            &event.content,
+                            &power_levels,
+                        )
+                    });
+                    core.overlay_ban_redaction(room.room_id(), &event.state_key, ban)
+                        .await;
                 }
             }
         });
@@ -619,7 +635,7 @@ impl Core {
         if event.content.membership != MembershipState::Join {
             return;
         }
-        let Ok(user_id) = matrix_sdk::ruma::OwnedUserId::try_from(event.state_key.as_str()) else {
+        let Ok(user_id) = ruma::OwnedUserId::try_from(event.state_key.as_str()) else {
             return;
         };
         let display_name = event.content.displayname.clone().and_then(visible_name);
@@ -787,7 +803,7 @@ struct ForegroundNotifier {
     client: matrix_sdk::Client,
     notifications: NotificationClient,
     generation: u64,
-    alerted_invites: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    alerted_invites: std::collections::HashSet<ruma::OwnedRoomId>,
     alerted_events: std::collections::HashMap<OwnedEventId, MilliSecondsSinceUnixEpoch>,
 }
 
@@ -963,15 +979,14 @@ mod tests {
 
     #[test]
     fn a_fresh_redecrypted_event_that_notifies_is_forwarded_once_and_stale_ones_are_not() {
-        let raw: Raw<matrix_sdk::ruma::events::AnySyncTimelineEvent> =
-            serde_json::from_value(json!({
-                "type": "m.room.message",
-                "event_id": "$late",
-                "sender": ALICE,
-                "origin_server_ts": 100_000,
-                "content": { "msgtype": "m.text", "body": "hi @bob" }
-            }))
-            .expect("event");
+        let raw: Raw<ruma::events::AnySyncTimelineEvent> = serde_json::from_value(json!({
+            "type": "m.room.message",
+            "event_id": "$late",
+            "sender": ALICE,
+            "origin_server_ts": 100_000,
+            "content": { "msgtype": "m.text", "body": "hi @bob" }
+        }))
+        .expect("event");
         let event = TimelineEvent::from_plaintext(raw.clone());
         let at = |ms: u64| MilliSecondsSinceUnixEpoch(ms.try_into().expect("timestamp"));
 

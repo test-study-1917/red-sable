@@ -1,6 +1,7 @@
 use crate::api::encryption::DeleteDeviceParams;
 use crate::api::session::RemoveAccountParams;
 use crate::api::session::SwitchAccountParams;
+use crate::errors::CoreResultExt as _;
 use std::sync::{Arc, atomic::Ordering};
 
 use matrix_sdk::executor::{JoinHandleExt, spawn};
@@ -9,7 +10,7 @@ use matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata:
 use matrix_sdk::ruma::api::client::uiaa::{AuthData, AuthType, Password, UserIdentifier};
 
 use crate::ResultExt;
-use crate::protocol::{CoreEvent, RpcError, SessionInfo};
+use crate::protocol::{CoreEvent, RpcCode, RpcError, SessionInfo};
 
 use crate::session::AccountRegistry;
 use crate::session::{PersistedAccount, PersistedSession, Session};
@@ -17,25 +18,9 @@ use crate::session::{PersistedAccount, PersistedSession, Session};
 use crate::Core;
 use crate::cosmetics;
 use crate::image_packs;
+use crate::lifecycle::SessionGeneration;
 use crate::search;
 use crate::session;
-
-/// Taken after `restore_lock` when both are needed.
-pub(crate) struct SessionTransition<'core> {
-    _activation: tokio::sync::MutexGuard<'core, ()>,
-    _swap: tokio::sync::MutexGuard<'core, ()>,
-}
-
-pub(crate) struct SessionGeneration<'core> {
-    value: u64,
-    _guard: tokio::sync::MutexGuard<'core, ()>,
-}
-
-impl SessionGeneration<'_> {
-    pub(crate) const fn value(&self) -> u64 {
-        self.value
-    }
-}
 
 impl Core {
     pub(crate) async fn delete_device(
@@ -59,7 +44,7 @@ impl Core {
             return Ok(None);
         };
         let Some(uiaa) = error.as_uiaa_response() else {
-            return Err(self.failed("delete_device", error));
+            return Err(self.failed_with("delete_device", &error));
         };
         let password_only = uiaa
             .flows
@@ -68,26 +53,27 @@ impl Core {
         let password = match password {
             Some(password) if password_only => password,
             _ => {
-                return Err(RpcError::InteractiveAuthRequired {
+                return Err(RpcCode::InteractiveAuthRequired {
                     stages: uiaa
                         .flows
                         .iter()
                         .flat_map(|flow| &flow.stages)
                         .map(|stage| stage.as_str().to_owned())
                         .collect(),
-                });
+                }
+                .into());
             }
         };
 
-        let user_id = client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned();
+        let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned();
         let mut auth = Password::new(UserIdentifier::Matrix(user_id.into()), password);
         auth.session.clone_from(&uiaa.session);
         client
             .delete_devices(&devices, Some(AuthData::Password(auth)))
             .await
             .map_err(|error| match error.as_uiaa_response() {
-                Some(_) => RpcError::Denied,
-                None => self.failed("delete_device_auth", error),
+                Some(_) => crate::errors::coded("delete_device_auth", RpcCode::Denied, &error),
+                None => self.failed_with("delete_device_auth", &error),
             })?;
         Ok(None)
     }
@@ -111,7 +97,7 @@ impl Core {
             return Ok(None);
         };
         let Some(uiaa) = error.as_uiaa_response() else {
-            return Err(self.failed("deactivate_account", error));
+            return Err(self.failed_with("deactivate_account", &error));
         };
         let password_only = uiaa
             .flows
@@ -120,36 +106,29 @@ impl Core {
         let password = match password {
             Some(password) if password_only => password,
             _ => {
-                return Err(RpcError::InteractiveAuthRequired {
+                return Err(RpcCode::InteractiveAuthRequired {
                     stages: uiaa
                         .flows
                         .iter()
                         .flat_map(|flow| &flow.stages)
                         .map(|stage| stage.as_str().to_owned())
                         .collect(),
-                });
+                }
+                .into());
             }
         };
 
-        let user_id = client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned();
+        let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned();
         let mut auth = Password::new(UserIdentifier::Matrix(user_id.into()), password);
         auth.session.clone_from(&uiaa.session);
         account
             .deactivate(None, Some(AuthData::Password(auth)), false)
             .await
             .map_err(|error| match error.as_uiaa_response() {
-                Some(_) => RpcError::Denied,
-                None => self.failed("deactivate_account_auth", error),
+                Some(_) => crate::errors::coded("deactivate_account_auth", RpcCode::Denied, &error),
+                None => self.failed_with("deactivate_account_auth", &error),
             })?;
         Ok(None)
-    }
-
-    pub(crate) async fn lock_session_transition(&self) -> SessionTransition<'_> {
-        let activation = self.session_activation_lock.lock().await;
-        SessionTransition {
-            _activation: activation,
-            _swap: self.session_swap_lock.lock().await,
-        }
     }
 
     pub(crate) async fn registered_store_id(&self, account_id: &str) -> Option<String> {
@@ -180,28 +159,9 @@ impl Core {
         );
     }
 
-    pub(crate) fn sync_paused(&self) -> bool {
-        self.account_locked.load(Ordering::SeqCst) || self.sync_suspended.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn sync_allowed(&self) -> bool {
-        !self.sync_paused() && self.network_available.load(Ordering::SeqCst)
-    }
-
-    pub(crate) async fn claim_session_generation(&self) -> SessionGeneration<'_> {
-        let guard = self.session_activation_lock.lock().await;
-        SessionGeneration {
-            value: self
-                .session_attempt_generation
-                .fetch_add(1, Ordering::SeqCst)
-                + 1,
-            _guard: guard,
-        }
-    }
-
     pub(crate) async fn restore(self: &Arc<Self>) -> Result<Option<SessionInfo>, RpcError> {
-        let _restore = self.restore_lock.lock().await;
-        if let Some(session) = self.active_session_info().await {
+        let _restoring = self.lifecycle.restoring().await;
+        if let Some(session) = self.active_session_info() {
             return Ok(Some(session));
         }
 
@@ -240,7 +200,7 @@ impl Core {
             client,
             persisted.homeserver,
             account.account_id,
-            generation.value(),
+            &generation,
             &lease,
         )
         .await?;
@@ -248,16 +208,18 @@ impl Core {
         Ok(Some(info))
     }
 
-    async fn active_session_info(&self) -> Option<SessionInfo> {
-        let session = self.session.read().await;
-        let session = session.as_ref()?;
-        Some(SessionInfo {
-            account_id: session.account_id.clone(),
-            user_id: session.client.user_id()?.to_owned(),
-            device_id: session.client.device_id()?.to_string(),
-            homeserver: session.homeserver.clone(),
-            needs_reauth: false,
-        })
+    fn active_session_info(&self) -> Option<SessionInfo> {
+        self.session
+            .current(|session| {
+                Some(SessionInfo {
+                    account_id: session.account_id.clone(),
+                    user_id: session.client.user_id()?.to_owned(),
+                    device_id: session.client.device_id()?.to_string(),
+                    homeserver: session.homeserver.clone(),
+                    needs_reauth: false,
+                })
+            })
+            .flatten()
     }
 
     pub(crate) async fn list_accounts(&self) -> Result<Vec<SessionInfo>, RpcError> {
@@ -279,7 +241,7 @@ impl Core {
                     needs_reauth: account.needs_reauth,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, RpcError>>()?;
         Ok(accounts)
     }
 
@@ -287,8 +249,8 @@ impl Core {
         self: &Arc<Self>,
         SwitchAccountParams { account_id }: SwitchAccountParams,
     ) -> Result<SessionInfo, RpcError> {
-        let _restore = self.restore_lock.lock().await;
-        if let Some(session) = self.active_session_info().await
+        let _restoring = self.lifecycle.restoring().await;
+        if let Some(session) = self.active_session_info()
             && session.account_id == account_id
         {
             return Ok(session);
@@ -298,9 +260,9 @@ impl Core {
             .accounts
             .into_iter()
             .find(|account| account.account_id == account_id)
-            .ok_or(RpcError::NotLoggedIn)?;
+            .ok_or(RpcCode::NotLoggedIn)?;
         if account.needs_reauth {
-            return Err(RpcError::NotLoggedIn);
+            return Err(RpcCode::NotLoggedIn.into());
         }
         let lease = session::store_lease(&account.store_id).await;
         let client = self.saved_account_client(&account, &lease).await?;
@@ -324,7 +286,7 @@ impl Core {
             client,
             persisted.homeserver,
             account.account_id,
-            generation.value(),
+            &generation,
             &lease,
         )
         .await?;
@@ -332,12 +294,8 @@ impl Core {
     }
 
     pub(crate) async fn logout(self: &Arc<Self>) -> Result<(), RpcError> {
-        let _transition = self.lock_session_transition().await;
-        let invalidated = self
-            .session_attempt_generation
-            .fetch_add(1, Ordering::SeqCst)
-            + 1;
-        self.session_generation.store(invalidated, Ordering::SeqCst);
+        let transition = self.lock_session_transition().await;
+        transition.invalidate();
         self.pending_registration.lock().await.take();
         self.pending_login.lock().await.take();
         let session = self.take_session().await;
@@ -378,12 +336,11 @@ impl Core {
     ) -> Result<(), RpcError> {
         if self
             .active_session_info()
-            .await
             .as_ref()
             .map(|session| &session.account_id)
             == Some(&account_id)
         {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
 
         let accounts = self.accounts().await?;
@@ -392,7 +349,7 @@ impl Core {
             .iter()
             .any(|account| account.account_id == account_id)
         {
-            return Err(RpcError::NotLoggedIn);
+            return Err(RpcCode::NotLoggedIn.into());
         }
 
         self.remove_account(Some(&account_id)).await
@@ -402,13 +359,8 @@ impl Core {
     /// core can open them.
     pub async fn shutdown(self: &Arc<Self>) {
         self.shut_down.store(true, Ordering::SeqCst);
-        let _restore = self.restore_lock.lock().await;
-        let _transition = self.lock_session_transition().await;
-        let invalidated = self
-            .session_attempt_generation
-            .fetch_add(1, Ordering::SeqCst)
-            + 1;
-        self.session_generation.store(invalidated, Ordering::SeqCst);
+        let transition = self.lifecycle.exclusive_transition().await;
+        transition.invalidate();
         if let Some(session) = self.take_session().await {
             session.sync_service.stop().await;
         }
@@ -422,13 +374,8 @@ impl Core {
     #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn reset_local_cache(self: &Arc<Self>) -> Result<(), RpcError> {
         let outcome = {
-            let _restore = self.restore_lock.lock().await;
-            let _transition = self.lock_session_transition().await;
-            let invalidated = self
-                .session_attempt_generation
-                .fetch_add(1, Ordering::SeqCst)
-                + 1;
-            self.session_generation.store(invalidated, Ordering::SeqCst);
+            let transition = self.lifecycle.exclusive_transition().await;
+            transition.invalidate();
             if let Some(session) = self.take_session().await {
                 session.sync_service.stop().await;
             }
@@ -446,11 +393,11 @@ impl Core {
                 if let Some(client) = client
                     && let Err(error) = client.state_store().close().await
                 {
-                    outcome = Err(self.failed("reset_local_cache", error));
+                    outcome = Err(self.failed_with("reset_local_cache", &error));
                     continue;
                 }
                 if let Err(error) = reset_account_cache(account).await {
-                    outcome = Err(self.failed("reset_local_cache", error));
+                    outcome = Err(self.failed_report("reset_local_cache", error));
                 }
             }
             outcome
@@ -478,7 +425,7 @@ impl Core {
                     && account.device_invalidated == expected.device_invalidated
             })
         {
-            return Err(RpcError::NotLoggedIn);
+            return Err(RpcCode::NotLoggedIn.into());
         }
         let mut updated = registry.clone();
         if let Some(expected) = reauth {
@@ -531,7 +478,7 @@ impl Core {
     ) -> Result<matrix_sdk::SessionTokens, RpcError> {
         let _guard = self.session_store_lock.lock().await;
         if self.credential_writers.lock().await.get(account_id) != Some(&generation) {
-            return Err(RpcError::NotLoggedIn);
+            return Err(RpcCode::NotLoggedIn.into());
         }
         let device_id = self
             .accounts
@@ -545,14 +492,14 @@ impl Core {
                     .find(|account| account.account_id == account_id && !account.needs_reauth)
             })
             .map(|account| account.session.credentials.device_id())
-            .ok_or(RpcError::NotLoggedIn)?;
+            .ok_or(RpcCode::NotLoggedIn)?;
         let logins = crate::credentials::LoginTokens::new(std::path::Path::new(&self.store_id));
         let account_id = account_id.to_owned();
         let tokens = tokio::task::spawn_blocking(move || logins.read(&account_id, &device_id))
             .await
             .or_failed(self, "reload_session_read")?
             .or_failed(self, "reload_session_read")?
-            .ok_or(RpcError::NotLoggedIn)?;
+            .ok_or(RpcCode::NotLoggedIn)?;
         if tokens.access_token.is_empty() {
             return Err(self.failed("reload_session_read", "saved login access token is empty"));
         }
@@ -778,7 +725,7 @@ impl Core {
         };
         session::validate_saved_crypto_store(&account.store_id, &persisted)
             .await
-            .or_failed(self, "restore_crypto_store")?;
+            .or_report(self, "restore_crypto_store")?;
         let client =
             session::restore_client(&account.store_id, &persisted, self.persistent_event_cache)
                 .await
@@ -787,7 +734,7 @@ impl Core {
             .await;
         session::restore_credentials(&client, &persisted)
             .await
-            .or_failed(self, "restore_session")?;
+            .or_report(self, "restore_session")?;
         tracing::info!(refresh = %refresh_tag(&client), "session tokens: restored");
         self.account_clients
             .lock()
@@ -827,12 +774,12 @@ impl Core {
     ) -> Result<(), RpcError> {
         let _guard = self.session_store_lock.lock().await;
         let mut accounts = self.accounts.lock().await;
-        let mut updated = accounts.as_ref().ok_or(RpcError::NotLoggedIn)?.clone();
+        let mut updated = accounts.as_ref().ok_or(RpcCode::NotLoggedIn)?.clone();
         let account = updated
             .accounts
             .iter_mut()
             .find(|account| account.account_id == account_id && !account.needs_reauth)
-            .ok_or(RpcError::NotLoggedIn)?;
+            .ok_or(RpcCode::NotLoggedIn)?;
         let mut clients = self.account_clients.lock().await;
         if !clients.contains_key(account_id) {
             self.install_credential_writer(client, homeserver, account_id)
@@ -841,7 +788,7 @@ impl Core {
         }
         drop(clients);
         account.session = session::current_session(client, homeserver.to_owned())
-            .ok_or(RpcError::NotLoggedIn)?
+            .ok_or(RpcCode::NotLoggedIn)?
             .keeping_endpoint_of(&account.session);
         updated.active_account_id = Some(account_id.to_owned());
         self.write_registry(&updated)
@@ -986,31 +933,29 @@ impl Core {
     }
 
     async fn detach_session(&self) -> (Option<Session>, search::MessageIndex) {
-        self.end_all_calls().await;
-        let client = self
-            .session
-            .read()
-            .await
-            .as_ref()
-            .map(|session| session.client.clone());
+        self.retire_calls().await;
+        let client = self.session.current(|session| session.client.clone());
         if let Some(client) = client {
             self.flush_inbox(&client).await;
         }
+        // Lock order: room subscriptions, then the session, then the search flush. Opening a room
+        // reads the session under the first, a search copy saves under the second.
+        let mut room_subscriptions = self.room_subscriptions.lock().await;
+        let mut session = self.session.write().await;
         // An aborted task must not be holding a flush it took from the index.
         let flushing = self.search_flush.lock().await;
-        let mut session = self.session.write().await;
         self.session_handlers.lock().clear();
         self.session_tasks.lock().clear();
         self.to_device_inbox.lock().take();
         self.search_sharing.reset_session();
         self.rtc.clear();
         self.subscriptions.lock().await.clear();
-        self.room_subscriptions.lock().await.clear();
+        room_subscriptions.clear();
         self.warm_rooms.lock().clear();
         self.timelines.lock().await.clear();
         self.thread_timelines.lock().await.clear();
         self.account_data_types.lock().await.clear();
-        *self.inbox.lock().await = crate::inbox::InboxCache::default();
+        self.inbox.lock().await.reset();
         *self.pack_cache.lock().await = image_packs::PackCache::default();
         self.calendars.lock().await.clear();
         *self.push_rules.lock().await = None;
@@ -1042,16 +987,19 @@ impl Core {
     ) -> Result<SessionGeneration<'_>, RpcError> {
         if matches!(
             self.require_sliding_sync(&client).await,
-            Err(RpcError::SlidingSyncUnsupported)
+            Err(RpcError {
+                code: RpcCode::SlidingSyncUnsupported,
+                ..
+            })
         ) {
             if let Err(error) = client.logout().await {
                 tracing::warn!(?error, "could not log out a session without Sliding Sync");
             }
-            return Err(RpcError::SlidingSyncUnsupported);
+            return Err(RpcCode::SlidingSyncUnsupported.into());
         }
         session::enable_crypto_store_lock(&client)
             .await
-            .or_failed(self, "enable_crypto_store_lock")?;
+            .or_report(self, "enable_crypto_store_lock")?;
         // Pushes can find the login once it is persisted.
         let lease = session::store_lease(store_id).await;
         let generation = self.claim_session_generation().await;
@@ -1062,7 +1010,7 @@ impl Core {
             client,
             persisted.homeserver,
             account_id,
-            generation.value(),
+            &generation,
             &lease,
         )
         .await?;
@@ -1074,9 +1022,10 @@ impl Core {
         client: matrix_sdk::Client,
         homeserver: String,
         account_id: String,
-        generation: u64,
+        claimed: &SessionGeneration<'_>,
         _lease: &session::StoreLease,
     ) -> Result<(), RpcError> {
+        let generation = claimed.value();
         let oauth = client.oauth().full_session().is_some();
         if let Err(error) = session::repair_room_key_sharing(&client).await {
             tracing::warn!(%error, "repairing room key sharing failed");
@@ -1087,11 +1036,10 @@ impl Core {
             .await
             .or_failed(self, "start_sync")?;
 
-        let _swap = self.session_swap_lock.lock().await;
-        if self.session_attempt_generation.load(Ordering::SeqCst) != generation {
+        let Some(swap) = claimed.swap().await else {
             sync_service.stop().await;
-            return Err(RpcError::Unavailable);
-        }
+            return Err(RpcCode::Unavailable.into());
+        };
 
         self.prepare_account_client(&client, &homeserver, &account_id)
             .await?;
@@ -1107,8 +1055,8 @@ impl Core {
         self.watch_incoming_calls(&client, generation);
         self.watch_incoming_verifications(&client);
 
-        self.session_generation.store(generation, Ordering::SeqCst);
-        self.account_locked.store(false, Ordering::SeqCst);
+        swap.commit();
+        self.activity.unlock_account();
         self.emit_if_current(
             generation,
             CoreEvent::AccountLockChanged {
@@ -1128,7 +1076,7 @@ impl Core {
 
         self.watch_session_changes(session_changes, generation);
         self.watch_encryption(&client, generation);
-        self.watch_room_keys(&client).await;
+        self.watch_room_keys(&client);
         self.watch_account_data_key_sharing(&client, generation);
         self.watch_search_peers(&client, generation);
         self.watch_rtc(&client, generation);
@@ -1156,6 +1104,7 @@ impl Core {
             .abort_on_drop(),
         );
         self.watch_bot_commands(&client, generation);
+        self.watch_room_rules(&client, generation);
         self.watch_image_packs(&client, generation);
         self.watch_joined_invites(&client);
         self.watch_send_queue(&client);
@@ -1181,6 +1130,7 @@ impl Core {
             .await;
 
         self.watch_sync_state(&client, &sync_service, generation);
+        self.watch_activity_health();
 
         self.refresh_own_identity(&client);
 
@@ -1308,15 +1258,11 @@ impl Core {
 
         let core = self.clone();
         drop(spawn(async move {
-            let _transition = core.lock_session_transition().await;
+            let transition = core.lock_session_transition().await;
             if !core.is_current(generation) {
                 return;
             }
-            let invalidated = core
-                .session_attempt_generation
-                .fetch_add(1, Ordering::SeqCst)
-                + 1;
-            core.session_generation.store(invalidated, Ordering::SeqCst);
+            transition.invalidate();
             let session = core.take_session().await;
             let account_id = session.as_ref().map(|session| session.account_id.clone());
             if let Some(session) = session {
@@ -1372,7 +1318,7 @@ fn refresh_tag(client: &matrix_sdk::Client) -> String {
 
 fn oauth_device_delete_url(
     metadata: &AuthorizationServerMetadata,
-    device_id: &matrix_sdk::ruma::DeviceId,
+    device_id: &ruma::DeviceId,
 ) -> Result<String, RpcError> {
     use matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::{
         AccountManagementAction, AccountManagementActionData, DeviceDeleteData,
@@ -1386,11 +1332,12 @@ fn oauth_device_delete_url(
     } else {
         metadata.account_management_uri.clone()
     };
-    url.map(|url| url.to_string()).ok_or(RpcError::Unsupported)
+    url.map(|url| url.to_string())
+        .ok_or_else(|| RpcCode::Unsupported.into())
 }
 
 fn oauth_account_deactivate_url(
-    metadata: &matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::AuthorizationServerMetadata,
+    metadata: &AuthorizationServerMetadata,
 ) -> Result<String, RpcError> {
     use matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::{
         AccountManagementAction, AccountManagementActionData,
@@ -1403,7 +1350,8 @@ fn oauth_account_deactivate_url(
         // Providers can offer deletion in their portal without advertising a deep-link action.
         metadata.account_management_uri.clone()
     };
-    url.map(|url| url.to_string()).ok_or(RpcError::Unsupported)
+    url.map(|url| url.to_string())
+        .ok_or_else(|| RpcCode::Unsupported.into())
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1411,6 +1359,7 @@ const CACHE_DATABASES: [&str; 2] = ["matrix-sdk-event-cache.sqlite3", "matrix-sd
 
 #[cfg(not(target_family = "wasm"))]
 async fn reset_account_cache(account: &PersistedAccount) -> Result<(), crate::CoreError> {
+    use crate::errors::ReportExt as _;
     use matrix_sdk_base::crypto::store::CryptoStore as _;
 
     let store = std::path::Path::new(&account.store_id).join("store");
@@ -1426,14 +1375,14 @@ async fn reset_account_cache(account: &PersistedAccount) -> Result<(), crate::Co
         key.as_ref(),
     ))
     .await
-    .map_err(crate::CoreError::backend)?;
+    .backend()?;
     crypto
         .remove_custom_value(&format!(
             "sliding_sync_store::room-list::{}::instance",
             account.session.credentials.user_id()
         ))
         .await
-        .map_err(crate::CoreError::backend)?;
+        .backend()?;
     drop(crypto);
 
     search::reset_state_cache(&store, key.as_ref()).await?;
@@ -1455,7 +1404,8 @@ async fn reset_account_cache(account: &PersistedAccount) -> Result<(), crate::Co
     Ok(())
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod regression_tests {
     use crate::api::encryption::DeleteDeviceParams;
     use crate::session::{self, Credentials, PersistedAccount};
@@ -1470,7 +1420,10 @@ mod regression_tests {
     use wiremock::ResponseTemplate;
 
     use crate::{
-        CachedTimeline, Core, protocol::RpcError, session::Session, store::MemorySessionStore,
+        CachedTimeline, Core,
+        protocol::{RpcCode, RpcError},
+        session::Session,
+        store::MemorySessionStore,
     };
 
     struct DelayedSecondSave {
@@ -1503,8 +1456,6 @@ mod regression_tests {
             Ok(())
         }
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn core_with_room() -> (tempfile::TempDir, MatrixMockServer, Arc<Core>, Room) {
         let server = MatrixMockServer::new().await;
         server
@@ -1614,7 +1565,10 @@ mod regression_tests {
         .unwrap();
         assert!(matches!(
             super::oauth_account_deactivate_url(&metadata),
-            Err(RpcError::Unsupported)
+            Err(RpcError {
+                code: RpcCode::Unsupported,
+                ..
+            })
         ));
     }
 
@@ -1656,7 +1610,10 @@ mod regression_tests {
         let metadata: AuthorizationServerMetadata = serde_json::from_value(value).unwrap();
         assert!(matches!(
             super::oauth_device_delete_url(&metadata, device),
-            Err(RpcError::Unsupported)
+            Err(RpcError {
+                code: RpcCode::Unsupported,
+                ..
+            })
         ));
     }
 
@@ -1752,19 +1709,18 @@ mod regression_tests {
 
     #[tokio::test]
     async fn overlapping_failed_attempts_leave_committed_generation_unchanged() {
-        use std::sync::atomic::Ordering;
         let (core, _events) = Core::new("attempts", Box::new(MemorySessionStore::default()));
         let first = core.claim_session_generation().await;
         let second = core.claim_session_generation();
         tokio::pin!(second);
         assert!(futures_util::poll!(second.as_mut()).is_pending());
-        assert_eq!(core.session_generation.load(Ordering::SeqCst), 1);
+        assert_eq!(core.lifecycle.current(), 1);
         drop(first);
         let second = second.await;
         assert_eq!(second.value(), 3);
-        assert_eq!(core.session_generation.load(Ordering::SeqCst), 1);
+        assert_eq!(core.lifecycle.current(), 1);
         drop(second);
-        assert_eq!(core.session_generation.load(Ordering::SeqCst), 1);
+        assert_eq!(core.lifecycle.current(), 1);
     }
 
     #[tokio::test]
@@ -1782,7 +1738,7 @@ mod regression_tests {
         });
         *core.accounts.lock().await = Some(registry);
         let pending = core.claim_session_generation().await;
-        let mut rejected = matrix_sdk::ruma::api::error::UnknownTokenErrorData::new();
+        let mut rejected = ruma::api::error::UnknownTokenErrorData::new();
         rejected.soft_logout = true;
         assert!(core.handle_session_change(&matrix_sdk::SessionChange::UnknownToken(rejected), 1));
         tokio::task::yield_now().await;
@@ -1886,7 +1842,7 @@ mod regression_tests {
             device_invalidated: false,
         });
         *core.accounts.lock().await = Some(registry);
-        let rejected = matrix_sdk::ruma::api::error::UnknownTokenErrorData::new();
+        let rejected = ruma::api::error::UnknownTokenErrorData::new();
         assert!(core.handle_session_change(&matrix_sdk::SessionChange::UnknownToken(rejected), 1));
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -1906,6 +1862,43 @@ mod regression_tests {
     }
 
     #[tokio::test]
+    async fn looking_up_the_session_never_waits_for_a_pending_teardown() {
+        use futures_util::FutureExt;
+
+        let (_store, _server, core, _room) = core_with_room().await;
+        let pinned = core.session.read().await;
+        let ending = core.take_session();
+        tokio::pin!(ending);
+        assert!(futures_util::poll!(ending.as_mut()).is_pending());
+
+        assert!(
+            core.client()
+                .now_or_never()
+                .is_some_and(|client| client.is_ok())
+        );
+        assert!(core.sync_service().now_or_never().is_some());
+        drop(pinned);
+        assert!(ending.await.is_some());
+        core.client().await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn a_session_ending_while_a_room_opens_does_not_deadlock() {
+        let (_store, _server, core, _room) = core_with_room().await;
+        let opening = core.room_subscriptions.lock().await;
+        let ending = core.take_session();
+        tokio::pin!(ending);
+        assert!(futures_util::poll!(ending.as_mut()).is_pending());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), core.sync_service())
+            .await
+            .expect("opening a room must be able to read the session")
+            .unwrap();
+        drop(opening);
+        assert!(ending.await.is_some());
+    }
+
+    #[tokio::test]
     async fn becoming_active_starts_an_idle_sync_service_and_hiding_stops_it() {
         use matrix_sdk_ui::sync_service::State;
 
@@ -1915,18 +1908,11 @@ mod regression_tests {
 
         core.update_app_active(true).await;
         assert!(!matches!(sync_service.state().get(), State::Idle));
-        assert!(
-            !core
-                .sync_suspended
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(!core.activity.sync_suspended());
 
         core.update_app_active(false).await;
         assert!(matches!(sync_service.state().get(), State::Idle));
-        assert!(
-            core.sync_suspended
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(core.activity.sync_suspended());
     }
 
     #[tokio::test]
@@ -1972,7 +1958,7 @@ mod regression_tests {
     #[tokio::test]
     async fn unlocking_an_account_keeps_a_background_sync_paused() {
         use matrix_sdk_ui::sync_service::State;
-        use std::{sync::atomic::Ordering, time::Duration};
+        use std::time::Duration;
 
         let (_store, server, core, room) = core_with_room().await;
         server
@@ -1986,11 +1972,11 @@ mod regression_tests {
             .ok_json(serde_json::json!({"pos": "p", "lists": {}, "rooms": {}}))
             .mount()
             .await;
-        core.lock_account(core.session_generation.load(Ordering::SeqCst));
+        core.lock_account(core.lifecycle.current());
         core.update_app_active(false).await;
 
         tokio::time::timeout(Duration::from_secs(35), async {
-            while core.account_locked.load(Ordering::SeqCst) {
+            while core.activity.account_locked() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -2045,7 +2031,7 @@ mod regression_tests {
         let (_store, _server, core, _room) = core_with_room().await;
         let sync = core.sync_service().await.unwrap();
         sync.start().await;
-        let serial = core.activity_lock.lock().await;
+        let serial = core.activity.transition().await;
         core.set_app_active(false);
         let mut pause = std::pin::pin!(core.apply_app_activity(false));
         assert!(futures_util::poll!(&mut pause).is_pending());
@@ -2066,7 +2052,7 @@ mod regression_tests {
         core.update_app_active(true).await;
         let sync = core.sync_service().await.unwrap();
 
-        let serial = core.activity_lock.lock().await;
+        let serial = core.activity.transition().await;
         let old_revision = core.set_app_active(false);
         let old_core = core.clone();
         let old_pause = tokio::spawn(async move {
@@ -2121,7 +2107,10 @@ mod regression_tests {
         assert!(core.account_clients.lock().await.is_empty());
         assert!(matches!(
             core.call("session.restore", "{}").await,
-            Err(RpcError::Unavailable)
+            Err(RpcError {
+                code: RpcCode::Unavailable,
+                ..
+            })
         ));
     }
 
@@ -2148,8 +2137,8 @@ mod regression_tests {
                 client.clone(),
                 server.server().uri(),
                 "first".to_owned(),
-                generation.value(),
-                &crate::session::store_lease(&core.store_id).await,
+                &generation,
+                &session::store_lease(&core.store_id).await,
             )
             .await
             .unwrap();
@@ -2182,7 +2171,7 @@ mod regression_tests {
         drop(core.take_session().await);
         core.set_app_active(true);
 
-        let _activity = core.activity_lock.lock().await;
+        let _activity = core.activity.transition().await;
         let generation = core.claim_session_generation().await;
         tokio::time::timeout(
             Duration::from_secs(1),
@@ -2190,8 +2179,8 @@ mod regression_tests {
                 client,
                 server.server().uri(),
                 "first".to_owned(),
-                generation.value(),
-                &crate::session::store_lease(&core.store_id).await,
+                &generation,
+                &session::store_lease(&core.store_id).await,
             ),
         )
         .await
@@ -2223,18 +2212,15 @@ mod regression_tests {
             client,
             server.server().uri(),
             "first".to_owned(),
-            generation.value(),
-            &crate::session::store_lease(&core.store_id).await,
+            &generation,
+            &session::store_lease(&core.store_id).await,
         )
         .await
         .unwrap();
 
         let sync_service = core.sync_service().await.unwrap();
         assert!(matches!(sync_service.state().get(), State::Idle));
-        assert!(
-            core.sync_suspended
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(core.activity.sync_suspended());
     }
 
     async fn seed_search_index(
@@ -2323,10 +2309,8 @@ mod regression_tests {
         use crate::session::{AccountRegistry, Credentials, PersistedAccount, PersistedSession};
 
         let server = MatrixMockServer::new().await;
-        let base = std::env::temp_dir().join(format!(
-            "sable-offline-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("sable-offline-{}", ruma::TransactionId::new()));
         let base_id = base.to_str().unwrap().to_owned();
         let (core, _events) = Core::new(base_id.clone(), Box::new(MemorySessionStore::default()));
         let mut registry = AccountRegistry::empty();
@@ -2380,10 +2364,7 @@ mod regression_tests {
         use matrix_sdk_base::crypto::store::CryptoStore as _;
 
         let server = MatrixMockServer::new().await;
-        let base = std::env::temp_dir().join(format!(
-            "sable-reset-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let base = std::env::temp_dir().join(format!("sable-reset-{}", ruma::TransactionId::new()));
         let base_id = base.to_str().unwrap().to_owned();
         let (core, _events) = Core::new(base_id.clone(), Box::new(MemorySessionStore::default()));
         let mut registry = AccountRegistry::empty();
@@ -2555,8 +2536,7 @@ mod regression_tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
             .await
             .unwrap();
-        core.session_generation
-            .store(2, std::sync::atomic::Ordering::SeqCst);
+        core.lifecycle.set_current(2);
         let previous = core.take_session().await.unwrap();
         previous.sync_service.stop().await;
         let account = core.accounts().await.unwrap().accounts.remove(0);
@@ -2594,7 +2574,7 @@ mod regression_tests {
         server.mock_versions().ok().mount().await;
         let base = std::env::temp_dir().join(format!(
             "sable-restore-refresh-{}",
-            matrix_sdk::ruma::TransactionId::new()
+            ruma::TransactionId::new()
         ));
         let base_id = base.to_str().unwrap().to_owned();
         let (core, _events) = Core::new(base_id.clone(), Box::new(MemorySessionStore::default()));
@@ -2653,8 +2633,6 @@ mod regression_tests {
         drop(client);
         std::fs::remove_dir_all(&store_id).unwrap();
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn logged_in_core() -> (tempfile::TempDir, Arc<Core>, PersistedAccount) {
         use crate::session::{AccountRegistry, current_session};
         let (_store, server, _, room) = core_with_room().await;
@@ -2680,8 +2658,6 @@ mod regression_tests {
             )
             .is_ok_and(|tokens| tokens.is_some())
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn restorable_core() -> (
         MatrixMockServer,
         tempfile::TempDir,
@@ -2810,10 +2786,7 @@ mod regression_tests {
         })
         .await
         .unwrap_err();
-        assert_eq!(
-            core.active_session_info().await.unwrap().account_id,
-            "first"
-        );
+        assert_eq!(core.active_session_info().unwrap().account_id, "first");
         assert_eq!(core.sessions.load().await.unwrap().unwrap(), before);
         assert_eq!(std::fs::read(&path).unwrap(), b"unreadable tokens");
         assert!(!core.accounts().await.unwrap().accounts[1].needs_reauth);
@@ -2850,8 +2823,7 @@ mod regression_tests {
         core.write_registry(&registry).await.unwrap();
 
         let saved = core.sessions.load().await.unwrap().unwrap();
-        let (saved, _) =
-            crate::session::AccountRegistry::from_bytes(&saved, &core.store_id).unwrap();
+        let (saved, _) = session::AccountRegistry::from_bytes(&saved, &core.store_id).unwrap();
         let tokens = |id: &str| {
             saved
                 .accounts
@@ -2888,10 +2860,7 @@ mod regression_tests {
         assert!(!has_login_file(&base, &account));
     }
 
-    fn saved_refresh_token(
-        core: &Core,
-        account: &crate::session::PersistedAccount,
-    ) -> Option<String> {
+    fn saved_refresh_token(core: &Core, account: &PersistedAccount) -> Option<String> {
         crate::credentials::LoginTokens::new(std::path::Path::new(&core.store_id))
             .read(
                 &account.account_id,
@@ -2997,8 +2966,8 @@ mod regression_tests {
             client,
             server.server().uri(),
             "second".to_owned(),
-            generation.value(),
-            &crate::session::store_lease("unused").await,
+            &generation,
+            &session::store_lease("unused").await,
         )
         .await
         .expect_err("switch must report the failed registry write");
@@ -3012,11 +2981,7 @@ mod regression_tests {
             Some("first")
         );
         drop(generation);
-        assert_eq!(
-            core.session_generation
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(core.lifecycle.current(), 1);
     }
 
     #[tokio::test]
@@ -3058,14 +3023,16 @@ mod regression_tests {
         core.credential_writers.lock().await.remove("first");
         assert!(matches!(
             core.reload_saved_tokens("first", 1).await,
-            Err(RpcError::NotLoggedIn)
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
         ));
     }
 
     #[tokio::test]
     async fn outgoing_credentials_survive_switch_without_resurrecting_accounts() {
         use crate::session::{AccountRegistry, Credentials, PersistedAccount, current_session};
-        use std::sync::atomic::Ordering;
 
         let (_store, _server, core, room) = core_with_room().await;
         let client = room.client();
@@ -3087,7 +3054,7 @@ mod regression_tests {
             .lock()
             .await
             .insert("first".to_owned(), 1);
-        core.session_generation.store(2, Ordering::SeqCst);
+        core.lifecycle.set_current(2);
         core.persist_refreshed(&client, "example.org", "first", 1)
             .await
             .unwrap();
@@ -3141,24 +3108,57 @@ mod regression_tests {
         assert!(core.thread_timelines.lock().await.is_empty());
         assert!(matches!(
             core.thread_timeline(&room_id, &thread_root).await,
-            Err(RpcError::NotLoggedIn)
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
         ));
     }
 
     #[tokio::test]
-    async fn session_teardown_waits_for_in_flight_timeline_builders() {
+    async fn a_slow_timeline_build_blocks_neither_another_room_nor_the_teardown() {
         let (_store, server, core, room) = core_with_room().await;
-        server.mock_room_state_encryption().plain().mount().await;
-        let room_id = room.room_id().to_owned();
-        let cache = core.timelines.lock().await;
-        let mut build = std::pin::pin!(core.live_timeline(&room_id, false));
-        assert!(futures_util::poll!(build.as_mut()).is_pending());
-        drop(cache);
+        let slow = room.room_id().to_owned();
+        let fast = room_id!("!fast:example.org").to_owned();
+        server.sync_joined_room(&room.client(), &fast).await;
+        let requests = std::sync::atomic::AtomicUsize::new(0);
+        server
+            .mock_room_state_encryption()
+            .respond_with(move |_: &wiremock::Request| {
+                let response = ResponseTemplate::new(404).set_body_json(
+                    serde_json::json!({"errcode":"M_NOT_FOUND", "error":"not found"}),
+                );
+                if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    response.set_delay(std::time::Duration::from_secs(3))
+                } else {
+                    response
+                }
+            })
+            .mount()
+            .await;
 
-        let mut teardown = std::pin::pin!(core.take_session());
-        assert!(futures_util::poll!(teardown.as_mut()).is_pending());
-        build.await.unwrap();
-        assert!(teardown.await.is_some());
+        let mut slow_build = std::pin::pin!(core.live_timeline(&slow, false));
+        assert!(futures_util::poll!(slow_build.as_mut()).is_pending());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            core.live_timeline(&fast, false),
+        )
+        .await
+        .expect("another room must open while one builds")
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), core.take_session())
+            .await
+            .expect("the teardown must not wait for a build")
+            .unwrap();
+
+        assert!(matches!(
+            slow_build.await,
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
+        ));
         assert!(core.timelines.lock().await.is_empty());
     }
 
@@ -3253,11 +3253,23 @@ mod regression_tests {
                 None,
             )
             .await;
-        assert!(matches!(scheduled, Err(RpcError::Denied)), "{scheduled:?}");
+        assert!(
+            matches!(
+                scheduled,
+                Err(RpcError {
+                    code: RpcCode::Denied,
+                    ..
+                })
+            ),
+            "{scheduled:?}"
+        );
         assert!(matches!(
             core.set_bookmark(&room_id, &event_id!("$secret").to_owned(), true, 1000)
                 .await,
-            Err(RpcError::Denied)
+            Err(RpcError {
+                code: RpcCode::Denied,
+                ..
+            })
         ));
         assert!(matches!(
             core.join_call(
@@ -3267,7 +3279,10 @@ mod regression_tests {
                 None
             )
             .await,
-            Err(RpcError::Denied)
+            Err(RpcError {
+                code: RpcCode::Denied,
+                ..
+            })
         ));
 
         let requests = server.server().received_requests().await.unwrap();

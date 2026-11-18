@@ -1,133 +1,6 @@
-import type { Preferences } from '#lib/settings/preferences.svelte.js';
+import { ACCOUNT_PREFERENCES } from '#lib/settings/definitions.js';
 import { parseRuntimeConfig, type RuntimeConfig } from './runtime-config.js';
 import { isRecord } from '#lib/guards.js';
-
-// Any homeserver can set these, keep endpoints, telemetry and E2EE settings out.
-export const ACCOUNT_PREFERENCES = [
-  'language',
-  'layout',
-  'threadPresentation',
-  'alignOwnMessages',
-  'avatarsInMessageHeaders',
-  'messageSpacing',
-  'timelineEmoteSize',
-  'theme',
-  'fontFamily',
-  'fontFamilyMono',
-  'codeLigatures',
-  'underlineLinks',
-  'renderRoomColors',
-  'renderProfileColors',
-  'reducedMotion',
-  'pageZoom',
-  'textScale',
-  'highContrast',
-  'alwaysShowAltText',
-  'twitterEmoji',
-  'pixelatedImages',
-  'nameColorCorrection',
-  'showRoomIcon',
-  'showRoomBanners',
-  'showDmTopics',
-  'roomBannerHeight',
-  'subspaceHierarchyLimit',
-  'showHome',
-  'restoreLastRoom',
-  'showSearch',
-  'showUnreadCounts',
-  'badgeCountDMsOnly',
-  'showEasterEggs',
-  'showPingCounts',
-  'showUnreadDots',
-  'uniformIcons',
-  'tintRoomIcons',
-  'showSpaceEvents',
-  'hour24Clock',
-  'dateFormat',
-  'timeZone',
-  'weekStart',
-  'hideMembershipEvents',
-  'hideProfileChanges',
-  'hideTopicChanges',
-  'hideMemberInReadOnly',
-  'showTombstoneEvents',
-  'openRoomsAtUnread',
-  'jumpToLatestOnSend',
-  'hideReadReceipts',
-  'readReceiptPlacement',
-  'replyPreviewStyle',
-  'captionPosition',
-  'usernameClick',
-  'doubleTapReact',
-  'messageSwipeAction',
-  'showSingleReactionCount',
-  'showAllTimestamps',
-  'showRoleTooltip',
-  'hideMessageShields',
-  'doubleTapReaction',
-  'hideTypingIndicators',
-  'memberSort',
-  'roomSort',
-  'directSort',
-  'groupMembersByPresence',
-  'filterPronounsByLanguage',
-  'showPronouns',
-  'showPronounPills',
-  'pronounPillLimit',
-  'pronounPillLength',
-  'composerForm',
-  'alwaysInlineEditor',
-  'enterForNewline',
-  'sedEdits',
-  'inlineEditing',
-  'mentionInReplies',
-  'formattingToolbar',
-  'composerFormatButton',
-  'richTextComposer',
-  'composerSpellcheck',
-  'composerAutocapitalize',
-  'emoticonToEmoji',
-  'composerGifButton',
-  'composerStickerButton',
-  'composerEmoteButton',
-  'composerVoiceButton',
-  'composerButtonOrder',
-  'sendAttachmentAsCaption',
-  'sendAttachmentsAsGallery',
-  'personaPicker',
-  'personaPickerSortOrder',
-  'personaPickerLeftSide',
-  'personaProxying',
-  'personaSelectionScope',
-  'personaKeepAfterShorthand',
-  'personaFallback',
-  'personaGrid',
-  'personaAlternateAvatar',
-  'sendTypingNotifications',
-  'sendReadReceipts',
-  'sendPresence',
-  'blurMedia',
-  'blurAvatars',
-  'blurEmotes',
-  'loadingAnimal',
-  'mediaAutoLoad',
-  'autoplayGifs',
-  'pauseAnimationsWhenInactive',
-  'autoplayStickers',
-  'urlPreviews',
-  'themeFileCards',
-  'badgeDefaultDirect',
-  'badgeDefaultGroup',
-  'notifyOnce',
-  'highlightMentions',
-  'faviconForMentionsOnly',
-  'ringForGroupCalls',
-  'alwaysShowCallButton',
-  'callScreenPreview',
-  'incomingCallSound',
-  'outgoingRingback',
-  'profileChangePropagation',
-] as const satisfies readonly (keyof Preferences)[];
 
 export type AccountConfig = {
   branding?: Partial<RuntimeConfig['branding']>;
@@ -139,6 +12,9 @@ export type AccountConfig = {
   settingsLocked?: Record<string, unknown>;
 };
 
+const THEME_KEYS = ['themeUrl', 'lightThemeUrl', 'darkThemeUrl'] as const;
+const NO_THEME = { themeUrl: null, lightThemeUrl: null, darkThemeUrl: null };
+
 export function parseAccountConfig(raw: unknown, source: string): AccountConfig | null {
   if (!isRecord(raw)) return null;
   const input: Record<string, unknown> = {
@@ -146,7 +22,7 @@ export function parseAccountConfig(raw: unknown, source: string): AccountConfig 
     ...(isRecord(raw.branding) ? { branding: { ...raw.branding } } : {}),
   };
   if (isRecord(input.branding)) {
-    for (const key of ['logoUrl', 'faviconUrl', 'themeUrl']) {
+    for (const key of ['logoUrl', 'faviconUrl', ...THEME_KEYS]) {
       const value = input.branding[key];
       if (typeof value !== 'string') continue;
       try {
@@ -209,7 +85,11 @@ export function mergeAccountConfig(
   return {
     ...base,
     ...account,
-    branding: { ...base.branding, ...account.branding },
+    branding: {
+      ...base.branding,
+      ...(THEME_KEYS.some((key) => account.branding && key in account.branding) ? NO_THEME : {}),
+      ...account.branding,
+    },
     links: { ...base.links, ...account.links },
     auth: {
       ...base.auth,

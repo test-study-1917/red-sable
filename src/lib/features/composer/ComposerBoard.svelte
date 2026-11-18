@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { currentDirection, inlineKey } from '#lib/language.svelte.js';
   import type { ImageUsageView, PackImageView } from '#src/generated/protocol';
   import { mergeProps, Popover } from 'bits-ui';
   import { tick, type Snippet } from 'svelte';
@@ -12,12 +13,8 @@
   import { rememberGif } from '#lib/gif/favorites.svelte.js';
   import { gifSearchAvailable, type GifResult, type GifsConfig } from '#lib/gif/providers.js';
   import { i18n } from '#lib/i18n.js';
-  import {
-    isComposerSeparator,
-    preferences,
-    setPreference,
-    type ComposerButton,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { isComposerSeparator, type ComposerButton } from '#lib/settings/definitions.js';
   import { createDragList, type DropInstruction, type DropState } from '#lib/ui/drag-list.js';
   import BottomSheet from '#lib/ui/primitives/BottomSheet.svelte';
   import EmoteBoard from '#lib/ui/primitives/EmoteBoard.svelte';
@@ -67,6 +64,7 @@
   let dropState = $state.raw<DropState<ComposerButton> | null>(null);
   let announcement = $state('');
   let config = $state.raw<GifsConfig | null>(null);
+  let serviceUrl = $state<string | null>(null);
   let anchor = $state<HTMLElement | null>(null);
   const triggerElements = $state<Partial<Record<BoardTab, HTMLButtonElement>>>({});
 
@@ -78,7 +76,9 @@
   $effect(() => {
     let cancelled = false;
     void runtimeConfig().then((loaded) => {
-      if (!cancelled) config = loaded.gifs;
+      if (cancelled) return;
+      config = loaded.gifs;
+      serviceUrl = loaded.embeds.serviceUrl;
     });
     return () => {
       cancelled = true;
@@ -86,8 +86,11 @@
   });
 
   let gifs = $derived(
-    onPickGif && config && gifSearchAvailable(config, preferences.gifProvider)
-      ? { config, providerSetting: preferences.gifProvider }
+    onPickGif &&
+      config &&
+      serviceUrl !== null &&
+      gifSearchAvailable(config, preferences.gifProvider, preferences.reuploadGifs)
+      ? { config, serviceUrl, providerSetting: preferences.gifProvider }
       : null
   );
 
@@ -215,7 +218,7 @@
 
     const source = selectedForReorder ?? id;
     const index = triggers.indexOf(source);
-    const offset = event.key === 'ArrowLeft' ? -1 : 1;
+    const offset = inlineKey(event.key) === 'ArrowLeft' ? -1 : 1;
     const target = triggers[index + offset];
     if (target === undefined) return;
 
@@ -336,7 +339,7 @@
   {#each triggers as id (id)}
     {@render boardSlot(id)}
   {/each}
-  {#if reorderable}<span class="sr-only" role="status">{announcement}</span>{/if}
+  {#if reorderable}<span class="screen-reader-only" role="status">{announcement}</span>{/if}
 {/snippet}
 
 {#if desktop}
@@ -344,6 +347,7 @@
     {@render boardSlots()}
     <Popover.Portal>
       <Popover.Content
+        dir={currentDirection()}
         class="composer-board"
         {...overlayLayer()}
         side="top"
@@ -502,14 +506,5 @@
 
   :global(.composer-board-slot.is-reorderable button) {
     cursor: grab;
-  }
-
-  .sr-only {
-    clip-path: inset(50%);
-    height: 1px;
-    overflow: hidden;
-    position: absolute;
-    white-space: nowrap;
-    width: 1px;
   }
 </style>

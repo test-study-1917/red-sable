@@ -21,7 +21,7 @@ import {
   type UtilityProcess,
   type WebFrameMain,
 } from 'electron';
-import { createReadStream, existsSync, readFileSync } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -40,13 +40,14 @@ import type {
 import { deepLinksIn, deepLinkSchemes } from './deep-links';
 import { AuthLoopback } from './auth-loopback';
 import { CallShortcuts, validBindings } from './call-shortcuts';
-import { AuthWindows } from './auth-window';
 import { autostartAvailable, setLaunchAtLogin } from './autostart';
+import { installMethod } from './install-method';
 import { registerContextMenu } from './context-menu';
 import { claimSchemes } from './linux-schemes';
-import { historyDirection, openExternal, originOf } from './navigation';
+import { historyDirection, openAppLink, openExternal, originOf } from './navigation';
 import { enforcePermissions } from './permissions';
 import { flushWritesBeforeQuit, writeJson } from './persistence';
+import { spellCheckerLanguages } from './spellcheck';
 import { writeDownload } from './downloads';
 import { shareFile } from './share';
 import { readThemeFile } from './theme-files';
@@ -335,31 +336,9 @@ function deliverDeepLinks(urls: string[]): void {
   else pendingDeepLinks.push(...urls);
 }
 
-const authWindows = new AuthWindows();
-
 const authLoopback = new AuthLoopback((url) => {
   deliverDeepLinks([url]);
   showMainWindow();
-});
-
-ipcMain.handle('sable-auth-open', async (event, id: string, url: string) => {
-  if (!isAppFrame(event.senderFrame) || event.sender !== mainWindow?.webContents) {
-    throw new Error('Invalid authentication origin');
-  }
-  if (typeof id !== 'string' || typeof url !== 'string') {
-    throw new Error('Invalid authentication request');
-  }
-  await authWindows.open(mainWindow, id, url);
-});
-
-ipcMain.handle('sable-auth-close', (event, id: string) => {
-  if (
-    isAppFrame(event.senderFrame) &&
-    event.sender === mainWindow?.webContents &&
-    typeof id === 'string'
-  ) {
-    authWindows.close(id);
-  }
 });
 
 ipcMain.handle('sable-auth-external', async (event, url: string) => {
@@ -576,7 +555,12 @@ ipcMain.on('sable-window-close', (event) => windowOf(event)?.close());
 ipcMain.handle('sable-window-is-maximized', (event) => windowOf(event)?.isMaximized() ?? false);
 
 ipcMain.on('sable-core-connect', (event) => {
-  if (event.ports.length !== 1 || !isAppFrame(event.senderFrame)) return;
+  if (
+    event.ports.length !== 1 ||
+    !isAppFrame(event.senderFrame) ||
+    event.sender !== mainWindow?.webContents
+  )
+    return;
   core ??= startCore();
   core.postMessage('connect', event.ports);
 });
@@ -829,6 +813,11 @@ ipcMain.handle('sable-share-file', async (event, request: unknown) => {
   await shareFile(window, app.getPath('userData'), request);
 });
 
+ipcMain.handle('sable-open-app-link', async (event, url: unknown) => {
+  if (!isAppFrame(event.senderFrame)) throw new Error('Invalid link origin');
+  await openAppLink(url);
+});
+
 function cancelPicks(): void {
   for (const resolve of pendingPicks.values()) resolve(null);
   pendingPicks.clear();
@@ -902,7 +891,8 @@ function registerScreenShare(): void {
 function registerDeepLinks(): void {
   if (isLinux) {
     // Flatpak, deb, rpm and Nix install a desktop entry that declares the schemes.
-    if (process.env.FLATPAK_ID || existsSync(join(resourcesDir, 'package-type'))) return;
+    const method = installMethod();
+    if (method !== 'appimage' && method !== 'unpacked') return;
     void claimSchemes(join(xdgDataHome(), 'applications'), IDENTIFIER, DEEP_LINK_SCHEMES);
   } else if (app.isPackaged) {
     for (const scheme of DEEP_LINK_SCHEMES) {
@@ -971,13 +961,10 @@ if (!app.requestSingleInstanceLock()) {
     );
     registerScreenShare();
     if (process.platform !== 'darwin') {
-      const available = new Set(session.defaultSession.availableSpellCheckerLanguages);
-      const languages = app
-        .getPreferredSystemLanguages()
-        .flatMap((language) => [language, language.split('-')[0]])
-        .filter(
-          (language, index, all) => available.has(language) && all.indexOf(language) === index
-        );
+      const languages = spellCheckerLanguages(
+        app.getPreferredSystemLanguages(),
+        session.defaultSession.availableSpellCheckerLanguages
+      );
       if (languages.length > 0) session.defaultSession.setSpellCheckerLanguages(languages);
     }
     registerUpdater(isAppFrame);

@@ -236,7 +236,7 @@ test('client-side embeds alone preview without asking the homeserver', async () 
     url: 'https://example.org/c1',
     client: true,
     service: 'https://embeds.test',
-    klipy_api_key: null,
+    tunnel: true,
   });
   expect(screen.getByRole('link', { name: /Example/ })).toBeInTheDocument();
 });
@@ -251,14 +251,7 @@ test('the homeserver is asked only when the client side has no answer', async ()
   await settle();
 
   expect(core.rpc.messages.urlPreview.mock.calls).toEqual([
-    [
-      {
-        url: 'https://example.org/c2',
-        client: true,
-        service: 'https://embeds.test',
-        klipy_api_key: null,
-      },
-    ],
+    [{ url: 'https://example.org/c2', client: true, service: 'https://embeds.test', tunnel: true }],
     [{ url: 'https://example.org/c2', service: null }],
   ]);
   expect(screen.getByRole('link', { name: /Example/ })).toBeInTheDocument();
@@ -586,6 +579,53 @@ test('the theme colour becomes the card accent and a summary card is compact', a
   expect((card as HTMLElement).style.getPropertyValue('--link-preview-accent')).toBe('#ff4500');
 });
 
+test.each([
+  ['image/gif', 'https://site.example/cat.gif'],
+  ['image/webp', 'https://klipy.com/gifs/goatplaybanjo-chat-4'],
+])('a square %s GIF preview fills the card instead of a side thumbnail', async (mime, url) => {
+  preferences.clientEmbeds = true;
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url,
+      image: 'mxc://example.org/gif',
+      image_mime: mime,
+      image_width: 220,
+      image_height: 229,
+    })
+  );
+  const { container } = render(LinkPreviewCard, { url, encrypted: false });
+
+  await tick();
+  await Promise.resolve();
+  await tick();
+
+  expect(container.querySelector('.link-preview')).not.toHaveClass('compact');
+});
+
+test('a GIF card image is treated as a GIF, so it follows the autoplay setting', async () => {
+  preferences.clientEmbeds = true;
+  preferences.autoplayGifs = false;
+  const url = 'https://klipy.com/gifs/goatplaybanjo-chat-4';
+  core.rpc.messages.urlPreview.mockResolvedValue(
+    preview({
+      url,
+      title: 'Chatty Cat',
+      image: 'mxc://example.org/gif',
+      image_mime: 'image/webp',
+      image_width: 220,
+      image_height: 229,
+    })
+  );
+  const { container } = render(LinkPreviewCard, { url, encrypted: false });
+
+  await tick();
+  await Promise.resolve();
+  await tick();
+
+  expect(container.querySelector('.link-preview .gif-preview-source')).not.toBeNull();
+  preferences.autoplayGifs = true;
+});
+
 test('a GIF video preview loops muted without controls or a play button', async () => {
   preferences.urlPreviews = true;
   core.rpc.messages.urlPreview.mockResolvedValue(
@@ -615,3 +655,38 @@ test('a GIF video preview loops muted without controls or a play button', async 
   expect(video).not.toHaveAttribute('controls');
   expect(screen.queryByRole('button', { name: /Play/ })).toBeNull();
 });
+
+test.each([
+  'https://tenor.com/view/anime-nichijou-sigh-gif-12179345',
+  'https://giphy.com/gifs/cat',
+])(
+  'a GIF host video preview autoplays muted without controls or a play button: %s',
+  async (url) => {
+    preferences.urlPreviews = true;
+    core.rpc.messages.urlPreview.mockResolvedValue(
+      preview({
+        url,
+        title: 'A gif',
+        site_name: 'Tenor',
+        image: 'mxc://example.org/poster',
+        image_mime: 'image/webp',
+        video: {
+          source: 'mxc://example.org/clip',
+          mime: 'video/mp4',
+          width: 480,
+          height: 480,
+          gif: false,
+        },
+      })
+    );
+    const { container } = render(LinkPreviewCard, { url, encrypted: false });
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('video')).not.toBeNull();
+    });
+    const video = container.querySelector('video');
+    expect(video).toHaveAttribute('loop');
+    expect(video).not.toHaveAttribute('controls');
+    expect(screen.queryByRole('button', { name: /Play/ })).toBeNull();
+  }
+);

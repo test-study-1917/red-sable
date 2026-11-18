@@ -1,3 +1,4 @@
+use crate::errors::CoreResultExt as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -7,7 +8,7 @@ use matrix_sdk_ui::notification_client::NotificationProcessSetup;
 use serde::{Deserialize, Serialize};
 
 use super::{Handler, Json};
-use crate::protocol::{RpcError, DefaultNotificationModesView, EventNotificationView, EventNotificationsView, InboxItemView, KeywordNotificationView, MentionNotificationModeView, MentionNotificationsView, MentionRuleView, NotificationModeView, NotificationSettingsView, NotificationView, PushFetchView};
+use crate::protocol::{RpcCode, RpcError, DefaultNotificationModesView, EventNotificationView, EventNotificationsView, InboxItemView, KeywordNotificationView, MentionNotificationModeView, MentionNotificationsView, MentionRuleView, NotificationModeView, NotificationSettingsView, NotificationView, PushFetchView};
 use crate::{Core, ResultExt, notifications, push_rules};
 
 domain! {
@@ -206,11 +207,11 @@ impl Handler for AddKeywordParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
         let writes = push_rules::plan_add_keyword(&rules.snapshot().await, &self.keyword)
-            .or_failed(core, "add_notification_keyword")?;
+            .or_report(core, "add_notification_keyword")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "add_notification_keyword")?;
+            .or_report(core, "add_notification_keyword")?;
 
         Ok(())
     }
@@ -233,7 +234,7 @@ impl Handler for RemoveKeywordParams {
                 &self.keyword,
             ))
             .await
-            .or_failed(core, "remove_notification_keyword")?;
+            .or_report(core, "remove_notification_keyword")?;
 
         Ok(())
     }
@@ -258,7 +259,7 @@ impl Handler for SetKeywordModeParams {
                 self.mode,
             ))
             .await
-            .or_failed(core, "set_notification_keyword_mode")?;
+            .or_report(core, "set_notification_keyword_mode")?;
 
         Ok(())
     }
@@ -310,7 +311,7 @@ impl Handler for SetRoomsNotificationModeParams {
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_rooms_notification_mode")?;
+            .or_report(core, "set_rooms_notification_mode")?;
 
         Ok(())
     }
@@ -328,19 +329,13 @@ impl Handler for SetDefaultModeParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
-        if self.direct {
-            return rules
-                .set_direct_default(self.mode)
-                .await
-                .or_failed(core, "set_default_notification_mode");
-        }
         let before = rules.snapshot().await;
         let writes = push_rules::plan_default_mode(&before, self.direct, self.mode)
-            .or_failed(core, "set_default_notification_mode")?;
+            .or_report(core, "set_default_notification_mode")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_default_notification_mode")?;
+            .or_report(core, "set_default_notification_mode")?;
 
         Ok(())
     }
@@ -359,11 +354,11 @@ impl Handler for SetMentionNotificationsParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let rules = core.push_rules().await?;
         let writes = push_rules::plan_mention(&rules.snapshot().await, self.rule, self.mode)
-            .or_failed(core, "set_mention_notifications")?;
+            .or_report(core, "set_mention_notifications")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_mention_notifications")?;
+            .or_report(core, "set_mention_notifications")?;
 
         Ok(())
     }
@@ -381,15 +376,15 @@ impl Handler for SetEventNotificationParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let client = core.client().await?;
-        let user_id = client.user_id().ok_or(RpcError::NotLoggedIn)?;
+        let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?;
         let rules = core.push_rules().await?;
         let writes =
             push_rules::plan_event(&rules.snapshot().await, self.event, self.enabled, user_id)
-                .or_failed(core, "set_event_notification")?;
+                .or_report(core, "set_event_notification")?;
         rules
             .apply(writes)
             .await
-            .or_failed(core, "set_event_notification")?;
+            .or_report(core, "set_event_notification")?;
 
         Ok(())
     }
@@ -409,7 +404,7 @@ impl Handler for SetMasterMuteParams {
             .await?
             .apply(push_rules::plan_master(self.muted))
             .await
-            .or_failed(core, "set_master_mute")?;
+            .or_report(core, "set_master_mute")?;
 
         Ok(())
     }
@@ -505,6 +500,7 @@ pub struct SetOptionsParams {
     pub encrypted_content: bool,
     pub sounds: bool,
     pub notify_once: bool,
+    pub in_app_banners: bool,
 }
 
 impl Handler for SetOptionsParams {
@@ -520,6 +516,8 @@ impl Handler for SetOptionsParams {
         core.notification_sounds
             .store(self.sounds, Ordering::Relaxed);
         core.notify_once.store(self.notify_once, Ordering::Relaxed);
+        core.in_app_banners
+            .store(self.in_app_banners, Ordering::Relaxed);
 
         std::future::ready(Ok(()))
     }
@@ -561,7 +559,7 @@ impl Handler for SetPushRuleEnabledParams {
                 enabled: self.enabled,
             }])
             .await
-            .or_failed(core, "set_push_rule_enabled")
+            .or_report(core, "set_push_rule_enabled")
     }
 }
 
@@ -587,7 +585,7 @@ impl Handler for SetPushRuleActionsParams {
                 actions: self.actions,
             }])
             .await
-            .or_failed(core, "set_push_rule_actions")
+            .or_report(core, "set_push_rule_actions")
     }
 }
 
@@ -609,7 +607,7 @@ impl Handler for AddPushRuleParams {
             .await?
             .apply(vec![push_rules::RuleWrite::Put(rule)])
             .await
-            .or_failed(core, "add_push_rule")
+            .or_report(core, "add_push_rule")
     }
 }
 
@@ -632,6 +630,6 @@ impl Handler for DeletePushRuleParams {
                 rule_id: self.rule_id,
             }])
             .await
-            .or_failed(core, "delete_push_rule")
+            .or_report(core, "delete_push_rule")
     }
 }

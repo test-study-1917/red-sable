@@ -17,6 +17,7 @@ import {
   ungroupedFavourites,
 } from '#lib/rooms/favourite-grouping.svelte.js';
 import { adoptQueue, parseQueue, scheduledQueue } from '#lib/composer/scheduled-queue.svelte.js';
+import { adoptBridgedSpaces, bridgedSpaces } from '#lib/rooms/bridged-spaces.svelte.js';
 import { adoptQuietRooms, parseQuietRooms, quietRooms } from '#lib/rooms/quiet-rooms.svelte.js';
 import {
   parseShortcodes,
@@ -46,6 +47,7 @@ let excludedThemeIds: readonly string[] = [];
 
 export const settingsDocument: SyncedDocument = {
   eventType: SETTINGS_ACCOUNT_DATA_TYPE,
+  sealed: true,
 
   snapshot() {
     const prepared = prepareSettings(preferences, customThemes, isExplicitPreference);
@@ -79,6 +81,7 @@ export const settingsDocument: SyncedDocument = {
 export function workspaceDocument(sidebar: SpaceSidebar): SyncedDocument {
   return {
     eventType: WORKSPACE_ACCOUNT_DATA_TYPE,
+    sealed: true,
 
     snapshot: () => ({
       content: {
@@ -90,6 +93,7 @@ export function workspaceDocument(sidebar: SpaceSidebar): SyncedDocument {
         openFolders: [...sidebar.openFolders],
         ungroupedFavourites: ungroupedFavourites(),
         quietRooms: quietRooms(),
+        bridgedSpaces: bridgedSpaces(),
       },
     }),
 
@@ -103,17 +107,23 @@ export function workspaceDocument(sidebar: SpaceSidebar): SyncedDocument {
           Object.keys(roomIconOverrides()).length === 0 &&
           sidebar.openFolders.size === 0 &&
           ungroupedFavourites().length === 0 &&
-          quietRooms().length === 0
+          quietRooms().length === 0 &&
+          bridgedSpaces().length === 0
         );
       }
 
-      writeRecentStickers(parseShortcodes(body.recentStickers));
-      adoptFavorites(parseFavorites(body.favoriteGifs));
-      adoptRecentGifs(parseFavorites(body.recentGifs));
-      adoptRoomIconOverrides(parseRoomIconOverrides(body.roomIcons));
-      sidebar.adoptOpenFolders(stringList(body.openFolders));
-      adoptUngroupedFavourites(parseUngroupedFavourites(body.ungroupedFavourites));
-      adoptQuietRooms(parseQuietRooms(body.quietRooms));
+      // a missing field comes from a build that does not write it, so the local value stays
+      const has = (field: string): boolean => field in body;
+      if (has('recentStickers')) writeRecentStickers(parseShortcodes(body.recentStickers));
+      if (has('favoriteGifs')) adoptFavorites(parseFavorites(body.favoriteGifs));
+      if (has('recentGifs')) adoptRecentGifs(parseFavorites(body.recentGifs));
+      if (has('roomIcons')) adoptRoomIconOverrides(parseRoomIconOverrides(body.roomIcons));
+      if (has('openFolders')) sidebar.adoptOpenFolders(stringList(body.openFolders));
+      if (has('ungroupedFavourites')) {
+        adoptUngroupedFavourites(parseUngroupedFavourites(body.ungroupedFavourites));
+      }
+      if (has('quietRooms')) adoptQuietRooms(parseQuietRooms(body.quietRooms));
+      if (has('bridgedSpaces')) adoptBridgedSpaces(stringList(body.bridgedSpaces));
       return true;
     },
   };
@@ -144,6 +154,7 @@ export function draftsDocumentFor(accountId: string): SyncedDocument {
 export function scheduledDocumentFor(accountId: string): SyncedDocument {
   return {
     eventType: SCHEDULED_ACCOUNT_DATA_TYPE,
+    sealed: true,
 
     snapshot: () => ({ content: { v: DOCUMENT_VERSION, scheduled: scheduledQueue(accountId) } }),
 

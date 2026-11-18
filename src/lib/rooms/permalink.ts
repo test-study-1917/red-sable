@@ -1,4 +1,7 @@
+import { serverNameOf } from '#lib/matrix-id.js';
+import { t } from '#lib/i18n.js';
 import { copyText } from '#lib/platform/clipboard.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 import { resolve } from '$app/paths';
 
 import type { RoomListItemView } from '#src/generated/protocol';
@@ -10,11 +13,14 @@ import { matrixLinkAction, matrixLinkParameters, parseMatrixLink } from '#lib/ro
 
 import { findRoomByPathId, roomPathParam, roomPathParamFromId } from './room-list.svelte';
 
-function parentSpaceOf(
-  rooms: readonly RoomListItemView[],
-  roomId: string
-): RoomListItemView | undefined {
-  return rooms.find(
+let sidebarOrder: readonly string[] = [];
+
+export function setSidebarSpaceOrder(order: readonly string[]): void {
+  sidebarOrder = order;
+}
+
+function parentSpacesOf(rooms: readonly RoomListItemView[], roomId: string): RoomListItemView[] {
+  return rooms.filter(
     (space) =>
       space.room_kind === 'space' &&
       space.state === 'joined' &&
@@ -25,32 +31,47 @@ function parentSpaceOf(
 
 function rootSpaceOf(
   rooms: readonly RoomListItemView[],
-  roomId: string
+  roomId: string,
+  spaceOrder: readonly string[]
 ): RoomListItemView | undefined {
   const seen = new Set<string>([roomId]);
-  let space = parentSpaceOf(rooms, roomId);
-
-  while (space !== undefined && !seen.has(space.room_id)) {
-    seen.add(space.room_id);
-    const parent = parentSpaceOf(rooms, space.room_id);
-    if (parent === undefined) return space;
-    space = parent;
+  const roots: RoomListItemView[] = [];
+  let frontier = parentSpacesOf(rooms, roomId);
+  while (frontier.length > 0) {
+    const next: RoomListItemView[] = [];
+    for (const space of frontier) {
+      if (seen.has(space.room_id)) continue;
+      seen.add(space.room_id);
+      const parents = parentSpacesOf(rooms, space.room_id);
+      const unseen = parents.filter((parent) => !seen.has(parent.room_id));
+      if (parents.length === 0) roots.push(space);
+      else if (unseen.length === 0) roots.push(...parents.filter((parent) => parent !== space));
+      else next.push(...unseen);
+    }
+    frontier = next;
   }
-
-  return space;
+  const rank = (space: RoomListItemView): number => {
+    const index = spaceOrder.indexOf(space.room_id);
+    return index < 0 ? spaceOrder.length : index;
+  };
+  return roots.reduce<RoomListItemView | undefined>(
+    (best, space) => (best === undefined || rank(space) < rank(best) ? space : best),
+    undefined
+  );
 }
 
 /** Mirrors RoomNav's sectioning, so a permalink lands where the sidebar links. */
 function sectionPath(
   rooms: readonly RoomListItemView[],
   room: RoomListItemView | undefined,
-  roomParam: string
+  roomParam: string,
+  spaceOrder: readonly string[]
 ): string {
   if (room?.room_kind === 'space')
     return resolve('/(app)/space/[spaceId]/lobby', { spaceId: roomParam });
   if (room?.is_direct) return resolve('/(app)/direct/[roomId]', { roomId: roomParam });
 
-  const parentSpace = room ? rootSpaceOf(rooms, room.room_id) : undefined;
+  const parentSpace = room ? rootSpaceOf(rooms, room.room_id, spaceOrder) : undefined;
   if (parentSpace) {
     return resolve('/(app)/space/[spaceId]/[roomId]', {
       spaceId: roomPathParam(parentSpace, rooms),
@@ -73,7 +94,8 @@ export function roomSectionPath(
   const base = sectionPath(
     rooms,
     room,
-    room ? roomPathParam(room, rooms) : roomPathParamFromId(roomIdOrAlias)
+    room ? roomPathParam(room, rooms) : roomPathParamFromId(roomIdOrAlias),
+    sidebarOrder
   );
 
   const query = new URLSearchParams();
@@ -98,14 +120,12 @@ export async function joinVia(
   via: readonly string[],
   parentId: string | null
 ): Promise<string[]> {
-  const own = core.session?.user_id.split(':').slice(1).join(':');
+  const own = core.session ? serverNameOf(core.session.user_id) : undefined;
   if (parentId === null || via.some((server) => server !== own)) return [...via];
   return [...via, ...(await core.rpc.rooms.viaServers({ room_id: parentId }))];
 }
 
-/**
- * A matrix.to link others can follow; a room id needs `via` to be routable.
- */
+/** Room ids need `via` to be routable; aliases resolve on their own. */
 export function matrixToUrl(
   address: string,
   via: readonly string[],
@@ -119,31 +139,45 @@ export function matrixToUrl(
   const query = new URLSearchParams(
     viaFor(address, via).map((server) => ['via', server])
   ).toString();
-  return `https://matrix.to/#/${path}${query === '' ? '' : `?${query}`}`;
+  return `https://link.sable.moe/#/${path}${query === '' ? '' : `?${query}`}`;
+}
+
+export function matrixEventUri(roomId: string, eventId: string, via: readonly string[]): string {
+  const query = new URLSearchParams(via.map((server) => ['via', server])).toString();
+  const path = `roomid/${encodeURIComponent(roomId.slice(1))}/e/${encodeURIComponent(eventId.slice(1))}`;
+  return `matrix:${path}${query === '' ? '' : `?${query}`}`;
 }
 
 export async function copyRoomLink(
   core: Pick<CoreClient, 'rpc'>,
   room: Pick<RoomListItemView, 'room_id' | 'canonical_alias'>,
-  eventId?: string | null
+  eventId?: string | null,
+  format: 'matrix' | 'external' = 'external'
 ): Promise<boolean> {
   try {
-    const via = room.canonical_alias
-      ? []
-      : await core.rpc.rooms.viaServers({ room_id: room.room_id });
-    await copyText(matrixToUrl(room.canonical_alias ?? room.room_id, via, eventId));
-    return true;
+    const via =
+      room.canonical_alias && !eventId
+        ? []
+        : await core.rpc.rooms.viaServers({ room_id: room.room_id });
+    await copyText(
+      eventId && format === 'matrix'
+        ? matrixEventUri(room.room_id, eventId, via)
+        : matrixToUrl(eventId ? room.room_id : (room.canonical_alias ?? room.room_id), via, eventId)
+    );
   } catch (error) {
     console.debug('[sable room] copy link failed', error);
+    toasts.error(t('errors.copyFailed'));
     return false;
   }
+  toasts.info(t('timeline.linkCopied'));
+  return true;
 }
 
 /** A room link resolves to a route; a user link has no route of its own. */
 export type PermalinkTarget = { kind: 'room'; path: string } | { kind: 'user'; userId: string };
 
 /**
- * Resolves the tail of a `/to/...` URL, still percent-encoded so the matrix.to parser decodes it.
+ * Resolves the tail of a `/to/...` URL, still percent-encoded so the permalink parser decodes it.
  */
 export function permalinkTarget(
   rooms: readonly RoomListItemView[],
@@ -151,7 +185,7 @@ export function permalinkTarget(
 ): PermalinkTarget | null {
   // `?via=` sits inside the fragment, where it would otherwise be parsed as
   // part of the last id.
-  const { href, via } = splitVia(`https://matrix.to/#/${encodedFragment}`);
+  const { href, via } = splitVia(`https://link.sable.moe/#/${encodedFragment}`);
   const link = parseMatrixLink(href);
   if (link === null) return null;
   if (link.kind === 'user') return { kind: 'user', userId: link.user_id };

@@ -38,12 +38,15 @@ vi.mock('#lib/features/room/messages/message-scope.svelte.js', async () => {
     setPinned: () => Promise.resolve([]),
   });
   return {
-    useRoomScopes: () => ({ acquire: () => ({ cosmetics: null, pinned, release: vi.fn() }) }),
+    useRoomScopes: () => ({
+      acquire: () => ({ cosmetics: { for: () => null }, pinned, release: vi.fn() }),
+    }),
   };
 });
 
 import ForumThreadItemHarness from './ForumThreadItemHarness.test.svelte';
-import type { ForumThread } from './forum-threads';
+import { collectForumThreads, type ForumThread } from './forum-threads';
+import ForumThreadList from './ForumThreadListHarness.test.svelte';
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
 
 const root = withRowFields({
@@ -73,6 +76,7 @@ const root = withRowFields({
   per_message_profile: null,
   bundled_link_previews: [],
   link_previews_removed: null,
+  redacted_on_ban: null,
   mention: 'none',
   forwarded: null,
   forum_title: null,
@@ -93,11 +97,15 @@ const thread: ForumThread = {
   mediaCaption: false,
   createdAt: 0,
   preview: 'Topic body',
+  thumbnail: null,
   replyCount: 2,
   lastActivityAt: 0,
   lastBody: null,
   lastSenderName: null,
   unread: false,
+  votes: 0,
+  ownVote: null,
+  resolved: false,
 };
 
 const card = () => screen.getAllByRole('article')[0];
@@ -139,7 +147,7 @@ test('uses the timeline context menu for a forum thread', async () => {
   expect(await screen.findByText('Delete thread?')).toBeInTheDocument();
 });
 
-test('renders the thread root through the timeline renderer', async () => {
+test('shows an untitled thread by its body and author', async () => {
   const user = userEvent.setup();
   const onOpen = vi.fn();
   render(ForumThreadItemHarness, {
@@ -152,8 +160,120 @@ test('renders the thread root through the timeline renderer', async () => {
   });
 
   expect(within(card()).getByText('Alice')).toBeInTheDocument();
-  const topic = within(card()).getByText('Topic');
-  expect(topic.tagName).toBe('STRONG');
+  const topic = within(card()).getByRole('heading', { name: 'Topic body' });
   await user.click(topic);
   expect(onOpen).toHaveBeenCalledWith('$thread:example.org');
 });
+
+test('leads a titled thread with its title and previews the body', () => {
+  render(ForumThreadItemHarness, {
+    thread: { ...thread, title: 'Release plans' },
+    onOpen: vi.fn(),
+    canDelete: false,
+    onDelete: vi.fn(),
+    roomId: '!forum:example.org',
+    onCopyLink: vi.fn(),
+    pinned: true,
+  });
+
+  const heading = within(card()).getByRole('heading', { name: /Release plans/ });
+  expect(within(heading).getByLabelText('Pinned')).toBeInTheDocument();
+  expect(within(card()).getByText(': Topic body')).toBeInTheDocument();
+  expect(
+    within(card()).getByRole('button', { name: /^Alice: Release plans\. 2 replies, / })
+  ).toBeInTheDocument();
+});
+
+test('keeps a spoilered thumbnail covered', () => {
+  render(ForumThreadItemHarness, {
+    thread: {
+      ...thread,
+      thumbnail: {
+        source: 'mxc://example.org/cat',
+        thumbnail: null,
+        width: 640,
+        height: 480,
+        blurhash: null,
+        video: false,
+        spoiler: true,
+      },
+    },
+    onOpen: vi.fn(),
+    canDelete: false,
+    onDelete: vi.fn(),
+    roomId: '!forum:example.org',
+    onCopyLink: vi.fn(),
+  });
+
+  expect(card().querySelector('.forum-thread-media')).toBeInTheDocument();
+  expect(card().querySelector('.forum-thread-image')).not.toBeInTheDocument();
+});
+
+test('votes from the thread list without opening the thread', async () => {
+  const user = userEvent.setup();
+  const onOpen = vi.fn();
+  const onReact = vi.fn();
+  const { rerender } = render(ForumThreadItemHarness, {
+    thread: { ...thread, votes: 2 },
+    onOpen,
+    canDelete: false,
+    onDelete: vi.fn(),
+    roomId: '!forum:example.org',
+    onReact,
+    onCopyLink: vi.fn(),
+  });
+
+  const vote = within(card()).getByRole('button', { name: 'Vote for this thread, 2 votes' });
+  expect(vote).toHaveAttribute('aria-pressed', 'false');
+  await user.click(vote);
+  expect(onReact).toHaveBeenLastCalledWith('$thread:example.org', '👍');
+
+  await rerender({ thread: { ...thread, votes: 3, ownVote: '👍🏽' } });
+  const voted = within(card()).getByRole('button', { name: 'Vote for this thread, 3 votes' });
+  expect(voted).toHaveAttribute('aria-pressed', 'true');
+  await user.click(voted);
+  expect(onReact).toHaveBeenLastCalledWith('$thread:example.org', '👍🏽');
+  expect(onOpen).not.toHaveBeenCalled();
+});
+
+test('shows votes as text to someone who cannot react', () => {
+  render(ForumThreadItemHarness, {
+    thread: { ...thread, votes: 2 },
+    onOpen: vi.fn(),
+    canDelete: false,
+    onDelete: vi.fn(),
+    roomId: '!forum:example.org',
+    onCopyLink: vi.fn(),
+  });
+
+  expect(within(card()).getByText('👍 2')).toBeInTheDocument();
+  expect(within(card()).queryByRole('button', { name: /2 votes/ })).not.toBeInTheDocument();
+});
+
+test.each(['list', 'gallery'] as const)(
+  'a deleted pinned post leaves the %s view',
+  async (layout) => {
+    const { rerender } = render(ForumThreadList, {
+      threads: [thread],
+      loading: false,
+      canLoadMore: false,
+      onOpen: vi.fn(),
+      canDelete: () => false,
+      onDelete: vi.fn(),
+      roomId: '!forum:example.org',
+      onCopyLink: vi.fn(),
+      onLoadMore: vi.fn(),
+      isPinned: () => true,
+      layout,
+    });
+    expect(screen.getByRole('list', { name: 'Pinned threads' })).toBeVisible();
+    const redacted = {
+      ...root,
+      content: { kind: 'redacted' as const, reason: null, redacted_by: null },
+    };
+    await rerender({ threads: collectForumThreads([redacted, root], null) });
+    expect(screen.queryByRole('article')).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Pinned threads' })).not.toBeInTheDocument();
+    expect(screen.getByText('No threads yet.')).toBeVisible();
+  }
+);

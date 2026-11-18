@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import type { Component, Snippet } from 'svelte';
   import type { RoomListItemView } from '#src/generated/protocol';
   import { useCoreClient } from '#lib/core/context.js';
@@ -8,11 +9,8 @@
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import ResizeHandle from '#lib/ui/primitives/ResizeHandle.svelte';
-  import {
-    PREFERENCE_RANGES,
-    preferences,
-    setPreference,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { PREFERENCE_RANGES } from '#lib/settings/definitions.js';
   import { bannerChanges, readRoomBanner } from '#lib/features/room/room-banner.svelte.js';
   import Banner from '#lib/ui/primitives/Banner.svelte';
 
@@ -20,6 +18,8 @@
     activeSpace: RoomListItemView | null;
     activeRoom: RoomListItemView | null;
     title: string;
+    titleHref?: string;
+    onNavigate?: (href: string) => void;
     titleIcon: Component;
     collapsed: boolean;
     menuItems: Snippet;
@@ -29,6 +29,8 @@
     activeSpace,
     activeRoom,
     title,
+    titleHref,
+    onNavigate,
     titleIcon: TitleIcon,
     collapsed,
     menuItems,
@@ -74,7 +76,13 @@
 
 <div class="room-nav-top">
   {#if bannerShown && banner}
-    <div class="room-banner" style:height={`${preferences.roomBannerHeight}px`}>
+    <div
+      class={['room-banner', { fit: preferences.bannerFit === 'image' }]}
+      style:height={preferences.bannerFit === 'image'
+        ? undefined
+        : `${preferences.roomBannerHeight}px`}
+      style:--room-banner-max={`${preferences.roomBannerHeight}px`}
+    >
       <Banner source={banner} name={bannerName} width={640} height={190} />
       <ResizeHandle
         value={preferences.roomBannerHeight}
@@ -84,7 +92,7 @@
         grow="down"
         step={16}
         shiftStep={64}
-        onResize={(next) => setPreference('roomBannerHeight', Math.max(min, Math.min(max, next)))}
+        onResize={(next) => setPreference('roomBannerHeight', clamp(next, min, max))}
       />
     </div>
   {/if}
@@ -113,6 +121,15 @@
           {/snippet}
           {@render menuItems()}
         </ActionMenu>
+      {:else if titleHref}
+        <!-- eslint-disable svelte/no-navigation-without-resolve -- the caller passes a resolved href -->
+        <a
+          class="title-link"
+          href={titleHref}
+          draggable="false"
+          onclick={() => onNavigate?.(titleHref)}>{title}</a
+        >
+        <!-- eslint-enable svelte/no-navigation-without-resolve -->
       {:else}
         {title}
       {/if}
@@ -162,13 +179,21 @@
     z-index: 1;
   }
 
-  .room-banner :global(.room-banner-image),
-  .room-banner :global(.banner-button),
-  .room-banner :global(img) {
+  .room-banner :global(.banner-button) {
     display: block;
+  }
+
+  .room-banner:not(.fit) :global(.banner-image),
+  .room-banner:not(.fit) :global(img) {
     height: 100%;
     object-fit: cover;
     width: 100%;
+  }
+
+  .room-banner.fit :global(.banner-image) {
+    height: auto;
+    max-height: var(--room-banner-max);
+    min-height: var(--header-height);
   }
 
   .room-nav-header {
@@ -184,9 +209,8 @@
   .room-nav-header.on-banner {
     background: linear-gradient(180deg, var(--media-scrim-solid) 0%, var(--media-scrim-clear) 100%);
     color: var(--media-on-scrim);
-    left: 0;
+    inset-inline: 0;
     position: absolute;
-    right: 0;
     top: 0;
   }
 
@@ -214,6 +238,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .title-link {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .title-link:hover {
+    text-decoration: underline;
   }
 
   :global(.room-nav-badge) {

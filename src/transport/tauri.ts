@@ -3,7 +3,8 @@ import * as Sentry from '@sentry/sveltekit';
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 import type { RpcError, CoreEvent } from '#src/generated/protocol';
-import { CoreError, type Transport } from './index';
+import { commandFailed, type Transport } from './index';
+import { createStallMonitor } from './stall-monitor';
 import { recordDebugLog } from '#lib/observability/debug-log.svelte.js';
 import { wasmLogLevel } from '#lib/observability/wasm-log.js';
 import { rawInvoke } from '#lib/platform/raw-invoke.js';
@@ -17,7 +18,7 @@ async function carry<T>(
   try {
     return await rawInvoke<T>(command, bytes, headers);
   } catch (error) {
-    throw new CoreError(error as RpcError);
+    throw commandFailed(error as RpcError, command);
   }
 }
 
@@ -26,6 +27,19 @@ async function carry<T>(
  */
 export function createTauriTransport(): Transport {
   const listeners = new Set<(event: CoreEvent) => void>();
+  const stallListeners = new Set<(stalled: boolean) => void>();
+  // The status read waits for the core like any command, and unlike most it needs no network.
+  const stalls = createStallMonitor(
+    () => {
+      const answered = (): void => {
+        stalls.responsive();
+      };
+      invoke('call', { method: 'session.sync_status', params: {} }).then(answered, answered);
+    },
+    (stalled) => {
+      for (const listener of stallListeners) listener(stalled);
+    }
+  );
 
   const channel = new Channel<CoreEvent[]>();
   channel.onmessage = (events) => {
@@ -56,10 +70,13 @@ export function createTauriTransport(): Transport {
   return {
     async call(method, params) {
       await ready;
+      const settle = stalls.watch();
       try {
         return await invoke<unknown>('call', { method, params });
       } catch (error) {
-        throw new CoreError(error as RpcError);
+        throw commandFailed(error as RpcError, method);
+      } finally {
+        settle();
       }
     },
 
@@ -74,7 +91,7 @@ export function createTauriTransport(): Transport {
         });
         return new Uint8Array(bytes);
       } catch (error) {
-        throw new CoreError(error as RpcError);
+        throw commandFailed(error as RpcError, 'fetch_media');
       }
     },
 
@@ -82,7 +99,7 @@ export function createTauriTransport(): Transport {
       try {
         await invoke('forget_media', { source });
       } catch (error) {
-        throw new CoreError(error as RpcError);
+        throw commandFailed(error as RpcError, 'forget_media');
       }
     },
 
@@ -172,8 +189,9 @@ export function createTauriTransport(): Transport {
       return () => {};
     },
 
-    subscribeStall() {
-      return () => {};
+    subscribeStall(onStall) {
+      stallListeners.add(onStall);
+      return () => stallListeners.delete(onStall);
     },
 
     async resetCaches(accountIds) {
@@ -193,6 +211,8 @@ export function createTauriTransport(): Transport {
 
     close() {
       listeners.clear();
+      stallListeners.clear();
+      stalls.reset();
     },
   };
 }

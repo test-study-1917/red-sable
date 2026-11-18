@@ -3,10 +3,11 @@ import { SvelteSet } from 'svelte/reactivity';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { t } from '#lib/i18n.js';
+import { setSidebarSpaceOrder } from '#lib/rooms/permalink.js';
 import { readJson, writeJson } from '#lib/platform/local-json.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 
-import { isFolder, sameLayout, type SidebarItem } from './sidebar-layout.js';
+import { isFolder, layoutSpaceIds, sameLayout, type SidebarItem } from './sidebar-layout.js';
 
 const OPEN_FOLDERS_KEY = 'sable-open-space-folders';
 
@@ -124,6 +125,7 @@ export class SpaceSidebar {
     this.revision += 1;
     this.loaded = true;
     this.items = items;
+    setSidebarSpaceOrder(layoutSpaceIds(items));
 
     // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const folderIds = new Set(items.filter(isFolder).map((folder) => folder.id));

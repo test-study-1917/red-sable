@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::ruma::events::room::history_visibility::HistoryVisibility;
@@ -7,7 +6,7 @@ use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId};
 use serde::{Deserialize, Serialize};
 
 use super::Handler;
-use crate::protocol::{RpcError, DehydratedDeviceView, DeviceView, EncryptionStatusView, IdentityResetStep, KeyBackupDownloadView, KeyBackupStatusView, ShareHistoryView, SignOutSafetyView, UserSecurityView};
+use crate::protocol::{RpcCode, RpcError, DehydratedDeviceView, DeviceView, EncryptionStatusView, IdentityResetStep, KeyBackupDownloadView, KeyBackupStatusView, ShareHistoryView, SignOutSafetyView, UserSecurityView};
 use crate::verification::{self, VERIFICATION_METHODS, encryption_status, sign_out_safety};
 use crate::{Core, ResultExt};
 
@@ -188,8 +187,8 @@ impl Handler for EnableRecoveryParams {
             None => enable.await,
         }
         .map_err(|error| match error {
-            RecoveryError::BackupExistsOnServer => RpcError::BackupExists,
-            error => core.failed("enable_recovery", error),
+            RecoveryError::BackupExistsOnServer => RpcCode::BackupExists.into(),
+            error => core.failed_with("enable_recovery", &error),
         })?;
         core.adopt_account_data_key(&client, &recovery_key).await;
         Ok(recovery_key)
@@ -341,7 +340,7 @@ impl Handler for RenameDeviceParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let client = core.client().await?;
-        let generation = core.session_generation.load(Ordering::SeqCst);
+        let generation = core.lifecycle.current();
         client
             .rename_device(&self.device_id, &self.display_name)
             .await
@@ -391,7 +390,7 @@ impl Handler for ShareHistoryParams {
             return Ok(ShareHistoryView::Unencrypted);
         }
         let client = core.client().await?;
-        let own = client.user_id().ok_or(RpcError::NotLoggedIn)?;
+        let own = client.user_id().ok_or(RpcCode::NotLoggedIn)?;
         let identity = client
             .encryption()
             .get_user_identity(own)
@@ -463,7 +462,7 @@ impl Handler for RequestVerificationParams {
                 .get_device(&self.user_id, &device_id)
                 .await
                 .or_failed(core, "request_verification_device")?
-                .ok_or(RpcError::Unavailable)?
+                .ok_or(RpcCode::Unavailable)?
                 .request_verification_with_methods(VERIFICATION_METHODS.to_vec())
                 .await
                 .or_failed(core, "request_verification")?,
@@ -471,7 +470,7 @@ impl Handler for RequestVerificationParams {
                 .get_user_identity(&self.user_id)
                 .await
                 .or_failed(core, "request_verification_identity")?
-                .ok_or(RpcError::Unavailable)?
+                .ok_or(RpcCode::Unavailable)?
                 .request_verification_with_methods(VERIFICATION_METHODS.to_vec())
                 .await
                 .or_failed(core, "request_verification")?,
@@ -507,7 +506,7 @@ impl Handler for WithdrawVerificationParams {
             .get_user_identity(&self.user_id)
             .await
             .or_failed(core, "withdraw_verification_identity")?
-            .ok_or(RpcError::Unavailable)?
+            .ok_or(RpcCode::Unavailable)?
             .withdraw_verification()
             .await
             .or_failed(core, "withdraw_verification")?;
@@ -592,7 +591,7 @@ impl Handler for StartSasVerificationParams {
             .start_sas()
             .await
             .or_failed(core, "start_sas_verification")?
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         Ok(())
     }
 }

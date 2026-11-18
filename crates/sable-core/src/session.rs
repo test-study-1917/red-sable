@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::errors::CoreError;
+use crate::errors::{CoreError, ReportExt};
 use matrix_sdk::{
     Client, ClientBuilder, ThreadingSupport,
     authentication::{
@@ -29,6 +29,7 @@ pub(crate) const THREADING_SUPPORT: ThreadingSupport = ThreadingSupport::Enabled
     with_subscriptions: false,
 };
 
+#[derive(Clone)]
 pub struct Session {
     pub account_id: String,
     pub client: Client,
@@ -346,9 +347,7 @@ pub async fn restore_authenticated_client(
     persisted: &PersistedSession,
 ) -> Result<Client, CoreError> {
     validate_saved_crypto_store(store_id, persisted).await?;
-    let client = restore_client(store_id, persisted, true)
-        .await
-        .map_err(CoreError::backend)?;
+    let client = restore_client(store_id, persisted, true).await.backend()?;
 
     restore_credentials(&client, persisted).await?;
     Ok(client)
@@ -373,16 +372,12 @@ pub(crate) async fn restore_notification_client(
     );
     let client = build_account_client(builder, store_id, ClientRole::Notification, true)
         .await
-        .map_err(CoreError::backend)?;
+        .backend()?;
     // Fetching a push must not report the user online.
     client
-        .set_presence(
-            matrix_sdk::ruma::presence::PresenceState::Offline,
-            None,
-            false,
-        )
+        .set_presence(ruma::presence::PresenceState::Offline, None, false)
         .await
-        .map_err(CoreError::backend)?;
+        .backend()?;
     before_restore(&client);
     restore_credentials_with(&client, persisted, room_load).await?;
     Ok(client)
@@ -410,12 +405,12 @@ async fn restore_credentials_with(
         Credentials::Password(matrix) => client
             .restore_session_with(matrix, room_load)
             .await
-            .map_err(CoreError::backend)?,
+            .backend()?,
         Credentials::OAuth { client_id, user } => client
             .oauth()
             .restore_session(oauth_session(client_id, user), room_load)
             .await
-            .map_err(CoreError::backend)?,
+            .backend()?,
     }
     Ok(())
 }
@@ -447,13 +442,13 @@ pub(crate) async fn validate_saved_crypto_store(
         let path = std::path::Path::new(store_id).join("store");
         let metadata = tokio::fs::metadata(path.join("matrix-sdk-crypto.sqlite3"))
             .await
-            .map_err(|error| CoreError::context("saved crypto database is unavailable", error))?;
+            .context("saved crypto database is unavailable")?;
         if !metadata.is_file() {
             return Err("saved crypto database is not a file".into());
         }
         let key = match crate::store_encryption::saved_key(store_id) {
             Err(crate::store::StoreError::KeyMissing) => {
-                return Err(CoreError::Invalid("saved crypto database key is missing"));
+                return Err(CoreError::invalid("saved crypto database key is missing"));
             }
             key => key?,
         };
@@ -462,18 +457,18 @@ pub(crate) async fn validate_saved_crypto_store(
             key.as_ref(),
         ))
         .await
-        .map_err(|error| CoreError::context("saved crypto database could not be opened", error))?
+        .context("saved crypto database could not be opened")?
     };
     #[cfg(target_family = "wasm")]
     let store = matrix_sdk_indexeddb::IndexeddbStores::open(store_id, None)
         .await
-        .map_err(|error| CoreError::context("saved crypto database could not be opened", error))?
+        .context("saved crypto database could not be opened")?
         .crypto;
 
     let account = store
         .load_account()
         .await
-        .map_err(|error| CoreError::context("saved crypto identity could not be read", error))?
+        .context("saved crypto identity could not be read")?
         .ok_or("saved crypto identity is missing")?;
     if account.user_id().as_str() != persisted.credentials.user_id()
         || account.device_id().as_str() != persisted.credentials.device_id()
@@ -488,7 +483,7 @@ pub(crate) async fn repair_room_key_sharing(client: &Client) -> Result<(), CoreE
     if store
         .get_custom_value(ROOM_KEY_SHARING_REPAIR_KEY)
         .await
-        .map_err(CoreError::backend)?
+        .backend()?
         .is_some()
     {
         return Ok(());
@@ -496,14 +491,14 @@ pub(crate) async fn repair_room_key_sharing(client: &Client) -> Result<(), CoreE
 
     for room in client.joined_rooms() {
         if room.encryption_state().is_encrypted() {
-            room.discard_room_key().await.map_err(CoreError::backend)?;
+            room.discard_room_key().await.backend()?;
         }
     }
 
     store
         .set_custom_value_no_read(ROOM_KEY_SHARING_REPAIR_KEY, vec![1])
         .await
-        .map_err(CoreError::backend)
+        .backend()
 }
 
 #[derive(Clone, Copy)]
@@ -654,7 +649,7 @@ async fn build_account_client(
         let lock = store_lock(&holder);
 
         let config = native_store_config(store_id, role, lock.clone()).await?;
-        let base = std::sync::Arc::new(matrix_sdk_base::BaseClient::new(
+        let base = Arc::new(matrix_sdk_base::BaseClient::new(
             config,
             THREADING_SUPPORT,
             matrix_sdk_base::DmRoomDefinition::MatrixSpec,
@@ -708,12 +703,10 @@ async fn build_account_client(
         BASE_CLIENTS.with_borrow_mut(|bases| {
             bases.insert(store_id.to_owned(), std::rc::Rc::downgrade(&base));
         });
-        client.add_event_handler(
-            move |_: matrix_sdk::ruma::events::dummy::ToDeviceDummyEvent| {
-                let _owner = &base;
-                async {}
-            },
-        );
+        client.add_event_handler(move |_: ruma::events::dummy::ToDeviceDummyEvent| {
+            let _owner = &base;
+            async {}
+        });
         Ok(client)
     }
 }
@@ -737,7 +730,7 @@ thread_local! {
 pub(crate) type SharedBaseClient = std::rc::Rc<matrix_sdk_base::BaseClient>;
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) type SharedBaseClient = std::sync::Arc<matrix_sdk_base::BaseClient>;
+pub(crate) type SharedBaseClient = Arc<matrix_sdk_base::BaseClient>;
 
 #[cfg(not(target_family = "wasm"))]
 static BASE_CLIENTS: std::sync::LazyLock<
@@ -750,21 +743,20 @@ static BASE_CLIENTS: std::sync::LazyLock<
 fn register_base_client(store_id: &str, base: SharedBaseClient, client: &Client) {
     BASE_CLIENTS
         .lock()
-        .insert(store_id.to_owned(), std::sync::Arc::downgrade(&base));
-    client.add_event_handler(
-        move |_: matrix_sdk::ruma::events::dummy::ToDeviceDummyEvent| {
-            let _owner = &base;
-            async {}
-        },
-    );
+        .insert(store_id.to_owned(), Arc::downgrade(&base));
+    client.add_event_handler(move |_: ruma::events::dummy::ToDeviceDummyEvent| {
+        let _owner = &base;
+        async {}
+    });
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 pub(crate) async fn mock_account_client(
     server: &matrix_sdk::test_utils::mocks::MatrixMockServer,
     store_id: &str,
 ) -> Client {
-    let base = std::sync::Arc::new(matrix_sdk_base::BaseClient::new(
+    let base = Arc::new(matrix_sdk_base::BaseClient::new(
         matrix_sdk_base::store::StoreConfig::new(
             matrix_sdk_common::cross_process_lock::CrossProcessLockConfig::SingleProcess,
         ),
@@ -1191,10 +1183,8 @@ mod tests {
         assert!(persisted.resolved_homeserver.is_none());
         persisted.homeserver = "does-not-exist.invalid".to_owned();
         persisted.resolved_homeserver = Some(url::Url::parse("https://endpoint.invalid").unwrap());
-        let directory = std::env::temp_dir().join(format!(
-            "sable-offline-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-offline-{}", ruma::TransactionId::new()));
         let client = super::restore_client(directory.to_str().unwrap(), persisted, true)
             .await
             .unwrap();

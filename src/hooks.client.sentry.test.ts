@@ -10,7 +10,9 @@ vi.mock('@sentry/sveltekit', async () => {
   const { createRequire } = await import('node:module');
   const require = createRequire(import.meta.url);
   const sdk = (await import(
-    require.resolve('@sentry/browser', { paths: [require.resolve('@sentry/sveltekit')] })
+    require.resolve('@sentry/browser', {
+      paths: [require.resolve('@sentry/svelte', { paths: [require.resolve('@sentry/sveltekit')] })],
+    })
   )) as typeof import('@sentry/sveltekit');
   return {
     ...sdk,
@@ -29,7 +31,10 @@ vi.mock('@sentry/sveltekit', async () => {
 });
 vi.mock('#lib/platform/telemetry.js', () => ({ syncTelemetryConsent: vi.fn() }));
 vi.mock('#lib/settings/preferences.svelte.js', () => ({ preferences: { errorReporting: true } }));
-vi.mock('#src/transport', () => ({ CoreError: class CoreError extends Error {} }));
+vi.mock('#src/transport', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('#src/transport')>()),
+  CoreError: class CoreError extends Error {},
+}));
 vi.mock('./worker/core.worker.ts?sharedworker&url', () => ({ default: 'core.worker.js' }));
 vi.mock('#src/generated/wasm/sable_wasm_version.js', () => ({ default: 'test-wasm-version' }));
 

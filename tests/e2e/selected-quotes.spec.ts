@@ -529,7 +529,7 @@ for (const replyPreviewStyle of ['connected', 'compact', 'expanded'] as const) {
           .poll(() =>
             page.locator('[data-item-id="style-reply"] .message').evaluate((node) => {
               const avatar = node.querySelector(
-                ':scope > .avatar-button, :scope > .message-avatar'
+                ':scope > .sender-avatar-button, :scope > .message-avatar'
               );
               const header = node.querySelector('.message-content > header');
               return avatar && header

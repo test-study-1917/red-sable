@@ -1,12 +1,9 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import { playSound, type NotificationSounds } from '#lib/features/notifications/sound.js';
   import { i18n } from '#lib/i18n.js';
-  import {
-    PREFERENCE_RANGES,
-    preferences,
-    setPreference,
-    type RangePreference,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { PREFERENCE_RANGES, type RangePreference } from '#lib/settings/definitions.js';
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
   import Slider from '#lib/ui/primitives/Slider.svelte';
 
@@ -183,7 +180,7 @@
             const typed = Number(event.currentTarget.value) / 100;
             if (event.currentTarget.value !== '' && Number.isFinite(typed)) {
               const { min, max } = PREFERENCE_RANGES[sound.preference];
-              const next = Math.min(max, Math.max(min, typed));
+              const next = clamp(typed, min, max);
               setPreference(sound.preference, next);
             }
             event.currentTarget.value = String(Math.round(preferences[sound.preference] * 100));

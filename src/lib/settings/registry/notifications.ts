@@ -3,12 +3,13 @@ import BellIcon from 'phosphor-svelte/lib/BellIcon';
 import BellSimpleIcon from 'phosphor-svelte/lib/BellSimpleIcon';
 import CheckCircleIcon from 'phosphor-svelte/lib/CheckCircleIcon';
 import ChatTextIcon from 'phosphor-svelte/lib/ChatTextIcon';
+import ChatTeardropDotsIcon from 'phosphor-svelte/lib/ChatTeardropDotsIcon';
 import DevicesIcon from 'phosphor-svelte/lib/DevicesIcon';
 import LockIcon from 'phosphor-svelte/lib/LockIcon';
 import PaperPlaneTiltIcon from 'phosphor-svelte/lib/PaperPlaneTiltIcon';
 import SpeakerHighIcon from 'phosphor-svelte/lib/SpeakerHighIcon';
 import { presentsInApp, pushPlatform } from '#lib/platform/notifications.js';
-import { PUSH_INACTIVE_TIMEOUTS } from '../preferences.svelte';
+import { PUSH_INACTIVE_TIMEOUTS } from '../definitions';
 import type { SettingOption, SettingsCategory } from '../registry';
 
 const pushInactiveTimeoutOptions: SettingOption[] = PUSH_INACTIVE_TIMEOUTS.map((value) =>
@@ -32,6 +33,14 @@ export const notificationsCategory: SettingsCategory = {
       section: 'alerts',
       icon: BellIcon,
       name: 'settings.systemNotifications',
+      type: 'boolean',
+    },
+    {
+      key: 'inAppBanners',
+      section: 'alerts',
+      icon: ChatTeardropDotsIcon,
+      name: 'settings.inAppBanners',
+      description: 'settings.inAppBannersHint',
       type: 'boolean',
     },
     {

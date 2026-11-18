@@ -2,9 +2,11 @@
   import type { ReplyView } from '#src/generated/protocol';
 
   import '../members/avatar-button.css';
+  import './timeline-highlight.css';
   import { mediaProgress } from '#lib/ui/media-progress.svelte.js';
   import { senderDisplayColors } from '../members/members.js';
   import { previewableLinks } from '../media/link-preview.js';
+  import { shownLinkPreviews } from '../media/link-preview-cache';
   import LinkEmbed from '../media/embeds/LinkEmbed.svelte';
   import { isMediaCaptionContent } from '../messages/media-caption.js';
   import { i18n } from '#lib/i18n.js';
@@ -18,6 +20,8 @@
   import MessageBody from '../messages/MessageBody.svelte';
   import MessageReactions from '../messages/MessageReactions.svelte';
   import MessageActions from '../messages/MessageActions.svelte';
+  import RevealedRedaction from '../messages/RevealedRedaction.svelte';
+  import { revealState } from '../messages/revealed-redactions.svelte.js';
 
   import '#lib/ui/primitives/menu.css';
   import ReadReceiptStack from './ReadReceiptStack.svelte';
@@ -89,7 +93,9 @@
   }: TimelineItemProps = $props();
 
   const labelId = $props.id();
+  const reveal = $derived(revealState(roomId, item.event_id));
   const named = $derived(layout === 'compact' || !collapsed);
+  const ownBubble = $derived(layout === 'bubble' && item.is_own && alignOwn);
 
   const row = new TimelineRow(() => ({
     item,
@@ -104,6 +110,10 @@
     overrideCosmetics,
     replySender,
     hasLinkPreviews: bundledPreviews.length > 0 || previewUrls.length > 0,
+    linkPreviews:
+      bundledPreviews.length > 0
+        ? bundledPreviews
+        : previewUrls.flatMap((url) => shownLinkPreviews.get(url) ?? []),
     onToggleReaction,
     onMarkUnread,
     onReply,
@@ -253,6 +263,22 @@
   </span>
 {/snippet}
 
+{#snippet reactions()}
+  <MessageReactions
+    reactions={item.reactions}
+    eventId={item.event_id}
+    {currentUserId}
+    {members}
+    {roomId}
+    actionable={row.actionable}
+    onReact={row.actions.onReact}
+    {onToggleReaction}
+    onViewReactions={(index: number) => {
+      row.dialogs.open(item, { kind: 'reactions', active: index });
+    }}
+  />
+{/snippet}
+
 {#snippet inlineReceiptSlot()}
   {#if inlineReceipts}
     <span class="receipt-space" aria-hidden="true"></span>
@@ -287,7 +313,7 @@
   {/snippet}
   {#if item.sender && onSenderProfile}
     <button
-      class="avatar-button"
+      class="sender-avatar-button"
       type="button"
       aria-label={i18n.t('timeline.senderProfile', { name: sender.name })}
       onclick={openSenderProfile}
@@ -412,7 +438,9 @@
       />
     {/if}
     {#if layout !== 'compact' && !collapsed}
-      {@render senderAvatarButton('small')}
+      {#if !ownBubble}
+        {@render senderAvatarButton('small')}
+      {/if}
       {@render actions()}
     {:else if layout !== 'compact' && row.pending}
       <span class="collapsed-pending">
@@ -449,7 +477,7 @@
       {/if}
       {#if !collapsed && layout !== 'compact'}
         <header>
-          {#if !emote}
+          {#if !emote && !(ownBubble && !sender.persona)}
             <SenderName
               displayName={sender.name}
               accountName={sender.persona ? sender.accountName : undefined}
@@ -562,6 +590,20 @@
               redactionReason={item.event_id ? events?.redactionReason(item.event_id) : null}
               redactedBy={events?.redactor(item) ?? item.content.redacted_by ?? null}
             />
+            {#if row.actions.onViewRedacted}
+              <RevealedRedaction
+                {item}
+                {reveal}
+                onToggle={row.actions.onViewRedacted}
+                senderTimezone={row.senderTimezone}
+                {members}
+                {canRedactOthers}
+                {encrypted}
+                {onMatrixLink}
+                {onOpenMedia}
+                {onSenderProfile}
+              />
+            {/if}
             {@render inlineReceiptSlot()}
           </div>
         {:else if item.content.kind === 'unable_to_decrypt'}
@@ -604,20 +646,13 @@
             }}
           />
         {/if}
-        {#if item.reactions.length > 0}
-          <MessageReactions
-            reactions={item.reactions}
-            eventId={item.event_id}
-            {currentUserId}
-            {members}
-            {roomId}
-            actionable={row.actionable}
-            onReact={row.actions.onReact}
-            {onToggleReaction}
-            onViewReactions={(index: number) => {
-              row.dialogs.open(item, { kind: 'reactions', active: index });
-            }}
-          />
+        {#if item.reactions.length > 0 && layout === 'bubble' && trailingReceiptBadge}
+          <div class="reaction-row">
+            {@render reactions()}
+            {@render receiptSlot()}
+          </div>
+        {:else if item.reactions.length > 0}
+          {@render reactions()}
         {/if}
         {#if transfer}
           <TimelineTransfer {...transfer} />
@@ -631,14 +666,16 @@
             {onCancelSend}
           />
         {/if}
-        {#if trailingReceiptBadge}
+        {#if trailingReceiptBadge && layout === 'bubble' && item.reactions.length === 0}
+          {@render receiptSlot()}
+        {:else if trailingReceiptBadge && layout !== 'bubble'}
           <span class="receipt-tail" aria-hidden="true"></span>
         {/if}
       </div>
       {#if item.shield && (item.shield.critical || !preferences.hideMessageShields)}
         <MessageShieldNotice shield={item.shield} />
       {/if}
-      {#if trailingReceiptBadge}
+      {#if trailingReceiptBadge && layout !== 'bubble'}
         {@render receiptSlot()}
       {/if}
     </div>
@@ -724,7 +761,7 @@
     }
   }
 
-  .message:not(.layout-compact) > :global(.avatar-button),
+  .message:not(.layout-compact) > :global(.sender-avatar-button),
   .message:not(.layout-compact) > :global(.avatar-root.message-avatar) {
     translate: 0 var(--space-100);
   }
@@ -780,13 +817,17 @@
   }
 
   .message.collapsed {
-    padding-left: calc(var(--page-gutter) + var(--avatar-size-small) + var(--timeline-row-gap));
+    padding-inline-start: calc(
+      var(--page-gutter) + var(--avatar-size-small) + var(--timeline-row-gap)
+    );
     padding-top: 0;
   }
 
   .message.collapsed.mention-silent,
   .message.collapsed.mention-loud {
-    padding-left: calc(var(--avatar-size-small) + var(--timeline-row-gap) + var(--space-200));
+    padding-inline-start: calc(
+      var(--avatar-size-small) + var(--timeline-row-gap) + var(--space-200)
+    );
   }
 
   .collapsed-pending {
@@ -819,14 +860,6 @@
 
   .message.collapsed :global(.message-actions) {
     inset-inline-end: 0;
-  }
-
-  .message.layout-bubble.own.align-own > .collapsed-pending {
-    inset-inline: auto var(--page-gutter);
-  }
-
-  .message.highlighted {
-    --message-highlight-duration: 6s;
   }
 
   .message.highlighted:not(.mention-silent, .mention-loud) {
@@ -878,53 +911,6 @@
     line-height: 1.35;
   }
 
-  @keyframes jump {
-    0% {
-      background-color: var(--primary-container);
-      color: var(--primary-on-container);
-    }
-
-    16% {
-      background-color: var(--primary-container-active);
-      color: var(--primary-on-container);
-    }
-
-    33%,
-    100% {
-      background-color: transparent;
-      color: inherit;
-    }
-  }
-
-  @media (prefers-reduced-motion: no-preference) {
-    :global(html:not([data-reduced-motion='on'])) .message.highlighted {
-      animation: jump var(--message-highlight-duration) var(--motion-easing-standard);
-    }
-  }
-
-  @keyframes jump-reduced {
-    0% {
-      background-color: var(--primary-container);
-      color: var(--primary-on-container);
-    }
-
-    33%,
-    100% {
-      background-color: transparent;
-      color: inherit;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .message.highlighted {
-      animation: jump-reduced var(--message-highlight-duration) steps(1, end);
-    }
-  }
-
-  :global(html[data-reduced-motion='on']) .message.highlighted {
-    animation: jump-reduced var(--message-highlight-duration) steps(1, end);
-  }
-
   @media (--app-layout) and (any-hover: hover) and (any-pointer: fine) {
     /* Matches the base mention rule's specificity, so the gutter the row's
        negative margin assumes survives. */
@@ -938,11 +924,14 @@
        owes the avatar gutter. */
     .message.collapsed.mention-silent,
     .message.collapsed.mention-loud {
-      padding-left: calc(
+      padding-inline-start: calc(
         var(--page-gutter) - var(--space-100) + var(--avatar-size-small) + var(--timeline-row-gap)
       );
     }
+  }
 
+  /* Not any-hover: phones report it, and a tap there shows actions that vanish on release. */
+  @media (hover: hover) and (pointer: fine) {
     .message:hover,
     .message.menu-open {
       background-color: var(--surface-container-hover);
@@ -997,10 +986,29 @@
     display: inline;
   }
 
+  /* Chromium skips an isolate when it picks the line direction, so an inline
+     body must not be one. */
+  .has-receipts,
+  .has-edited,
+  .emote {
+    unicode-bidi: plaintext;
+  }
+
+  .has-receipts :global(.formatted-body),
+  .has-receipts :global(.formatted-body > p:only-child),
+  .has-edited :global(.formatted-body),
+  .emote :global(.formatted-body) {
+    unicode-bidi: normal;
+  }
+
   .has-receipts .receipt-slot {
     inset-block-end: 0;
     inset-inline-end: 0;
     position: absolute;
+  }
+
+  .message-content:has(> :global(.message-crypto-status)) > .receipt-slot {
+    inset-inline-end: calc(var(--space-200) + var(--font-size-body));
   }
 
   .receipt-space {
@@ -1011,6 +1019,11 @@
 
   .has-receipts:global([data-receipt-narrow]) {
     padding-inline-end: calc(var(--receipt-reserve) + var(--space-200));
+  }
+
+  /* Move the badge, not the text: Firefox left-aligns an RTL line after a <br> on reflow. */
+  .has-receipts:global([data-receipt-flip]) .receipt-slot {
+    inset-inline: 0 auto;
   }
 
   .has-receipts:global([data-receipt-narrow]) .receipt-space {
@@ -1147,7 +1160,7 @@
     );
   }
 
-  .message.has-connected-reply:not(.layout-compact) > :global(.avatar-button),
+  .message.has-connected-reply:not(.layout-compact) > :global(.sender-avatar-button),
   .message.has-connected-reply:not(.layout-compact) > :global(.avatar-root.message-avatar) {
     margin-top: calc(var(--reply-preview-height, var(--space-500)) + var(--space-100));
   }
@@ -1233,6 +1246,10 @@
     gap: var(--space-100);
   }
 
+  .message.layout-bubble {
+    padding-bottom: var(--space-050);
+  }
+
   .message.layout-bubble .message-main {
     align-items: flex-start;
     display: flex;
@@ -1271,20 +1288,66 @@
     width: var(--timeline-bubble-width);
   }
 
+  .message.layout-bubble.own .content-bubble,
+  .message.layout-bubble.own :global(.formatted-body) {
+    background: var(--primary-container);
+    color: var(--primary-on-container);
+  }
+
+  .message.layout-bubble.own .content-bubble :global(.formatted-body) {
+    background: none;
+  }
+
+  .message.layout-bubble.own.align-own .content-bubble {
+    text-align: end;
+  }
+
+  .message.layout-bubble.own.align-own .content-bubble :global(:is(.image, .media, .sticker)) {
+    margin-inline-start: auto;
+  }
+
+  .message.layout-bubble .content-bubble:has(:global(.image, .media-frame-video)) {
+    width: fit-content;
+  }
+
   .message.layout-bubble .has-edited :global(.formatted-body) {
     display: inline-block;
   }
 
   .message.layout-bubble .has-receipts {
-    padding-inline-end: calc(var(--receipt-reserve) + var(--space-200));
+    align-items: flex-end;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-100);
   }
 
-  .message.layout-bubble .has-receipts:not(.content-bubble) {
-    max-width: min(100%, calc(50rem + var(--receipt-reserve) + var(--space-200)));
+  .message.layout-bubble .has-receipts > .receipt-slot {
+    flex-basis: 100%;
+    justify-content: flex-end;
+    margin-block-start: var(--space-100);
+    position: static;
+  }
+
+  .message.layout-bubble .message-main > .receipt-slot {
+    align-self: stretch;
+    justify-content: flex-end;
+    margin-block-start: var(--space-100);
+  }
+
+  .reaction-row {
+    align-items: flex-end;
+    display: flex;
+    gap: var(--space-200);
+    justify-content: space-between;
   }
 
   .message.layout-bubble .has-receipts :global(.formatted-body) {
     display: inline-block;
+  }
+
+  .message.layout-bubble .has-receipts :global(.formatted-body),
+  .message.layout-bubble .has-edited :global(.formatted-body) {
+    unicode-bidi: plaintext;
   }
 
   .message.layout-bubble .receipt-space,
@@ -1313,7 +1376,7 @@
     flex: 0 1 auto;
   }
 
-  .message:not(.layout-bubble.own.align-own)
+  .message:not(.layout-bubble)
     .message-main:has(> .receipt-tail)
     > :global(.reactions):nth-last-child(2),
   .message:not(.layout-bubble)
@@ -1331,24 +1394,6 @@
     user-select: none;
   }
 
-  .message.layout-bubble:not(.own.align-own)
-    .message-main:has(> .receipt-tail)
-    > :nth-last-child(2),
-  .message.layout-bubble:not(.own.align-own)
-    .message-main:has(> .receipt-tail)
-    > :global(:where(.reply-preview, .thread-summary, .transfer, .send-failure)):nth-last-child(2) {
-    margin-inline-end: calc(var(--receipt-reserve) + var(--space-200));
-  }
-
-  .message.layout-bubble.own.align-own
-    .message-main:has(> .receipt-tail)
-    > :global(*):nth-last-child(2) {
-    margin-inline-end: max(
-      calc(var(--space-100) * 0),
-      calc(var(--receipt-reserve) + var(--space-200) - var(--avatar-size-small) - var(--space-250))
-    );
-  }
-
   .message.layout-bubble.own.align-own .has-edited {
     align-items: flex-end;
     display: flex;
@@ -1358,6 +1403,16 @@
 
   .message.layout-bubble.own.align-own .has-edited .edited {
     margin-inline-start: 0;
+  }
+
+  .message.layout-bubble.own.align-own .has-receipts {
+    flex-direction: row-reverse;
+  }
+
+  .message.layout-bubble:not(.own.align-own) .has-receipts:not(.content-bubble),
+  .message.layout-bubble:not(.own.align-own) .reaction-row {
+    align-self: stretch;
+    max-width: none;
   }
 
   /* The one mode where your own side changes. */
@@ -1375,16 +1430,7 @@
   }
 
   .message.layout-bubble.own.align-own.collapsed {
-    padding-left: 0;
-    padding-right: calc(var(--avatar-size-small) + var(--space-250));
-  }
-
-  .message.layout-bubble.own.align-own .message-content > .receipt-slot {
-    margin-inline-end: calc(-1 * (var(--avatar-size-small) + var(--timeline-row-gap)));
-  }
-
-  .message.layout-bubble.own.align-own.collapsed .message-content > .receipt-slot {
-    margin-inline-end: calc(-1 * (var(--avatar-size-small) + var(--space-250)));
+    padding-inline: var(--page-gutter);
   }
 
   @supports not (color: color-mix(in srgb, black, white)) {

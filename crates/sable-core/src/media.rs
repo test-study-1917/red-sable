@@ -26,10 +26,11 @@ use crate::messages::outgoing_mentions;
 use crate::outgoing::thread_reply;
 use crate::personas::profile_extra_content;
 use crate::protocol::{
-    AttachmentInfoView, AudioMetadataView, CoreEvent, PerMessageProfileView, RpcError,
+    AttachmentInfoView, AudioMetadataView, CoreEvent, PerMessageProfileView, RpcCode, RpcError,
     SendAttachmentRequest, SendGalleryRequest,
 };
 use crate::view::SPOILER_PROPERTY;
+use sable_model::animation::{gif_flags, image_is_animated, plays_as_gif};
 
 use crate::{Core, MatrixClient};
 
@@ -53,32 +54,32 @@ fn attachment_data(bytes: &mut &[u8]) -> Result<(Vec<u8>, Option<Thumbnail>), Rp
     let mut height = [0; 4];
     bytes
         .read_exact(&mut size)
-        .map_err(|_| RpcError::InvalidMedia)?;
+        .map_err(|_| RpcCode::InvalidMedia)?;
     bytes
         .read_exact(&mut thumbnail_size)
-        .map_err(|_| RpcError::InvalidMedia)?;
+        .map_err(|_| RpcCode::InvalidMedia)?;
     bytes
         .read_exact(&mut width)
-        .map_err(|_| RpcError::InvalidMedia)?;
+        .map_err(|_| RpcCode::InvalidMedia)?;
     bytes
         .read_exact(&mut height)
-        .map_err(|_| RpcError::InvalidMedia)?;
-    let size = usize::try_from(u64::from_le_bytes(size)).map_err(|_| RpcError::InvalidMedia)?;
+        .map_err(|_| RpcCode::InvalidMedia)?;
+    let size = usize::try_from(u64::from_le_bytes(size)).map_err(|_| RpcCode::InvalidMedia)?;
     let thumbnail_size = u64::from_le_bytes(thumbnail_size);
     let width = u32::from_le_bytes(width);
     let height = u32::from_le_bytes(height);
     let data = bytes
         .split_off(..size)
-        .ok_or(RpcError::InvalidMedia)?
+        .ok_or(RpcCode::InvalidMedia)?
         .to_vec();
     let thumbnail = if thumbnail_size == 0 {
         None
     } else {
         Some(Thumbnail {
-            size: UInt::try_from(thumbnail_size).map_err(|_| RpcError::InvalidMedia)?,
+            size: UInt::try_from(thumbnail_size).map_err(|_| RpcCode::InvalidMedia)?,
             data: bytes
-                .split_off(..usize::try_from(thumbnail_size).map_err(|_| RpcError::InvalidMedia)?)
-                .ok_or(RpcError::InvalidMedia)?
+                .split_off(..usize::try_from(thumbnail_size).map_err(|_| RpcCode::InvalidMedia)?)
+                .ok_or(RpcCode::InvalidMedia)?
                 .to_vec(),
             content_type: mime::IMAGE_JPEG,
             width: width.into(),
@@ -120,8 +121,7 @@ impl Core {
         height: u32,
         background: bool,
     ) -> Result<Vec<u8>, RpcError> {
-        #[cfg(not(target_family = "wasm"))]
-        if let Some(bytes) = crate::link_previews::scraped_media(&source).await {
+        if let Some(bytes) = self.tunnel_media(&source, usize::MAX).await {
             return bytes;
         }
         self.fetch_matrix_media(source, width, height, background)
@@ -141,7 +141,7 @@ impl Core {
         if let MediaSource::Plain(uri) = &source
             && uri.parts().is_err()
         {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
 
         let client = self.client().await?;
@@ -158,13 +158,15 @@ impl Core {
                         .media_downloads
                         .acquire()
                         .await
-                        .map_err(|_| RpcError::Unavailable)?;
+                        .map_err(|_| RpcCode::Unavailable)?;
                     if let Some(bytes) = cached_media(&client, &source, width, height).await {
                         return Ok(bytes);
                     }
                     permit
                 }
-                Err(tokio::sync::TryAcquireError::Closed) => return Err(RpcError::Unavailable),
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    return Err(RpcCode::Unavailable.into());
+                }
             };
             Some(permit)
         };
@@ -185,7 +187,7 @@ impl Core {
                         retry_after_ms,
                         "media refused by the breaker without a request"
                     );
-                    return Err(RpcError::MediaServerUnavailable { retry_after_ms });
+                    return Err(RpcCode::MediaServerUnavailable { retry_after_ms }.into());
                 }
                 Admission::Probe => {
                     probe = Some(ProbeGuard {
@@ -227,13 +229,7 @@ impl Core {
         if let Some(probe) = probe.as_mut() {
             probe.armed = false;
         }
-        result.map_err(|error| {
-            if is_not_found(&error) {
-                RpcError::MediaNotFound
-            } else {
-                RpcError::Unavailable
-            }
-        })
+        result.map_err(|error| media_code(&error).into())
     }
 
     async fn media_bytes(
@@ -297,7 +293,7 @@ impl Core {
             MediaSource::Encrypted(file) => file.url,
         };
         if uri.parts().is_err() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         let client = self.client().await?;
         client
@@ -437,7 +433,7 @@ impl Core {
     /// Returns an error when the MIME type is invalid, the user is logged out,
     /// or the upload fails.
     pub async fn upload_media(&self, mime: String, bytes: Vec<u8>) -> Result<String, RpcError> {
-        let mime: Mime = mime.parse().map_err(|_| RpcError::InvalidMedia)?;
+        let mime: Mime = mime.parse().map_err(|_| RpcCode::InvalidMedia)?;
 
         let response = self
             .client()
@@ -465,13 +461,13 @@ impl Core {
         let mut body = payload.as_slice();
         let (bytes, thumbnail) = attachment_data(&mut body)?;
         if !body.is_empty() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         drop(payload);
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > self.max_upload_size().await? {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
-        let mime: Mime = request.mime.parse().map_err(|_| RpcError::InvalidMedia)?;
+        let mime: Mime = request.mime.parse().map_err(|_| RpcCode::InvalidMedia)?;
         let reply = thread_reply(
             request.outgoing.in_reply_to.clone(),
             request.outgoing.thread_root.clone(),
@@ -502,6 +498,10 @@ impl Core {
             .audio_metadata
             .clone()
             .filter(|_| mime.type_() == mime::AUDIO);
+        let gif = mime.type_() == mime::VIDEO
+            && info
+                .gif
+                .unwrap_or_else(|| plays_as_gif(&bytes, info.duration_ms));
 
         let config = AttachmentConfig {
             caption: attachment_caption(caption, formatted_caption),
@@ -510,13 +510,14 @@ impl Core {
                 request.outgoing.mentions_room,
             )),
             reply,
-            info: Some(attachment_info(&mime, &info, bytes.len())),
+            info: Some(attachment_info(&mime, &info, &bytes)),
             thumbnail,
             extra_content: crate::outgoing::with_selected_quote(
                 attachment_extra_content(
                     persona.as_ref(),
                     request.spoiler,
                     audio_metadata.as_ref(),
+                    gif,
                 ),
                 request.outgoing.selected_quote,
             ),
@@ -544,7 +545,7 @@ impl Core {
         bytes: Vec<u8>,
     ) -> Result<(), RpcError> {
         if request.attachments.len() < 2 {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         let max_upload_size = self.max_upload_size().await?;
         let mut body = bytes.as_slice();
@@ -554,13 +555,13 @@ impl Core {
             .map(|item| {
                 let (bytes, thumbnail) = attachment_data(&mut body)?;
                 if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_upload_size {
-                    return Err(RpcError::InvalidMedia);
+                    return Err(RpcCode::InvalidMedia.into());
                 }
                 Ok((item, bytes, thumbnail))
             })
             .collect::<Result<Vec<_>, RpcError>>()?;
         if !body.is_empty() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         drop(bytes);
         let extra = request
@@ -585,8 +586,13 @@ impl Core {
                 request.outgoing.silent_reply,
             ));
         for (item, bytes, thumbnail) in attachments {
-            let mime: Mime = item.mime.parse().map_err(|_| RpcError::InvalidMedia)?;
-            let info = attachment_info(&mime, &item.info.unwrap_or_default(), bytes.len());
+            let mime: Mime = item.mime.parse().map_err(|_| RpcCode::InvalidMedia)?;
+            let view = item.info.unwrap_or_default();
+            let info = attachment_info(&mime, &view, &bytes);
+            let gif = mime.type_() == mime::VIDEO
+                && view
+                    .gif
+                    .unwrap_or_else(|| plays_as_gif(&bytes, view.duration_ms));
             gallery = gallery.add_item(GalleryItemInfo {
                 filename: item.filename,
                 content_type: mime,
@@ -594,7 +600,7 @@ impl Core {
                 attachment_info: info,
                 caption: None,
                 thumbnail,
-                extra_content: attachment_extra_content(None, item.spoiler, None),
+                extra_content: attachment_extra_content(None, item.spoiler, None, gif),
             });
         }
 
@@ -611,49 +617,53 @@ impl Core {
 #[cfg(not(target_family = "wasm"))]
 async fn download_persona_avatar(url: &str) -> Result<(String, Vec<u8>), RpcError> {
     const MAX_AVATAR_BYTES: usize = 20 * 1024 * 1024;
-    let url = url::Url::parse(url).map_err(|_| RpcError::InvalidMedia)?;
+    let url = url::Url::parse(url).map_err(|_| RpcCode::InvalidMedia)?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
     {
-        return Err(RpcError::InvalidMedia);
+        return Err(RpcCode::InvalidMedia.into());
     }
     // Do not send Matrix credentials to avatar hosts.
-    let http = crate::tls::apply(matrix_sdk::reqwest::Client::builder())
+    let http = crate::tls::apply(reqwest::Client::builder())
         .timeout(Duration::from_secs(30))
-        .redirect(matrix_sdk::reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::limited(5))
         .build()
-        .map_err(|_| RpcError::Unavailable)?;
+        .map_err(|error| {
+            crate::errors::coded("persona_avatar_client", RpcCode::Unavailable, &error)
+        })?;
     let mut response = http
         .get(url)
         .send()
         .await
-        .and_then(matrix_sdk::reqwest::Response::error_for_status)
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|error| {
             tracing::warn!("persona avatar download failed: {}", error.without_url());
-            RpcError::Unavailable
+            RpcCode::Unavailable
         })?;
     if response
         .content_length()
         .is_some_and(|size| size > MAX_AVATAR_BYTES as u64)
     {
-        return Err(RpcError::InvalidMedia);
+        return Err(RpcCode::InvalidMedia.into());
     }
     let mime = response
         .headers()
-        .get(matrix_sdk::reqwest::header::CONTENT_TYPE)
+        .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("image/*")
         .to_owned();
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| RpcError::Unavailable)? {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        crate::errors::coded("persona_avatar_body", RpcCode::Unavailable, &error)
+    })? {
         if chunk.len() > MAX_AVATAR_BYTES - bytes.len() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         bytes.extend_from_slice(&chunk);
     }
     if bytes.is_empty() {
-        return Err(RpcError::InvalidMedia);
+        return Err(RpcCode::InvalidMedia.into());
     }
     Ok((mime, bytes))
 }
@@ -703,10 +713,14 @@ fn attachment_extra_content(
     persona: Option<&PerMessageProfileView>,
     spoiler: bool,
     audio: Option<&AudioMetadataView>,
+    gif: bool,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut extra = persona.map(attachment_profile).unwrap_or_default();
     if let Some(audio) = audio {
         extra.extend(audio_metadata_content(audio));
+    }
+    if gif {
+        extra.insert("info".to_owned(), serde_json::Value::Object(gif_flags()));
     }
     if spoiler {
         extra.insert(SPOILER_PROPERTY.to_owned(), serde_json::Value::Bool(true));
@@ -714,7 +728,8 @@ fn attachment_extra_content(
     (!extra.is_empty()).then_some(extra)
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod avatar_import_tests {
     use super::download_persona_avatar;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
@@ -789,8 +804,8 @@ fn attachment_caption(
     })
 }
 
-fn attachment_info(mime: &Mime, view: &AttachmentInfoView, size: usize) -> AttachmentInfo {
-    let size = UInt::try_from(size).ok();
+fn attachment_info(mime: &Mime, view: &AttachmentInfoView, bytes: &[u8]) -> AttachmentInfo {
+    let size = UInt::try_from(bytes.len()).ok();
     let width = view.width.map(UInt::from);
     let height = view.height.map(UInt::from);
     let duration = view.duration_ms.map(|ms| Duration::from_millis(ms.into()));
@@ -802,7 +817,7 @@ fn attachment_info(mime: &Mime, view: &AttachmentInfoView, size: usize) -> Attac
             height,
             size,
             blurhash,
-            is_animated: view.animated,
+            is_animated: image_is_animated(bytes).or(view.animated),
         }),
         mime::VIDEO => AttachmentInfo::Video(BaseVideoInfo {
             duration,
@@ -843,7 +858,7 @@ impl Drop for ProbeGuard<'_> {
 
 async fn media_timeout<T>(
     limit: Duration,
-    future: impl std::future::Future<Output = T>,
+    future: impl Future<Output = T>,
 ) -> matrix_sdk::Result<T> {
     matrix_sdk::timeout::timeout(future, limit)
         .await
@@ -852,7 +867,7 @@ async fn media_timeout<T>(
 
 async fn with_retries<T, Fut>(attempt: impl FnMut() -> Fut) -> matrix_sdk::Result<T>
 where
-    Fut: std::future::Future<Output = matrix_sdk::Result<T>>,
+    Fut: Future<Output = matrix_sdk::Result<T>>,
 {
     attempt
         .retry(MEDIA_RETRY_DELAYS.into_iter())
@@ -976,6 +991,15 @@ fn media_origin(source: &MediaSource) -> Option<(OwnedServerName, String)> {
     Some((server.to_owned(), media_id.to_owned()))
 }
 
+/// Every missing thumbnail ends here, so the code goes out without a report.
+fn media_code(error: &matrix_sdk::Error) -> RpcCode {
+    if is_not_found(error) {
+        RpcCode::MediaNotFound
+    } else {
+        RpcCode::Unavailable
+    }
+}
+
 fn is_not_found(error: &matrix_sdk::Error) -> bool {
     match error {
         matrix_sdk::Error::Http(http) => match http.as_ref() {
@@ -1042,7 +1066,7 @@ fn media_label(source: &MediaSource) -> String {
 pub(crate) fn mxc_uri(url: &str) -> Result<OwnedMxcUri, RpcError> {
     let uri = OwnedMxcUri::from(url);
     if uri.parts().is_err() {
-        return Err(RpcError::InvalidMedia);
+        return Err(RpcCode::InvalidMedia.into());
     }
     Ok(uri)
 }
@@ -1065,7 +1089,8 @@ mod tests {
             album: None,
             cover_art_blurhash: Some("LBEpAr~VM{x[004:oyM|9GM|xtIU".to_owned()),
         };
-        let extra = attachment_extra_content(None, true, Some(&metadata)).expect("extra content");
+        let extra =
+            attachment_extra_content(None, true, Some(&metadata), false).expect("extra content");
 
         let inner = &extra["info"]["org.matrix.msc4549.audio_metadata"];
         assert_eq!(inner["title"], "Moonwalker");
@@ -1091,6 +1116,7 @@ mod tests {
             waveform: None,
             voice: false,
             audio_metadata: None,
+            gif: None,
         }
     }
 
@@ -1125,7 +1151,11 @@ mod tests {
 
     #[test]
     fn an_image_carries_its_dimensions_and_byte_count() {
-        let info = attachment_info(&mime("image/png"), &view(Some(800), Some(600), None), 4096);
+        let info = attachment_info(
+            &mime("image/png"),
+            &view(Some(800), Some(600), None),
+            &[0; 4096],
+        );
 
         let AttachmentInfo::Image(image) = info else {
             panic!("an image mime type must produce image info: {info:?}");
@@ -1142,10 +1172,26 @@ mod tests {
             ..view(Some(1), Some(1), None)
         };
 
-        let AttachmentInfo::Image(image) = attachment_info(&mime("image/gif"), &animated, 1) else {
+        let AttachmentInfo::Image(image) = attachment_info(&mime("image/gif"), &animated, &[0])
+        else {
             panic!("wrong variant");
         };
         assert_eq!(image.is_animated, Some(true));
+    }
+
+    #[test]
+    fn the_image_bytes_decide_whether_it_is_animated() {
+        let guessed = AttachmentInfoView {
+            animated: Some(true),
+            ..view(Some(16), Some(16), None)
+        };
+        let still = include_bytes!("../../sable-model/tests/fixtures/images/still.webp");
+
+        let AttachmentInfo::Image(image) = attachment_info(&mime("image/webp"), &guessed, still)
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(image.is_animated, Some(false));
     }
 
     #[test]
@@ -1153,7 +1199,7 @@ mod tests {
         let info = attachment_info(
             &mime("video/mp4"),
             &view(Some(1920), Some(1080), Some(3500)),
-            9,
+            &[0; 9],
         );
 
         let AttachmentInfo::Video(video) = info else {
@@ -1165,7 +1211,11 @@ mod tests {
 
     #[test]
     fn audio_keeps_the_duration_and_drops_dimensions_it_has_no_field_for() {
-        let info = attachment_info(&mime("audio/ogg"), &view(None, None, Some(12_000)), 64);
+        let info = attachment_info(
+            &mime("audio/ogg"),
+            &view(None, None, Some(12_000)),
+            &[0; 64],
+        );
 
         let AttachmentInfo::Audio(audio) = info else {
             panic!("wrong variant");
@@ -1176,7 +1226,11 @@ mod tests {
 
     #[test]
     fn anything_else_reports_only_its_size() {
-        let info = attachment_info(&mime("application/pdf"), &view(Some(9), Some(9), None), 128);
+        let info = attachment_info(
+            &mime("application/pdf"),
+            &view(Some(9), Some(9), None),
+            &[0; 128],
+        );
 
         let AttachmentInfo::File(file) = info else {
             panic!("wrong variant");
@@ -1186,7 +1240,11 @@ mod tests {
 
     #[test]
     fn an_unmeasurable_attachment_still_reports_its_size() {
-        let info = attachment_info(&mime("image/png"), &AttachmentInfoView::default(), 512);
+        let info = attachment_info(
+            &mime("image/png"),
+            &AttachmentInfoView::default(),
+            &[0; 512],
+        );
 
         let AttachmentInfo::Image(image) = info else {
             panic!("wrong variant");
@@ -1238,9 +1296,10 @@ mod tests {
 
     #[test]
     fn a_spoiler_rides_the_extra_content_beside_the_persona() {
-        assert!(attachment_extra_content(None, false, None).is_none());
+        assert!(attachment_extra_content(None, false, None, false).is_none());
 
-        let spoiler = attachment_extra_content(None, true, None).expect("a spoiler property");
+        let spoiler =
+            attachment_extra_content(None, true, None, false).expect("a spoiler property");
         assert_eq!(spoiler[SPOILER_PROPERTY], true);
 
         let profile = PerMessageProfileView {
@@ -1257,7 +1316,8 @@ mod tests {
             has_animal: None,
             animal_need: None,
         };
-        let both = attachment_extra_content(Some(&profile), true, None).expect("both properties");
+        let both =
+            attachment_extra_content(Some(&profile), true, None, false).expect("both properties");
         assert_eq!(both["com.beeper.per_message_profile"]["id"], "hatchy");
         assert_eq!(both[SPOILER_PROPERTY], true);
     }

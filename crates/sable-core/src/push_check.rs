@@ -1,7 +1,7 @@
 #[cfg(not(target_family = "wasm"))]
 use backon::Retryable;
 
-use crate::errors::CoreError;
+use crate::errors::{CoreError, ReportExt};
 use matrix_sdk::Client;
 use matrix_sdk::ruma::TransactionId;
 use serde::Serialize;
@@ -69,7 +69,7 @@ pub fn notify_body(
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn transient(error: &matrix_sdk::reqwest::Error) -> bool {
+fn transient(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_dns() || error.is_timeout()
 }
 
@@ -77,7 +77,7 @@ fn transient(error: &matrix_sdk::reqwest::Error) -> bool {
 async fn retry_transient<T, F, Fut>(request: F, delays: &[Duration]) -> Result<T, CoreError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, matrix_sdk::reqwest::Error>>,
+    Fut: Future<Output = Result<T, reqwest::Error>>,
 {
     request
         .retry(delays.iter().copied())
@@ -85,7 +85,7 @@ where
         .notify(|error, _| tracing::debug!(%error, "retrying push gateway request"))
         .sleep(matrix_sdk::sleep::sleep)
         .await
-        .map_err(CoreError::backend)
+        .backend()
 }
 
 pub enum GatewayAnswer {
@@ -97,17 +97,14 @@ pub enum GatewayAnswer {
 
 #[cfg(not(target_family = "wasm"))]
 async fn notify_endpoint(url: &str, sealed: Vec<u8>) -> Result<bool, CoreError> {
-    let http = crate::tls::apply(matrix_sdk::reqwest::Client::builder())
+    let http = crate::tls::apply(reqwest::Client::builder())
         .build()
-        .map_err(CoreError::backend)?;
+        .backend()?;
     let response = retry_transient(
         || async {
             http.post(url)
-                .header(
-                    matrix_sdk::reqwest::header::CONTENT_TYPE,
-                    "application/octet-stream",
-                )
-                .header(matrix_sdk::reqwest::header::CONTENT_ENCODING, "aes128gcm")
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_ENCODING, "aes128gcm")
                 .header("TTL", "60")
                 .body(sealed.clone())
                 .send()
@@ -125,8 +122,8 @@ async fn notify_endpoint(url: &str, sealed: Vec<u8>) -> Result<bool, CoreError> 
 fn seal(p256dh: &str, auth: &str, plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
     let mut secret = [0u8; 32];
     let mut salt = [0u8; 16];
-    getrandom::fill(&mut secret).map_err(CoreError::backend)?;
-    getrandom::fill(&mut salt).map_err(CoreError::backend)?;
+    getrandom::fill(&mut secret).backend()?;
+    getrandom::fill(&mut salt).backend()?;
     seal_with(p256dh, auth, plaintext, &secret, salt)
 }
 
@@ -199,17 +196,14 @@ async fn notify(url: &str, body: &impl Serialize) -> Result<GatewayAnswer, CoreE
         rejected: Vec<String>,
     }
 
-    let http = crate::tls::apply(matrix_sdk::reqwest::Client::builder())
+    let http = crate::tls::apply(reqwest::Client::builder())
         .build()
-        .map_err(CoreError::backend)?;
-    let body = serde_json::to_string(body).map_err(CoreError::backend)?;
+        .backend()?;
+    let body = serde_json::to_string(body).backend()?;
     let response = retry_transient(
         || async {
             http.post(url)
-                .header(
-                    matrix_sdk::reqwest::header::CONTENT_TYPE,
-                    "application/json",
-                )
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.clone())
                 .send()
                 .await
@@ -223,9 +217,9 @@ async fn notify(url: &str, body: &impl Serialize) -> Result<GatewayAnswer, CoreE
     ) {
         return Ok(GatewayAnswer::Unforwarded);
     }
-    let response = response.error_for_status().map_err(CoreError::backend)?;
-    let bytes = response.bytes().await.map_err(CoreError::backend)?;
-    let answer: NotifyResponse = serde_json::from_slice(&bytes).map_err(CoreError::backend)?;
+    let response = response.error_for_status().backend()?;
+    let bytes = response.bytes().await.backend()?;
+    let answer: NotifyResponse = serde_json::from_slice(&bytes).backend()?;
     Ok(GatewayAnswer::Read(answer.rejected))
 }
 
@@ -245,7 +239,7 @@ async fn notify(url: &str, body: &impl Serialize) -> Result<GatewayAnswer, CoreE
     init.set_method("POST");
     init.set_mode(web_sys::RequestMode::NoCors);
     init.set_body(&wasm_bindgen::JsValue::from_str(
-        &serde_json::to_string(body).map_err(CoreError::backend)?,
+        &serde_json::to_string(body).backend()?,
     ));
     let request = web_sys::Request::new_with_str_and_init(url, &init).map_err(js_error)?;
     wasm_bindgen_futures::JsFuture::from(js_fetch(&request))
@@ -299,7 +293,7 @@ pub async fn discover_gateway(endpoint: &str) -> Option<String> {
     url.set_path(crate::notifications::GATEWAY_PATH);
     url.set_query(None);
     let gateway = crate::notifications::gateway(url.as_str()).ok()?;
-    let http = crate::tls::apply(matrix_sdk::reqwest::Client::builder())
+    let http = crate::tls::apply(reqwest::Client::builder())
         .timeout(DISCOVERY_TIMEOUT)
         .build()
         .ok()?;
@@ -307,7 +301,7 @@ pub async fn discover_gateway(endpoint: &str) -> Option<String> {
         .get(&gateway)
         .send()
         .await
-        .and_then(matrix_sdk::reqwest::Response::error_for_status)
+        .and_then(reqwest::Response::error_for_status)
         .inspect_err(|error| tracing::debug!(%error, %gateway, "push gateway discovery failed"))
         .ok()?;
     let body = response.bytes().await.ok()?;
@@ -350,7 +344,7 @@ pub async fn send_diagnostic_push(
             .to_owned();
         let event_id = format!("{DIAGNOSTIC_EVENT_PREFIX}{}", TransactionId::new());
         let body = notify_body(&event_id, app_id, pushkey, pusher.data);
-        let body = serde_json::to_vec(&body).map_err(CoreError::backend)?;
+        let body = serde_json::to_vec(&body).backend()?;
         return Ok(direct_delivery(
             notify_endpoint(endpoint.as_str(), seal(pushkey, &auth, &body)?).await?,
             event_id,
@@ -527,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn a_gateway_request_retries_transient_connection_failures() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let client = matrix_sdk::reqwest::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(1))
             .build()
             .unwrap();
@@ -560,16 +554,12 @@ mod tests {
             .mount(&server)
             .await;
         let attempts = AtomicUsize::new(0);
-        let client = matrix_sdk::reqwest::Client::new();
+        let client = reqwest::Client::new();
         let result = retry_transient(
             || {
                 attempts.fetch_add(1, Ordering::Relaxed);
                 let request = client.get(server.uri()).send();
-                async {
-                    request
-                        .await
-                        .and_then(matrix_sdk::reqwest::Response::error_for_status)
-                }
+                async { request.await.and_then(reqwest::Response::error_for_status) }
             },
             &[Duration::ZERO, Duration::ZERO],
         )

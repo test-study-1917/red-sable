@@ -1,6 +1,9 @@
 package moe.sable.client
 
+import android.Manifest
+import android.content.ContentUris
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.res.Configuration
@@ -8,7 +11,9 @@ import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Base64
@@ -16,7 +21,9 @@ import android.webkit.WebView
 import android.webkit.JavascriptInterface
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.Keep
+import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.core.content.FileProvider
 import androidx.core.content.pm.ShortcutManagerCompat
@@ -29,6 +36,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import moe.sable.push.CallAnswer
 import moe.sable.push.ConversationShortcuts
 import moe.sable.push.Secrets
 import java.lang.ref.WeakReference
@@ -40,11 +48,18 @@ import androidx.core.graphics.drawable.toDrawable
 
 class MainActivity : TauriActivity() {
   private external fun nativeInitSystemBars()
+  private external fun nativeSentryConsent(enabled: Boolean)
   private external fun nativeNetworkChanged(available: Boolean, unmetered: Boolean)
   private var networkCallback: ConnectivityManager.NetworkCallback? = null
   private var fullscreenClient: FullscreenChromeClient? = null
   private var mainWebView: WebView? = null
   private val authBrowser = AuthBrowser(this)
+  private var mediaAccessAsked: CompletableFuture<Unit>? = null
+  private val mediaAccessRequest =
+    registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+      mediaAccessAsked?.complete(Unit)
+      mediaAccessAsked = null
+    }
   private val fullscreenBackCallback = object : OnBackPressedCallback(false) {
     override fun handleOnBackPressed() {
       fullscreenClient?.exitFullscreen()
@@ -54,9 +69,14 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     // Before Tauri starts the core, which reads saved logins.
     Secrets.install(this)
-    NativeSentry.apply(this, getSharedPreferences("sentry", MODE_PRIVATE).getBoolean("enabled", false))
+    val reporting = getSharedPreferences("sentry", MODE_PRIVATE).getBoolean("enabled", false)
+    NativeSentry.apply(this, reporting)
     enableEdgeToEdge()
+    val heldAnswer = intent.takeIf { CallAnswer.waitsForUnlock(this, it) }
+    if (heldAnswer != null) setIntent(Intent(Intent.ACTION_MAIN))
     super.onCreate(savedInstanceState)
+    // Until the webview loads, the core would otherwise drop what it reports.
+    runCatching { nativeSentryConsent(reporting) }
     
     instance = this
     onBackPressedDispatcher.addCallback(this, fullscreenBackCallback)
@@ -67,6 +87,7 @@ class MainActivity : TauriActivity() {
     AppLifecycle.start()
     startNetworkMonitor()
     stageShareIntent(intent)
+    heldAnswer?.let { CallAnswer.answerAfterUnlock(this, it, ::deliverIntent) }
   }
 
   private fun startNetworkMonitor() {
@@ -159,6 +180,14 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onNewIntent(intent: Intent) {
+    if (CallAnswer.waitsForUnlock(this, intent)) {
+      CallAnswer.answerAfterUnlock(this, intent, ::deliverIntent)
+      return
+    }
+    deliverIntent(intent)
+  }
+
+  private fun deliverIntent(intent: Intent) {
     setIntent(intent)
     super.onNewIntent(intent)
     stageShareIntent(intent)
@@ -253,6 +282,58 @@ class MainActivity : TauriActivity() {
     } catch (e: Exception) {
       Log.w("ShareTarget", "stage failed: ${e.message}")
     }
+  }
+
+  private fun mediaPermissions(): Array<String> = when {
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
+      Manifest.permission.READ_MEDIA_IMAGES,
+      Manifest.permission.READ_MEDIA_VIDEO,
+      Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+    )
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+      Manifest.permission.READ_MEDIA_IMAGES,
+      Manifest.permission.READ_MEDIA_VIDEO,
+    )
+    else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+  }
+
+  // Partial access counts: asking again would reopen the system's photo selection every time.
+  private fun readsMedia(): Boolean = mediaPermissions().any {
+    ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+  }
+
+  private fun recentMedia(limit: Int): JSONArray {
+    val items = JSONArray()
+    val timed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+    val columns = listOfNotNull(
+      MediaStore.Files.FileColumns._ID,
+      MediaStore.Files.FileColumns.MEDIA_TYPE,
+      MediaStore.Files.FileColumns.DISPLAY_NAME,
+      if (timed) MediaStore.Files.FileColumns.DURATION else null,
+    ).toTypedArray()
+    val visual = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN " +
+      "(${MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE}, ${MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO})"
+    contentResolver.query(
+      MediaStore.Files.getContentUri("external"),
+      columns,
+      visual,
+      null,
+      "${MediaStore.Files.FileColumns.DATE_ADDED} DESC",
+    )?.use { cursor ->
+      while (items.length() < limit && cursor.moveToNext()) {
+        val video = cursor.getInt(1) == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+        val collection =
+          if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+          else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        items.put(JSONObject().apply {
+          put("id", ContentUris.withAppendedId(collection, cursor.getLong(0)).toString())
+          put("kind", if (video) "video" else "image")
+          put("name", cursor.getString(2) ?: "")
+          put("duration", if (timed) cursor.getLong(3) / 1000.0 else 0.0)
+        })
+      }
+    }
+    return items
   }
 
   override fun onDestroy() {
@@ -382,6 +463,26 @@ class MainActivity : TauriActivity() {
     @Keep
     @JvmStatic
     @Suppress("unused")
+    fun recentMediaNative(limit: Int): String {
+      val activity = checkNotNull(instance) { "Activity is unavailable" }
+      if (!activity.readsMedia()) {
+        val asked = CompletableFuture<Unit>()
+        activity.runOnUiThread {
+          runCatching {
+            activity.mediaAccessAsked?.complete(Unit)
+            activity.mediaAccessAsked = asked
+            activity.mediaAccessRequest.launch(activity.mediaPermissions())
+          }.onFailure { asked.completeExceptionally(it) }
+        }
+        asked.get(2, TimeUnit.MINUTES)
+        check(activity.readsMedia()) { "Media access was denied" }
+      }
+      return activity.recentMedia(limit).toString()
+    }
+
+    @Keep
+    @JvmStatic
+    @Suppress("unused")
     fun setNavigationBarLightNative(light: Boolean) {
       val activity = instance ?: return
       
@@ -416,6 +517,20 @@ class MainActivity : TauriActivity() {
           
           shownBarsBehavior?.let { controller.systemBarsBehavior = it }
           shownBarsBehavior = null
+        }
+      }
+    }
+
+    @Keep
+    @JvmStatic
+    @Suppress("unused")
+    fun setKeepScreenOnNative(on: Boolean) {
+      val activity = instance ?: return
+      activity.runOnUiThread {
+        if (on) {
+          activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+          activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
       }
     }

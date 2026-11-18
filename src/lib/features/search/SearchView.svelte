@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clamp } from '#lib/clamp.js';
   import { MediaQuery } from 'svelte/reactivity';
   import type { SearchContextView, SearchHitView, SearchOrder } from '#src/generated/protocol';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
@@ -77,7 +78,7 @@
   let destroyed = false;
 
   search.query = untrack(() => (panel ? initialQuery : (page.url.searchParams.get('q') ?? '')));
-  search.order = untrack(() => (panel ? 'rank' : orderFrom(page.url.searchParams.get('order'))));
+  search.order = untrack(() => (panel ? 'recent' : orderFrom(page.url.searchParams.get('order'))));
   if (search.query !== '') {
     search.schedule();
     scheduleLookup();
@@ -211,7 +212,7 @@
   });
 
   function orderFrom(value: string | null): SearchOrder {
-    return value === 'recent' || value === 'oldest' ? value : 'rank';
+    return value === 'rank' || value === 'oldest' ? value : 'recent';
   }
 
   function knownSenders(): SenderIdentity[] {
@@ -430,7 +431,7 @@
     const { draft } = field;
     if (element.value === draft) return;
 
-    const position = Math.max(0, Math.min(draft.length, caret + draft.length - typed.length));
+    const position = clamp(caret + draft.length - typed.length, 0, draft.length);
     element.value = draft;
     element.setSelectionRange(position, position);
   }
@@ -469,7 +470,7 @@
     if (panel) return;
     const parts: string[] = [];
     if (search.query !== '') parts.push(`q=${encodeURIComponent(search.query)}`);
-    if (search.order !== 'rank') parts.push(`order=${search.order}`);
+    if (search.order !== 'recent') parts.push(`order=${search.order}`);
     const space = page.url.searchParams.get('space');
     if (space !== null) parts.push(`space=${encodeURIComponent(space)}`);
 
@@ -588,7 +589,7 @@
                     <span class="chip-operator">{chip.negated ? '-' : ''}{chip.operator}:</span>
                     <span class="chip-value">{chipLabel(chip)}</span>
                     {#if isUnresolved(chip)}
-                      <span class="visually-hidden">{i18n.t('search.chipUnresolved')}</span>
+                      <span class="screen-reader-only">{i18n.t('search.chipUnresolved')}</span>
                     {/if}
                   </button>
                   <button
@@ -690,7 +691,7 @@
       </p>
     {/if}
 
-    <p class="announcement" role="status" aria-live="polite">{status}</p>
+    <p class="screen-reader-only" role="status" aria-live="polite">{status}</p>
 
     <div
       class={['results', { refining: search.refining && search.hits.length > 0 }]}
@@ -790,7 +791,7 @@
           {@const room = roomList.byId(group.roomId)}
           {@const label = roomList.labelFor(group.roomId)}
           <section class="group">
-            <h2 class={{ 'visually-hidden': panel && search.groups.length === 1 }}>
+            <h2 class={{ 'screen-reader-only': panel && search.groups.length === 1 }}>
               <Avatar id={group.roomId} src={room?.avatar_url ?? null} name={label} size="small" />
               <span class="group-name">{label}</span>
               <span class="group-count">{group.hits.length}</span>
@@ -1043,15 +1044,6 @@
     color: var(--warn-on-container);
   }
 
-  .visually-hidden {
-    block-size: 1px;
-    clip-path: inset(50%);
-    inline-size: 1px;
-    overflow: hidden;
-    position: absolute;
-    white-space: nowrap;
-  }
-
   .chip-operator {
     flex: 0 0 auto;
     opacity: 0.75;
@@ -1122,7 +1114,7 @@
     color: var(--surface-var-on-container);
     font-size: var(--font-size-small);
     margin: var(--space-100) 0 0;
-    padding-left: var(--space-500);
+    padding-inline-start: var(--space-500);
   }
 
   .empty p {
@@ -1146,16 +1138,6 @@
     .chip-remove {
       --target: var(--target-hit);
     }
-  }
-
-  .announcement {
-    block-size: 1px;
-    clip-path: inset(50%);
-    inline-size: 1px;
-    margin: 0;
-    overflow: hidden;
-    position: absolute;
-    white-space: nowrap;
   }
 
   .count {

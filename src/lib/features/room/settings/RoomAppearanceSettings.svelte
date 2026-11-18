@@ -1,6 +1,12 @@
 <script lang="ts">
-  import type { MediaPreviewsView, RoomListItemView } from '#src/generated/protocol';
+  import type {
+    MediaPreviewsView,
+    RoomListItemView,
+    RoomPermissionsView,
+    RoomPowerLevelsView,
+  } from '#src/generated/protocol';
 
+  import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import {
     hasRoomMediaPreviews,
@@ -9,12 +15,21 @@
   import { mediaPreviewSettings } from '#lib/settings/media-previews.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
-  import type { ShowRoomIcon } from '#lib/settings/preferences.svelte.js';
+  import type { ShowRoomIcon } from '#lib/settings/definitions.js';
   import Select from '#lib/ui/primitives/Select.svelte';
+  import Switch from '#lib/ui/primitives/Switch.svelte';
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
 
+  import { isBridgedSpace, setBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
   import { roomIconOverride, setRoomIconOverride } from '#lib/rooms/room-appearance.svelte.js';
+  import {
+    SPACE_BRIDGE_BADGES_EVENT,
+    setSpaceHidesBridgeBadges,
+    spaceHidesBridgeBadges,
+  } from '#lib/rooms/space-bridge-badges.svelte.js';
+
+  import { canSendState } from './permission-groups';
 
   import '#lib/ui/primitives/settings-row.css';
 
@@ -22,28 +37,30 @@
 
   interface Props {
     room: RoomListItemView | null;
+    permissions?: RoomPermissionsView | null;
+    levels?: RoomPowerLevelsView | null;
   }
 
-  let { room }: Props = $props();
+  let { room, permissions = null, levels = null }: Props = $props();
+  const core = useCoreClient();
 
   let roomId = $derived(room?.room_id ?? null);
   let value = $derived(roomIconOverride(roomId) ?? DEFAULT);
-  let options = $derived([
-    {
-      value: DEFAULT,
-      label: i18n.t('room.appearanceIconDefault', {
-        mode: i18n.t(`settings.showRoomIcon${label(preferences.showRoomIcon)}`),
-      }),
-    },
+  let modes = $derived([
     { value: 'always', label: i18n.t('common.always') },
     { value: 'sometimes', label: i18n.t('settings.showRoomIconSometimes') },
     { value: 'collapsed', label: i18n.t('settings.showRoomIconCollapsed') },
     { value: 'never', label: i18n.t('common.never') },
   ]);
-
-  function label(mode: ShowRoomIcon): string {
-    return `${mode.slice(0, 1).toLocaleUpperCase()}${mode.slice(1)}`;
-  }
+  let options = $derived([
+    {
+      value: DEFAULT,
+      label: i18n.t('room.appearanceIconDefault', {
+        mode: modes.find((mode) => mode.value === preferences.showRoomIcon)?.label,
+      }),
+    },
+    ...modes,
+  ]);
 
   function select(next: string): void {
     const target = roomId;
@@ -89,6 +106,35 @@
     };
   });
 
+  let canHideBadges = $derived(
+    canSendState(levels, permissions?.own_power_level ?? 0, SPACE_BRIDGE_BADGES_EVENT)
+  );
+  let badgesHidden = $state(false);
+
+  $effect(() => {
+    const target = roomId;
+    badgesHidden = false;
+    if (!target) return;
+    let current = true;
+    void spaceHidesBridgeBadges(core, target).then((hidden) => {
+      if (current) badgesHidden = hidden;
+    });
+    return () => {
+      current = false;
+    };
+  });
+
+  function setBadgesHidden(hidden: boolean): void {
+    const target = roomId;
+    if (!target) return;
+    badgesHidden = hidden;
+    setSpaceHidesBridgeBadges(core, target, hidden).catch((error: unknown) => {
+      console.warn('[sable room] changing the space bridge badges failed', error);
+      badgesHidden = !hidden;
+      toasts.error(i18n.t('errors.actionFailed'));
+    });
+  }
+
   function selectMedia(next: string): void {
     const target = roomId;
     if (!target) return;
@@ -125,6 +171,30 @@
           onValueChange={select}
         />
       </SettingsRow>
+      <SettingsRow
+        title={i18n.t('room.appearanceBridgedTitle')}
+        description={i18n.t('room.appearanceBridgedHint')}
+      >
+        <Switch
+          checked={isBridgedSpace(roomId)}
+          label={i18n.t('room.appearanceBridgedTitle')}
+          onCheckedChange={(checked) => {
+            if (roomId) setBridgedSpace(roomId, checked);
+          }}
+        />
+      </SettingsRow>
+      {#if canHideBadges}
+        <SettingsRow
+          title={i18n.t('room.appearanceHideBridgesTitle')}
+          description={i18n.t('room.appearanceHideBridgesHint')}
+        >
+          <Switch
+            checked={badgesHidden}
+            label={i18n.t('room.appearanceHideBridgesTitle')}
+            onCheckedChange={setBadgesHidden}
+          />
+        </SettingsRow>
+      {/if}
       <SettingsRow title={i18n.t('room.mediaTitle')} description={i18n.t('room.mediaHint')}>
         <Select
           value={roomMedia ?? DEFAULT}

@@ -3,7 +3,10 @@
 </script>
 
 <script lang="ts">
+  import { cubicOut } from 'svelte/easing';
   import { MediaQuery } from 'svelte/reactivity';
+  import { slide } from 'svelte/transition';
+  import { MOTION_MS, motionMs } from '#lib/ui/motion.js';
   import type {
     ImageUsageView,
     MemberView,
@@ -28,6 +31,7 @@
   import { previewSources } from '#lib/features/room/media/link-preview-cache.js';
   import { previewableLinks } from '#lib/features/room/media/link-preview.js';
   import { i18n } from '#lib/i18n.js';
+  import { serverNameOf } from '#lib/matrix-id.js';
   import { isPackChange } from '#lib/emoji/load-packs.js';
   import { capturesFromCamera, pickFiles } from '#lib/platform/files.js';
   import { isAndroid } from '#lib/platform/os.js';
@@ -36,11 +40,8 @@
   import { personaSpaces } from './persona-spaces.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
-  import {
-    preferences,
-    setPreference,
-    type ImageMetadata,
-  } from '#lib/settings/preferences.svelte.js';
+  import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { type ImageMetadata } from '#lib/settings/definitions.js';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
   import { cachedMediaUrl, holdMediaUrl, loadMediaUrl } from '#lib/ui/media-url.js';
@@ -51,6 +52,9 @@
   import BotCommandForm from './BotCommandForm.svelte';
   import ComposerAttachments from './ComposerAttachments.svelte';
   import ComposerAutocomplete from './ComposerAutocomplete.svelte';
+  import ComposerOffer, { type OfferChoice } from './ComposerOffer.svelte';
+  import { OFFER_RULES } from './editor/offer-rules';
+  import type { ComposerOffer as Offer } from './editor/offers';
   import type { GifResult } from '#lib/gif/providers.js';
   import ComposerBoard from './ComposerBoard.svelte';
   import ComposerContextBanner from './ComposerContextBanner.svelte';
@@ -70,9 +74,18 @@
   import type { AutocompleteQuery, Suggestion } from './autocomplete';
   import { formattedForEditing, type ComposerContext } from '#lib/composer/composer-context.js';
   import {
+    readBotCommand,
+    readDraft,
+    writeBotCommand,
+    writeDraft,
+    type BotCommandDraft,
+  } from '#lib/composer/composer-drafts.svelte.js';
+  import {
     previewKind,
     restoreFile,
     stageFiles,
+    replaceFile,
+    setGif,
     setMetadata,
     toggleSpoiler,
     unstageFile,
@@ -113,7 +126,7 @@
     buildInvocation,
     draftsFromText,
     matchBotCommand,
-    type ArgumentDrafts,
+    prefillDrafts,
     type BotCommand,
     type BotCommandInvocation,
   } from './bot-commands';
@@ -317,18 +330,16 @@
   let configuredRich = preferences.richTextComposer;
   let query = $state.raw<AutocompleteQuery | null>(null);
   let dismissedAt = $state<number | null>(null);
+  let offer = $state.raw<Offer | null>(null);
+  let dismissedOffer = $state<string | null>(null);
+  let offerIndex = $state(0);
   let activeIndex = $state(0);
   let previousContext: ComposerContext | null = untrack(() => restoredContext);
   let deleteEditTarget = $state.raw<ComposerContext | null>(null);
   let members = $derived(roomMembers?.length ? roomMembers : sources.loadedMembers);
-  let activeBotCommand = $derived.by<{
-    command: BotCommand;
-    drafts: ArgumentDrafts;
-    prefix: string;
-  } | null>(() => {
-    void roomId;
-    return null;
-  });
+  let activeBotCommand = $derived(
+    readBotCommand(draftKey(), core.session?.account_id ?? '') ?? null
+  );
 
   let desktop = $derived(appLayout.current);
   let sending = $derived(inFlight > 0);
@@ -379,6 +390,31 @@
   let panelOpen = $derived(
     query !== null && dismissedAt !== query.start && (query.sigil !== '+:' || quickReactEnabled)
   );
+  const offerKeyOf = (current: Offer) =>
+    `${current.rule.id}:${String(current.from)}:${current.text}`;
+  let offerOpen = $derived(
+    !panelOpen &&
+      offer !== null &&
+      preferences[offer.rule.mode] === 'ask' &&
+      dismissedOffer !== offerKeyOf(offer)
+  );
+  let offerChoices = $derived(
+    offer
+      ? [
+          { choice: 'once' as const, label: i18n.t(offer.rule.strings.once) },
+          {
+            choice: 'always' as const,
+            label: i18n.t(offer.rule.strings.always),
+            hint: i18n.t(offer.rule.strings.alwaysHint),
+          },
+          {
+            choice: 'never' as const,
+            label: i18n.t(offer.rule.strings.never),
+            hint: i18n.t(offer.rule.strings.neverHint),
+          },
+        ]
+      : []
+  );
   let admin = $derived(adminScope(roomId, roomList.rooms, core.session?.user_id));
   let botCommandsEnabled = $derived(
     onSendBotCommand !== undefined && context?.kind !== 'edit' && !editingScheduled
@@ -410,7 +446,8 @@
       advertisedAdminCommands.length > 0
         ? adminCommandTree(advertisedAdminCommands)
         : sources.adminCommands,
-      slashBotCommands
+      slashBotCommands,
+      roomList.roomSpaces
     )
   );
 
@@ -463,7 +500,17 @@
     label: () => i18n.t('timeline.messagePlaceholder'),
     describedBy: hintId,
     listboxId,
-    activeOptionId: () => (panelOpen && suggestions.length > 0 ? optionId(active) : null),
+    activeOptionId: () =>
+      panelOpen && suggestions.length > 0
+        ? optionId(active)
+        : offerOpen
+          ? optionId(offerIndex)
+          : null,
+    offers: OFFER_RULES,
+    onOffer: (next) => {
+      if (next?.from !== offer?.from || next?.text !== offer?.text) offerIndex = 0;
+      offer = next;
+    },
     editable: () => !readOnly,
     onSubmit: () => {
       void send();
@@ -562,6 +609,10 @@
       prefilledFor = null;
       prefilledDoc = undefined;
       error = null;
+      retry = null;
+      pollOpen = false;
+      locationOpen = false;
+      scheduleOpen = false;
       recording = false;
       recordingDraft = undefined;
       boardOpen = false;
@@ -613,16 +664,9 @@
   $effect(() => {
     if (context === previousContext) return;
 
-    const wasActive = previousContext !== null;
     previousContext = context;
     const frame = requestAnimationFrame(() => {
-      if (context !== null) {
-        editor.focus();
-      } else if (wasActive && !desktop && !sending) {
-        editor.blur();
-        const activeElement = document.activeElement;
-        if (activeElement instanceof HTMLElement) activeElement.blur();
-      }
+      if (context !== null) editor.focus();
     });
 
     return () => {
@@ -630,14 +674,21 @@
     };
   });
 
+  function storeBotCommand(command: BotCommandDraft | null): void {
+    activeBotCommand = command;
+    writeBotCommand(draftKey(), command, core.session?.account_id ?? '');
+  }
+
   function openBotCommand(command: BotCommand, args: string, prefix: string): void {
-    activeBotCommand = { command, drafts: draftsFromText(command, args), prefix };
+    const drafts = $state(draftsFromText(command, args));
+    storeBotCommand({ command, drafts, prefix });
+    void prefillDrafts(command, drafts, serverNameOf(core.session?.user_id ?? ''));
     error = null;
     void sources.loadMembers();
   }
 
   function closeBotCommand(): void {
-    activeBotCommand = null;
+    storeBotCommand(null);
     editor.focus();
   }
 
@@ -648,15 +699,20 @@
   ): Promise<boolean> {
     if (!onSendBotCommand) return false;
     const targetRoomId = roomId;
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
     inFlight += 1;
     error = null;
     try {
       await queue.enqueue(() => onSendBotCommand(targetRoomId, command.sender, body, invocation));
-      if (activeBotCommand?.command === command) closeBotCommand();
+      if (readBotCommand(targetKey, accountId)?.command === command) {
+        writeBotCommand(targetKey, null, accountId);
+        if (targetKey === draftKey()) closeBotCommand();
+      }
       return true;
     } catch (cause) {
       console.debug('[sable composer] bot command failed', cause);
-      error = failureText(cause);
+      if (targetRoomId === roomId) error = failureText(cause);
       return false;
     } finally {
       inFlight -= 1;
@@ -683,6 +739,9 @@
     const matched = matchBotCommand(typed.line, typed.commands);
     if (!matched) return false;
 
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
+    const restore = () => restoreUnsent(targetKey, accountId, doc, []);
     editor.clear();
     if (matched.command.parameters.length === 0 && matched.args !== '') {
       const body = `${typed.prefix}${matched.command.command}${matched.raw_args}`;
@@ -692,7 +751,7 @@
           arguments: {},
         }))
       ) {
-        if (doc && roomId === targetRoomId && editor.isEmpty()) editor.setDoc(doc);
+        restore();
       }
       return true;
     }
@@ -700,7 +759,7 @@
     const result = buildInvocation(matched.command, drafts, typed.prefix);
     if (result.kind === 'built') {
       if (!(await sendBotCommand(matched.command, result.body, result.invocation))) {
-        if (doc && roomId === targetRoomId && editor.isEmpty()) editor.setDoc(doc);
+        restore();
       }
     } else {
       openBotCommand(matched.command, matched.args, typed.prefix);
@@ -734,7 +793,7 @@
 
   function cancelContext(): void {
     onCancelContext?.();
-    if (context?.kind === 'edit' || editingScheduled || !desktop) blurEditor();
+    if (context?.kind === 'edit' || editingScheduled) blurEditor();
   }
 
   let shownLinks = $derived.by(() => {
@@ -770,6 +829,32 @@
     return i18n.t(key, values);
   }
 
+  /** A send outlives a room switch, so its failure is put back in the room it was meant for. */
+  function restoreUnsent(
+    key: string,
+    accountId: string,
+    doc: ProseMirrorNode | undefined,
+    files: StagedFile[]
+  ): boolean {
+    if (key === draftKey() && accountId === (core.session?.account_id ?? '')) {
+      if (doc && editor.isEmpty()) editor.setDoc(doc);
+      staged = [...files, ...staged];
+      return true;
+    }
+    const held = readDraft(key, accountId);
+    const keepsText = held?.doc !== null && held?.doc !== undefined;
+    writeDraft(
+      key,
+      {
+        doc: keepsText ? held.doc : (doc?.toJSON() ?? null),
+        staged: [...files, ...(held?.staged ?? [])],
+        nextStagedId: held?.nextStagedId ?? nextStagedId,
+      },
+      accountId
+    );
+    return false;
+  }
+
   function failRetryably(cause: unknown, run: () => void): void {
     const failure = sendFailure(cause);
     error = i18n.t(failure.key, failure.values);
@@ -792,19 +877,23 @@
     const typedLine = commandLine();
     if (typedLine !== null && (await typedBotCommand(typedLine))) return;
 
-    const doc = editor.doc();
+    const typed = editor.doc();
     const untouched =
       context?.kind === 'edit' &&
       prefilledDoc !== undefined &&
-      doc?.eq(prefilledDoc) === true &&
+      typed?.eq(prefilledDoc) === true &&
       staged.length === 0
         ? { body: context.body, formatted: context.html ?? null }
         : null;
+    const doc = untouched ? typed : editor.linkStandingOffers();
     const rich = richSend;
     const attachmentsCancelEdit = context?.kind === 'edit' && staged.length > 0;
     const captionEdit = editingCaption && !attachmentsCancelEdit;
     const asCaption = preferences.sendAttachmentAsCaption;
     let unsent = staged;
+    const target = roomId;
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
 
     inFlight += 1;
     error = null;
@@ -838,11 +927,12 @@
           unsent.every((item) => previewKind(item.file) !== null);
 
         if (gallery) {
-          await onSendGallery(roomId, await Promise.all(unsent.map(outgoingFile)), {
+          await onSendGallery(target, await Promise.all(unsent.map(outgoingFile)), {
             caption: message.body || null,
             formattedCaption: message.formatted,
             mentions: message.mentions,
             spoilers: unsent.map((item) => item.spoiler),
+            gifs: unsent.map((item) => item.gif),
           });
           unsent = [];
           return;
@@ -851,7 +941,7 @@
         while (unsent.length > 0) {
           const [next, ...rest] = unsent;
           await onSendAttachment(
-            roomId,
+            target,
             await outgoingFile(next),
             captioned
               ? {
@@ -859,8 +949,9 @@
                   formattedCaption: message.formatted,
                   mentions: message.mentions,
                   spoiler: next.spoiler,
+                  gif: next.gif,
                 }
-              : { spoiler: next.spoiler }
+              : { spoiler: next.spoiler, gif: next.gif }
           );
           unsent = rest;
         }
@@ -868,13 +959,13 @@
         if (captioned || (message.body === '' && !captionEdit)) return;
         const action = message.imageSourcePacks
           ? await onSend(
-              roomId,
+              target,
               message.body,
               message.formatted,
               message.mentions,
               message.imageSourcePacks
             )
-          : await onSend(roomId, message.body, message.formatted, message.mentions);
+          : await onSend(target, message.body, message.formatted, message.mentions);
         if (isGifSearchAction(action)) {
           boardTab = 'gif';
           boardQuery = action.query;
@@ -884,9 +975,9 @@
       editor.clearHistory();
     } catch (cause) {
       console.debug('[sable composer] send failed', cause);
-      if (doc && editor.isEmpty()) editor.setDoc(doc);
-      staged = [...unsent, ...staged];
-      failRetryably(cause, () => void send());
+      if (restoreUnsent(targetKey, accountId, doc, unsent)) {
+        failRetryably(cause, () => void send());
+      }
     } finally {
       inFlight -= 1;
     }
@@ -910,6 +1001,9 @@
 
     const attachments = staged;
     const delayIds: string[] = [];
+    const target = roomId;
+    const targetKey = draftKey();
+    const accountId = core.session?.account_id ?? '';
 
     editor.clear();
     staged = [];
@@ -919,20 +1013,18 @@
       for (const attachment of attachments) {
         delayIds.push(
           await core.media.scheduleAttachment(
-            roomId,
+            target,
             await outgoingFile(attachment),
             dueTs,
             attachment.spoiler,
-            outgoingPersona(
-              personas,
-              roomId,
-              personaSpaces(roomList.rooms, roomId, undefined).order
-            ).persona
+            outgoingPersona(personas, target, personaSpaces(roomList, target, undefined).order)
+              .persona,
+            attachment.gif
           )
         );
       }
       if (message.body !== '') {
-        await onSchedule(roomId, message.body, message.formatted, dueTs);
+        await onSchedule(target, message.body, message.formatted, dueTs);
       }
       editor.clearHistory();
       error = null;
@@ -942,12 +1034,12 @@
         delayIds.map((delayId) => core.rpc.messages.cancelScheduled({ delay_id: delayId }))
       );
       if (cause instanceof ScheduledOriginalKept) {
+        if (target !== roomId) return;
         editor.clearHistory();
         error = i18n.t('composer.scheduledOriginalKept');
         return;
       }
-      if (doc && editor.isEmpty()) editor.setDoc(doc);
-      staged = [...attachments, ...staged];
+      if (!restoreUnsent(targetKey, accountId, doc, attachments)) return;
       error = i18n.t(
         attachments.length > 0 && isServerScheduleUnsupported(cause)
           ? 'composer.scheduleAttachmentUnsupported'
@@ -971,16 +1063,17 @@
 
   async function sendVoice(file: File): Promise<void> {
     void stopRecording();
+    const target = roomId;
     inFlight += 1;
     error = null;
 
     try {
       await queue.enqueue(async () => {
-        await onSendAttachment(roomId, file, {});
+        await onSendAttachment(target, file, {});
       });
     } catch (cause) {
       console.debug('[sable composer] voice message failed', cause);
-      failRetryably(cause, () => void sendVoice(file));
+      if (target === roomId) failRetryably(cause, () => void sendVoice(file));
     } finally {
       inFlight -= 1;
     }
@@ -1259,7 +1352,41 @@
     else if (context) onEditNext(context.eventId);
   }
 
+  function chooseOffer(choice: OfferChoice): void {
+    const current = offer;
+    if (!current) return;
+    if (choice !== 'never') editor.acceptOffer(current);
+    if (choice === 'once') return;
+    const key = current.rule.mode;
+    setPreference(key, choice);
+    const notice =
+      choice === 'always' ? current.rule.strings.enabled : current.rule.strings.disabled;
+    toasts.undoable(i18n.t(notice), {
+      label: i18n.t('common.undo'),
+      onUndo: () => {
+        setPreference(key, 'ask');
+      },
+    });
+  }
+
+  function navigateOffer(key: 'ArrowUp' | 'ArrowDown' | 'Enter' | 'Tab' | 'Escape'): boolean {
+    if (!offer) return false;
+    if (key === 'Escape') {
+      dismissedOffer = offerKeyOf(offer);
+      return true;
+    }
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const step = key === 'ArrowDown' ? 1 : offerChoices.length - 1;
+      offerIndex = (offerIndex + step) % offerChoices.length;
+      return true;
+    }
+    if (key === 'Enter') return false;
+    chooseOffer(offerChoices[offerIndex].choice);
+    return true;
+  }
+
   function navigate(key: 'ArrowUp' | 'ArrowDown' | 'Enter' | 'Tab' | 'Escape'): boolean {
+    if (offerOpen) return navigateOffer(key);
     if (!panelOpen) {
       if (
         key === 'ArrowUp' &&
@@ -1410,6 +1537,12 @@
             onSetMetadata={(id: number, metadata: ImageMetadata) => {
               staged = setMetadata(staged, id, metadata);
             }}
+            onSetGif={(id: number, gif: boolean | undefined) => {
+              staged = setGif(staged, id, gif);
+            }}
+            onReplace={(id: number, file: File) => {
+              staged = replaceFile(staged, id, file);
+            }}
           />
         {/if}
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -1461,6 +1594,7 @@
                 {desktop}
                 onPick={pick}
                 onCapture={capturesFromCamera() ? capture : undefined}
+                onFiles={(files) => void stage(files)}
                 onPoll={onCreatePoll
                   ? () => {
                       pollOpen = true;
@@ -1497,7 +1631,10 @@
             />
             <ComposerField {editor} {showPlaceholder} {placeholder} bind:expanded />
             {#if formattingOpen}
-              <div class="composer-formatting">
+              <div
+                class="composer-formatting"
+                transition:slide={{ duration: motionMs(MOTION_MS.quick), easing: cubicOut }}
+              >
                 <ComposerFormatting
                   active={activeFormats}
                   source={sourceMode}
@@ -1602,6 +1739,16 @@
             {suggestions}
             {active}
             onSelect={commit}
+          />
+        {:else if offerOpen && offer}
+          <ComposerOffer
+            id={listboxId}
+            {optionId}
+            heading={i18n.t(offer.rule.strings.heading, { text: offer.text })}
+            target={offer.rule.apply(offer.match).href.replace(/^https:\/\//u, '')}
+            choices={offerChoices}
+            active={offerIndex}
+            onChoose={chooseOffer}
           />
         {/if}
         <div class="composer-measurer" bind:this={measurerEl} aria-hidden="true"></div>

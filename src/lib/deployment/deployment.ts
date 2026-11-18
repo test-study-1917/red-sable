@@ -1,3 +1,4 @@
+import { serverNameOf } from '#lib/matrix-id.js';
 import { runtimeConfig, type RuntimeConfig } from '#lib/config/runtime-config.js';
 import {
   accountConfigUrl,
@@ -34,7 +35,7 @@ function applyAccount(config: AccountConfig | null): void {
   configuration.account = mergeAccountConfig(configuration.base, config);
   applyAccountPreferences(config?.settingsDefaults ?? {}, config?.settingsLocked ?? {});
   setAppName(appName(configuration.account));
-  void loadDeploymentTheme(configuration.account.branding.themeUrl);
+  void loadDeploymentTheme(configuration.account.branding);
 }
 
 export function activateAccountConfiguration(
@@ -46,7 +47,7 @@ export function activateAccountConfiguration(
     applyAccount(null);
     return;
   }
-  const server = session.user_id.slice(session.user_id.indexOf(':') + 1);
+  const server = serverNameOf(session.user_id);
   const source = accountConfigUrl(server);
   applyAccount(source ? cachedAccountConfig(session.account_id, source) : null);
   if (!source) return;

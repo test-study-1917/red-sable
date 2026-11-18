@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { afterEach, expect, test, vi } from 'vitest';
 
 import { deviceDisplayName } from '#lib/deployment/policy.js';
@@ -10,7 +12,12 @@ import {
 import { reportSessionFailure } from '#lib/observability/session-telemetry.js';
 
 import type { AttachmentInfoView, CoreEvent, SessionInfo } from '#src/generated/protocol';
-import { CoreError, type GalleryAttachment, type Transport } from '#src/transport';
+import {
+  CoreError,
+  transportFailure,
+  type GalleryAttachment,
+  type Transport,
+} from '#src/transport';
 
 import { recentSearches, rememberSearch } from '#lib/search/recent-searches.svelte.js';
 import { activeRoomTimeline } from '#lib/rooms/timeline.svelte.js';
@@ -31,12 +38,17 @@ vi.mock('#lib/deployment/deployment.js', async () => {
   };
 });
 
-const localNetwork = vi.hoisted(() => ({ gated: false, denied: false }));
+const localNetwork = vi.hoisted(() => ({
+  gated: false,
+  denied: false,
+  requestAndroid: vi.fn(() => Promise.resolve(false)),
+}));
 
 vi.mock('#lib/platform/local-network.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/platform/local-network.js')>()),
   browserGatesCoreNetwork: () => localNetwork.gated,
   localNetworkDenied: () => Promise.resolve(localNetwork.denied),
+  requestAndroidLocalNetwork: localNetwork.requestAndroid,
 }));
 
 const session: SessionInfo = {
@@ -419,7 +431,7 @@ test('a restored session survives an account-list failure and a retry', async ()
   const fake = fakeTransport({ 'session.restore': session });
   fake.call.mockImplementation((method) =>
     method === 'session.list_accounts'
-      ? Promise.reject(new CoreError({ code: 'failed', log_id: 'e1' }))
+      ? Promise.reject(new CoreError(transportFailure('e1')))
       : Promise.resolve(session)
   );
   const recovered = fakeTransport({
@@ -457,7 +469,7 @@ test.each(['list_accounts', 'switch_account'])(
     await core.start();
     initial.call.mockImplementation((method) =>
       method === `session.${failedCommand}`
-        ? Promise.reject(new CoreError({ code: 'failed', log_id: 'e1' }))
+        ? Promise.reject(new CoreError(transportFailure('e1')))
         : Promise.resolve([retired, otherSession])
     );
     initial.emit({ type: 'session_ended', reason: 'soft_logout' });
@@ -480,7 +492,7 @@ test('failed crypto restoration exposes saved accounts for deliberate recovery',
   const fake = fakeTransport({ 'session.list_accounts': [session, otherSession] });
   fake.call.mockImplementation((method) =>
     method === 'session.restore'
-      ? Promise.reject(new CoreError({ code: 'failed', log_id: 'e1' }))
+      ? Promise.reject(new CoreError(transportFailure('e1')))
       : Promise.resolve([session, otherSession])
   );
   const core = createCoreClient(() => fake.transport);
@@ -743,6 +755,7 @@ test.each(['attachment', 'gallery'] as const)(
       waveform: null,
       voice: false,
       audio_metadata: null,
+      gif: null,
     };
     const thumbnail = { bytes: new Uint8Array([255, 216, 255]), width: 800, height: 450 };
     const measure = vi
@@ -775,6 +788,38 @@ test.each(['attachment', 'gallery'] as const)(
   }
 );
 
+test('a GIF choice rides in the attachment info, even when the file could not be measured', async () => {
+  const measure = vi
+    .spyOn(attachmentInfo, 'measureAttachment')
+    .mockResolvedValue({ info: null, thumbnail: null });
+  try {
+    const fake = fakeTransport();
+    const sent: GalleryAttachment[] = [];
+    fake.transport.sendAttachment = (attachment) => {
+      sent.push(attachment);
+      return Promise.resolve();
+    };
+    fake.transport.sendGallery = (gallery) => {
+      sent.push(...gallery.attachments);
+      return Promise.resolve();
+    };
+    const core = createCoreClient(() => fake.transport);
+    const file = new File(['video'], 'video.mp4', { type: 'video/mp4' });
+    await core.media.sendAttachment('!room:example.org', file);
+    await core.media.sendAttachment('!room:example.org', file, { gif: true });
+    await core.media.sendGallery('!room:example.org', [file, file], { gifs: [false, undefined] });
+
+    expect(sent.map((attachment) => attachment.info?.gif)).toEqual([
+      undefined,
+      true,
+      false,
+      undefined,
+    ]);
+  } finally {
+    measure.mockRestore();
+  }
+});
+
 test('scheduling an attachment uploads it before creating its delayed event', async () => {
   const fake = fakeTransport({
     'session.delayed_events_supported': true,
@@ -804,12 +849,70 @@ test('scheduling an attachment uploads it before creating its delayed event', as
       mime: 'image/png',
       url: 'mxc://example.org/later',
       size: 5,
-      info: null,
+      info: {
+        width: null,
+        height: null,
+        duration_ms: null,
+        animated: null,
+        blurhash: null,
+        waveform: null,
+        voice: false,
+        audio_metadata: null,
+        gif: null,
+      },
       spoiler: false,
       persona: null,
       delay_ms: 28_000,
     },
   });
+});
+
+test('a scheduled file carries the animation and GIF flags the core would set on sending', async () => {
+  const fake = fakeTransport({
+    'session.delayed_events_supported': true,
+    'messages.schedule_attachment': 'delayed',
+  });
+  fake.transport.uploadMedia = () => Promise.resolve('mxc://example.org/later');
+  const measure = vi.spyOn(attachmentInfo, 'measureAttachment').mockResolvedValue({
+    info: {
+      width: 16,
+      height: 16,
+      duration_ms: 300,
+      animated: null,
+      blurhash: null,
+      waveform: null,
+      voice: false,
+      audio_metadata: null,
+      gif: null,
+    },
+    thumbnail: null,
+  });
+  try {
+    const core = createCoreClient(() => fake.transport);
+    const fixture = (path: string, name: string, type: string) =>
+      new File([readFileSync(`crates/sable-model/tests/fixtures/${path}`)], name, { type });
+
+    await core.media.scheduleAttachment(
+      '!room:example.org',
+      fixture('images/animated.gif', 'party.gif', 'image/gif'),
+      40_000
+    );
+    await core.media.scheduleAttachment(
+      '!room:example.org',
+      fixture('clips/silent.mp4', 'clip.mp4', 'video/mp4'),
+      40_000
+    );
+
+    const infos = fake.called
+      .filter((call) => call.method === 'messages.schedule_attachment')
+      .map((call) => (call.params as { info: { animated: unknown; gif: unknown } }).info);
+    expect(infos).toMatchObject([
+      { animated: true, gif: null },
+      { animated: null, gif: true },
+    ]);
+  } finally {
+    measure.mockRestore();
+  }
 });
 
 test('an attachment is not uploaded when the homeserver cannot schedule it', async () => {
@@ -983,6 +1086,7 @@ async function startGated(fetch: () => Promise<unknown>) {
 afterEach(() => {
   localNetwork.gated = false;
   localNetwork.denied = false;
+  localNetwork.requestAndroid.mockClear();
   vi.unstubAllGlobals();
 });
 
@@ -995,15 +1099,27 @@ test('a restored session asks for local network access from the page', async () 
 });
 
 test('an offline core with a homeserver the page reaches reports the browser blocking it', async () => {
-  const { core, fake } = await startGated(() => Promise.resolve(new Response('{}')));
+  const { core, fake, fetchMock } = await startGated(() => Promise.resolve(new Response('{}')));
 
   fake.emit({ type: 'sync_status', state: 'offline' });
   await vi.waitFor(() => {
     expect(core.localNetworkBlocked).toBe('example.org');
   });
 
+  fetchMock.mockImplementation(() => Promise.reject(new TypeError('offline')));
   fake.emit({ type: 'sync_status', state: 'live' });
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(core.localNetworkBlocked).toBe('example.org');
+
+  vi.useFakeTimers();
+  fake.emit({ type: 'sync_status', state: 'live' });
+  vi.advanceTimersByTime(30_000);
   expect(core.localNetworkBlocked).toBeNull();
+  vi.useRealTimers();
 });
 
 test('an offline core reports the browser blocking it when the permission was denied', async () => {
@@ -1029,6 +1145,17 @@ test('an offline core the page cannot reach either is just offline', async () =>
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(core.localNetworkBlocked).toBeNull();
+});
+
+test('an offline native core asks Android for local network access', async () => {
+  vi.stubGlobal('navigator', { onLine: true });
+  const fake = fakeTransport({ 'session.restore': session, 'session.list_accounts': [session] });
+  const core = createCoreClient(() => fake.transport);
+  await core.start();
+
+  fake.emit({ type: 'sync_status', state: 'offline' });
+
+  expect(localNetwork.requestAndroid).toHaveBeenCalledOnce();
 });
 
 test('a cancellation for an unknown verification flow does not open the verification dialog', async () => {

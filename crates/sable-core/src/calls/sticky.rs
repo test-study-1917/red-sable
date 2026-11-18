@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::delayed_events::DelayedEventsSupport;
 use matrix_sdk::deserialized_responses::{EncryptionInfo, VerificationLevel, VerificationState};
 use matrix_sdk::{Client, Room};
-use ruma::api::client::sync::sync_events::v5;
+use ruma::api::client::sync::sync_events::msc4186 as v5;
 use ruma::events::{StateEventType, room::encrypted::OriginalSyncRoomEncryptedEvent};
 use ruma::serde::Raw;
 use ruma::{OwnedDeviceId, OwnedEventId};
@@ -389,7 +389,7 @@ pub(super) async fn send(
     _client: &Client,
     room: &Room,
     content: impl serde::Serialize,
-) -> Result<ruma::OwnedEventId, matrix_sdk::Error> {
+) -> Result<OwnedEventId, matrix_sdk::Error> {
     send_wire(room, content, super::membership::RtcWire::Deployed).await
 }
 
@@ -397,7 +397,7 @@ pub(super) async fn send_wire(
     room: &Room,
     content: impl serde::Serialize,
     wire: super::membership::RtcWire,
-) -> Result<ruma::OwnedEventId, matrix_sdk::Error> {
+) -> Result<OwnedEventId, matrix_sdk::Error> {
     let content = serde_json::to_value(content)?;
     match room.latest_encryption_state().await? {
         matrix_sdk::EncryptionState::NotEncrypted => {}

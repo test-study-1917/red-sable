@@ -25,6 +25,7 @@ import {
 } from './slash-commands';
 
 import { testPersona } from '#lib/personas/persona.ts';
+import { memberView } from '#lib/test-support/room-views.js';
 
 function fakeCommands() {
   return {
@@ -246,7 +247,7 @@ test('a mention pill stands in for the user id a command asks for', async () => 
 
   await runSlash('/headpat @Kris', {
     ...context(commands),
-    formatted: '/headpat <a href="https://matrix.to/#/@kris:example.org">@Kris</a>',
+    formatted: '/headpat <a href="matrix:u/kris:example.org">@Kris</a>',
   });
 
   expect(commands.sendGesture).toHaveBeenCalledWith({
@@ -371,7 +372,10 @@ test('/join takes an address and its routing servers', async () => {
   const commands = fakeCommands();
 
   await expect(
-    runSlash('/join https://matrix.to/#/%23room%3Aexample.org?via=other.org', context(commands))
+    runSlash(
+      '/join https://link.sable.moe/#/%23room%3Aexample.org?via=other.org',
+      context(commands)
+    )
   ).resolves.toEqual({ kind: 'done' });
   expect(commands.joinRoom).toHaveBeenCalledWith({
     address: '#room:example.org',
@@ -385,7 +389,10 @@ test('/join hands a knock room over to the ask to join page', async () => {
   commands.previewRoom.mockResolvedValue({ join_rule: 'knock' } as RoomPreviewView);
 
   await expect(
-    runSlash('/join https://matrix.to/#/%23room%3Aexample.org?via=other.org', context(commands))
+    runSlash(
+      '/join https://link.sable.moe/#/%23room%3Aexample.org?via=other.org',
+      context(commands)
+    )
   ).resolves.toEqual({ kind: 'knock', address: '#room:example.org', via: ['other.org'] });
 });
 
@@ -857,18 +864,7 @@ test('/usepmp latches a profile and resets it', async () => {
 });
 
 function member(userId: string, membership: MemberView['membership'] = 'join'): MemberView {
-  return {
-    user_id: userId,
-    display_name: null,
-    real_name: null,
-    real_avatar_url: null,
-    avatar_url: null,
-    power_level: 0,
-    membership,
-    member_ts: null,
-    kicked: false,
-    service: false,
-  };
+  return memberView({ user_id: userId, membership });
 }
 
 test('/pronoun sets and resets your room pronouns', async () => {

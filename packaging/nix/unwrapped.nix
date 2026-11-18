@@ -10,6 +10,7 @@
   sable-wasm-bindgen-cli,
   binaryen,
   lld,
+  llvmPackages,
 }:
 
 let
@@ -25,14 +26,14 @@ stdenv.mkDerivation (finalAttrs: {
 
   cargoDeps = rustPlatform.fetchCargoVendor {
     inherit (finalAttrs) src;
-    hash = "sha256-4eP0NmZrFvPAtSHnVrtaHRPVepTVHLMsXhaupi/8DWA=";
+    hash = "sha256-ZQLIkQQYEeh/dTRp0O8HIcJrYL1EKDDYtgyZJGPmnpI=";
   };
 
   pnpmDeps = fetchPnpmDeps {
     inherit (finalAttrs) pname version src;
     inherit pnpm;
     fetcherVersion = 4;
-    hash = "sha256-AZyzkhwx7OR7wthau8rnjnxa5Pzz8d+D8GoAEUSDeQQ=";
+    hash = "sha256-CbhaU2lojoCR1AG5AEZBSHz/amFO3ewvZ1bml+gLG+0=";
   };
 
   nativeBuildInputs = [
@@ -48,6 +49,8 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env = {
+    CC_wasm32_unknown_unknown = lib.getExe llvmPackages.clang-unwrapped;
+    AR_wasm32_unknown_unknown = lib.getExe' llvmPackages.bintools-unwrapped "llvm-ar";
     SABLE_FOSS = "1";
     VITE_APP_VERSION = finalAttrs.version;
     VITE_BUILD_HASH = src.shortRev or src.dirtyShortRev or "";

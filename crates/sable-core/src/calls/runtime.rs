@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
@@ -13,16 +13,17 @@ use matrix_sdk::{Client, Room};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, oneshot};
 
 use super::content::content;
 use super::discover::{Discovered, ModeInfo, discover};
 use super::keys::{self, KeyDistributor, Rolled};
 use super::membership::{self, CallMember, StickyMemberships};
-use super::{HANGUP_DELAY, USE_KEY_DELAY, sfu, sticky};
+use super::{HANGUP_DELAY, RoomMembership, USE_KEY_DELAY, sfu, sticky};
 use crate::api::calls::JoinOk;
 use crate::protocol::{
-    CallBackendView, CallIntent, CallMemberView, CallMode, CallSessionId, CoreEvent, RpcError,
+    CallBackendView, CallIntent, CallMemberView, CallMode, CallSessionId, CoreEvent, RpcCode,
+    RpcError,
 };
 use crate::{CallSession, Core};
 
@@ -147,10 +148,7 @@ fn member_service<'a>(member: &'a CallMember, members: &'a [CallMember]) -> Opti
         .map(String::as_str)
 }
 
-fn state_key(
-    room: &Room,
-    own: &CallMember,
-) -> matrix_sdk::ruma::events::call::member::CallMemberStateKey {
+fn state_key(room: &Room, own: &CallMember) -> ruma::events::call::member::CallMemberStateKey {
     super::membership_state_key(
         &own.user_id,
         own.own_device_id(),
@@ -164,14 +162,14 @@ async fn publish_membership(
     room: &Room,
     own: &CallMember,
     intent: Option<CallIntent>,
-) -> Result<matrix_sdk::ruma::OwnedEventId, matrix_sdk::Error> {
+) -> Result<ruma::OwnedEventId, matrix_sdk::Error> {
     let room_id = room.room_id().to_owned();
     let body = content(&room_id, own, intent);
     if own.mode == CallMode::Matrix2 {
         sticky::send_wire(room, &body, own.wire).await
     } else {
         let key = state_key(room, own);
-        let raw = matrix_sdk::ruma::serde::Raw::new(&body)?.cast_unchecked();
+        let raw = ruma::serde::Raw::new(&body)?.cast_unchecked();
         Ok(room
             .send_state_event_raw(&StateEventType::CallMember.to_string(), key.as_ref(), raw)
             .await?
@@ -182,7 +180,7 @@ async fn publish_membership(
 async fn retract(core: &Core, room: &Room, own: &CallMember, delay: Option<String>) {
     core.withdraw_call_invite(room, own, false).await;
     if let Some(delay) = delay
-        && core.fire_hangup(delay).await.is_ok()
+        && core.fire_hangup(&room.client(), delay).await.is_ok()
     {
         return;
     }
@@ -204,7 +202,7 @@ async fn retract(core: &Core, room: &Room, own: &CallMember, delay: Option<Strin
 }
 
 struct Published {
-    event: matrix_sdk::ruma::OwnedEventId,
+    event: ruma::OwnedEventId,
     provision: sfu::Provisioned,
     delay: Option<String>,
     postpone: Option<crate::Task>,
@@ -248,7 +246,9 @@ async fn publish(
         if !super::ensure_open_slot(room, encrypted, own.wire).await {
             return Err(core.failed("join_call", "no compatible open RTC slot"));
         }
-        let support = core.delayed_events_support().await.unwrap_or_default();
+        let support = crate::delayed_events::support(&room.client())
+            .await
+            .unwrap_or_default();
         if support.any() {
             match send_delayed_leave(room, support, own).await {
                 Ok(id) => Some(id),
@@ -261,10 +261,11 @@ async fn publish(
             None
         }
     } else {
-        core.schedule_hangup(&room.room_id().to_owned(), &state_key)
-            .await
+        Core::schedule_hangup(room, &state_key).await
     };
-    let postpone = delay.clone().map(|id| core.spawn_postpone_loop(id));
+    let postpone = delay
+        .clone()
+        .map(|id| Core::spawn_postpone_loop(room.client(), id));
     let membership_event = match publish_membership(room, own, intent).await {
         Ok(event) => event,
         Err(error) => {
@@ -391,7 +392,7 @@ async fn publish_where_allowed(
         let state = state.lock().await;
         (state.own.clone(), state.intent)
     };
-    let service = own.foci.first().cloned().ok_or(RpcError::NoCallFocus)?;
+    let service = own.foci.first().cloned().ok_or(RpcCode::NoCallFocus)?;
     let mut published = publish(core, room, &own, &service, encrypted, intent).await?;
     if !published.provision.can_publish
         && let Some((moved, provision)) =
@@ -484,7 +485,7 @@ async fn confirm_join(
     room: &Room,
     state: &Mutex<State>,
     provision: &sfu::Provisioned,
-    membership_event: &matrix_sdk::ruma::OwnedEventId,
+    membership_event: &ruma::OwnedEventId,
 ) -> Option<(String, Vec<CallBackendView>)> {
     let own = state.lock().await.own.clone();
     let publisher_id = backend_id(&room.room_id().to_owned(), own.foci.first()?);
@@ -550,10 +551,31 @@ async fn discover_state(
     Ok((state, sticky_sync, mode_info))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "joining and atomically activating its termination listener share one lifecycle"
-)]
+struct PreparedJoin {
+    generation: u64,
+    session: CallSessionId,
+    room: Room,
+    state: Arc<Mutex<State>>,
+    sticky_sync: Option<sticky::StickySync>,
+    mode_info: ModeInfo,
+    encrypt_media: bool,
+    configured: Option<String>,
+}
+
+/// Until the RPC returns, dropping the handoff (even while it is still
+/// buffered in the reply channel) asks the publisher to retract the call.
+struct JoinHandoff {
+    joined: JoinOk,
+    accepted: oneshot::Sender<()>,
+}
+
+impl JoinHandoff {
+    fn accept(self) -> JoinOk {
+        let _ = self.accepted.send(());
+        self.joined
+    }
+}
+
 pub(super) async fn join(
     core: &Arc<Core>,
     room_id: OwnedRoomId,
@@ -561,11 +583,20 @@ pub(super) async fn join(
     requested: Option<CallMode>,
     intent: Option<CallIntent>,
 ) -> Result<JoinOk, RpcError> {
-    let generation = core.session_generation.load(Ordering::SeqCst);
-    core.wait_for_call_cleanup(&room_id, generation).await;
-    if core.session_generation.load(Ordering::SeqCst) != generation {
-        return Err(RpcError::NotLoggedIn);
-    }
+    prepare_join(core, room_id, configured, requested, intent)
+        .await?
+        .publish(core)
+        .await
+}
+
+async fn prepare_join(
+    core: &Arc<Core>,
+    room_id: OwnedRoomId,
+    configured: Option<String>,
+    requested: Option<CallMode>,
+    intent: Option<CallIntent>,
+) -> Result<PreparedJoin, RpcError> {
+    let generation = core.lifecycle.current();
     let room = core.room(&room_id).await?;
     let encrypt_media = core.room_is_encrypted(&room).await?;
     let session = CallSessionId(core.allocate_subscription().0);
@@ -579,108 +610,204 @@ pub(super) async fn join(
         encrypt_media,
     )
     .await?;
-    let (wake, handlers, termination_keys) =
-        join_handlers(core, generation, session, &room, &state, encrypt_media).await;
-    let (
-        own,
-        Published {
-            event: membership_event,
-            provision,
-            delay,
-            postpone,
-        },
-    ) = publish_where_allowed(core, &room, &state, encrypt_media, configured).await?;
-    if own.mode == CallMode::Matrix2 {
-        state.lock().await.slot_closed = false;
-    }
-    let mode = own.mode;
-    let state_key = state_key(&room, &own);
-    if !core.is_current(generation) {
-        abort_join(core, &room, &own, delay, postpone).await;
-        return Err(RpcError::NotLoggedIn);
-    }
-    let Some((publisher_id, backends)) = confirm_join(
-        core,
+    Ok(PreparedJoin {
         generation,
         session,
-        &room,
-        &state,
-        &provision,
-        &membership_event,
-    )
-    .await
-    else {
-        let ended = state.lock().await.termination.ended.clone();
-        abort_join(core, &room, &own, delay, postpone).await;
-        if let Some(ended) = ended {
-            return Err(termination_during_join(session, room_id, ended));
+        room,
+        state,
+        sticky_sync,
+        mode_info,
+        encrypt_media,
+        configured,
+    })
+}
+
+impl PreparedJoin {
+    async fn publish(self, core: &Arc<Core>) -> Result<JoinOk, RpcError> {
+        let generation = self.generation;
+        let room_id = self.room.room_id().to_owned();
+        // Discovery may complete while an older membership is still active.
+        let membership = core.call_memberships.acquire(generation, &room_id).await;
+        let signal = {
+            let mut calls = core.call_sessions.lock().await;
+            if !core.call_account_is_current(generation) {
+                return Err(RpcCode::NotLoggedIn.into());
+            }
+            calls.reserve_signal()
+        };
+        let (reply, finished) = oneshot::channel();
+        let client = self.room.client();
+        let worker = core.clone();
+        let slot = signal.task.clone();
+        *slot.lock() = Some(spawn(async move {
+            let result = self.publish_registered(&worker, membership, &reply).await;
+            signal.done.send_replace(true);
+            match result {
+                Ok(joined) => {
+                    let session = joined.session;
+                    let (accepted, handed_off) = oneshot::channel();
+                    let _ = reply.send(Ok(JoinHandoff { joined, accepted }));
+                    if handed_off.await.is_err() {
+                        let _ = worker.leave_call_for_account(generation, session).await;
+                    }
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            }
+        }));
+        let handoff = finished
+            .await
+            .map_err(|error| core.failed("join_call", error))??;
+        if !core.call_account_is_current(generation) {
+            return Err(RpcCode::NotLoggedIn.into());
         }
-        return Err(core.failed("join_call", "call membership was not confirmed"));
-    };
-    let mut calls = core.call_sessions.lock().await;
-    if !core.is_current(generation) {
-        drop(calls);
-        abort_join(core, &room, &own, delay, postpone).await;
-        return Err(RpcError::NotLoggedIn);
+        core.apply_app_activity(core.activity.app_active()).await;
+        core.refresh_call_presence(&client, generation).await;
+        if !core.call_account_is_current(generation) {
+            return Err(RpcCode::NotLoggedIn.into());
+        }
+        Ok(handoff.accept())
     }
-    // The same state lock is used by live event admission. Holding it while
-    // activating the session closes the registration-to-insertion window.
-    let state_guard = state.lock().await;
-    if let Some(ended) = state_guard.termination.ended.clone() {
-        drop(state_guard);
-        drop(calls);
-        abort_join(core, &room, &own, delay, postpone).await;
-        return Err(termination_during_join(session, room_id, ended));
-    }
-    let shared = state.clone();
-    let delay = super::DelayState::shared(delay);
-    drop(postpone);
-    let postpone = Some(core.spawn_managed_postpone_loop(delay.clone(), wake.clone()));
-    let updates = updates(
-        UpdateContext {
-            core: core.clone(),
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "publication, activation and abort share one lease"
+    )]
+    async fn publish_registered(
+        self,
+        core: &Arc<Core>,
+        membership: RoomMembership,
+        reply: &oneshot::Sender<Result<JoinHandoff, RpcError>>,
+    ) -> Result<JoinOk, RpcError> {
+        let Self {
             generation,
             session,
             room,
-            state: state.clone(),
-            wake,
-            delay: delay.clone(),
-            encrypted: encrypt_media,
-        },
-        sticky_sync,
-    );
-    let (termination_cancel, _) = tokio::sync::watch::channel(false);
-    calls.insert(
-        session,
-        CallSession {
-            room_id,
-            state_key,
-            delay_id: delay,
-            postpone,
-            _handlers: handlers,
-            updates: Some(updates),
-            termination_keys,
-            termination_cancel,
-            state: shared,
-            sticky_member: own.member_id.filter(|_| mode == CallMode::Matrix2),
-        },
-    );
-    drop(state_guard);
-    drop(calls);
-    core.apply_app_activity(core.app_active.load(Ordering::Relaxed))
-        .await;
-    if !core.is_current(generation) {
-        return Err(RpcError::NotLoggedIn);
+            state,
+            sticky_sync,
+            mode_info,
+            encrypt_media,
+            configured,
+        } = self;
+        let room_id = room.room_id().to_owned();
+        let can_publish = || core.call_account_is_current(generation) && !reply.is_closed();
+        if !can_publish() {
+            return Err(RpcCode::NotLoggedIn.into());
+        }
+        {
+            let mut state = state.lock().await;
+            let now = crate::now_ms();
+            state.own.created_ts = now;
+            state.own.joined_ts = now;
+        }
+        let (wake, handlers, termination_keys) =
+            join_handlers(core, generation, session, &room, &state, encrypt_media).await;
+        if !can_publish() {
+            return Err(RpcCode::NotLoggedIn.into());
+        }
+        let (
+            own,
+            Published {
+                event: membership_event,
+                provision,
+                delay,
+                postpone,
+            },
+        ) = publish_where_allowed(core, &room, &state, encrypt_media, configured).await?;
+        if own.mode == CallMode::Matrix2 {
+            state.lock().await.slot_closed = false;
+        }
+        let mode = own.mode;
+        let state_key = state_key(&room, &own);
+        if !can_publish() {
+            abort_join(core, &room, &own, delay, postpone).await;
+            return Err(RpcCode::NotLoggedIn.into());
+        }
+        let Some((publisher_id, backends)) = confirm_join(
+            core,
+            generation,
+            session,
+            &room,
+            &state,
+            &provision,
+            &membership_event,
+        )
+        .await
+        else {
+            let ended = state.lock().await.termination.ended.clone();
+            abort_join(core, &room, &own, delay, postpone).await;
+            if let Some(ended) = ended {
+                return Err(termination_during_join(session, room_id, ended));
+            }
+            return Err(core.failed("join_call", "call membership was not confirmed"));
+        };
+        let mut calls = core.call_sessions.lock().await;
+        // The same state lock is used by live event admission. Holding it while
+        // activating the session closes the registration-to-insertion window.
+        let state_guard = state.lock().await;
+        if !can_publish() {
+            drop(state_guard);
+            drop(calls);
+            abort_join(core, &room, &own, delay, postpone).await;
+            return Err(RpcCode::NotLoggedIn.into());
+        }
+        if let Some(ended) = state_guard.termination.ended.clone() {
+            drop(state_guard);
+            drop(calls);
+            abort_join(core, &room, &own, delay, postpone).await;
+            return Err(termination_during_join(session, room_id, ended));
+        }
+        let shared = state.clone();
+        let delay = super::DelayState::shared(delay);
+        drop(postpone);
+        let postpone = Some(Core::spawn_managed_postpone_loop(
+            room.client(),
+            delay.clone(),
+            wake.clone(),
+        ));
+        let updates = updates(
+            UpdateContext {
+                core: core.clone(),
+                generation,
+                session,
+                room: room.clone(),
+                state: state.clone(),
+                wake,
+                delay: delay.clone(),
+                encrypted: encrypt_media,
+            },
+            sticky_sync,
+        );
+        let (termination_cancel, _) = tokio::sync::watch::channel(false);
+        calls.insert(
+            session,
+            CallSession {
+                room,
+                _membership: membership,
+                state_key,
+                delay_id: delay,
+                postpone,
+                _handlers: handlers,
+                updates: Some(updates),
+                termination_keys,
+                termination_cancel,
+                state: shared,
+                sticky_member: own.member_id.filter(|_| mode == CallMode::Matrix2),
+            },
+        );
+        drop(state_guard);
+        drop(calls);
+        Ok(join_ok(
+            session,
+            encrypt_media,
+            mode,
+            mode_info,
+            provision,
+            publisher_id,
+            backends,
+        ))
     }
-    Ok(join_ok(
-        session,
-        encrypt_media,
-        mode,
-        mode_info,
-        provision,
-        publisher_id,
-        backends,
-    ))
 }
 
 async fn abort_join(
@@ -795,8 +922,7 @@ async fn verified_members(
                 .ok()
                 .flatten()
                 .is_some_and(|user| {
-                    user.membership()
-                        == &matrix_sdk::ruma::events::room::member::MembershipState::Join
+                    user.membership() == &ruma::events::room::member::MembershipState::Join
                 })
         {
             verified.push(member);
@@ -925,7 +1051,7 @@ async fn provision_missing(
     room: &Room,
     shared: &Mutex<State>,
     own: &CallMember,
-    missing: Vec<(String, String, Option<matrix_sdk::ruma::OwnedServerName>)>,
+    missing: Vec<(String, String, Option<OwnedServerName>)>,
 ) {
     for (id, service, server_name) in missing {
         let provision = if own.mode == CallMode::Matrix2 && own.wire == membership::RtcWire::Stable
@@ -1033,8 +1159,14 @@ async fn follow_oldest_focus(
 pub(super) async fn set_screen_sharing(
     room: &Room,
     state: &Mutex<State>,
+    delay: &Mutex<super::DelayState>,
     active: bool,
 ) -> Result<(), matrix_sdk::Error> {
+    // Held across the publish, so a hangup cannot leave between the check and the republish.
+    let delay = delay.lock().await;
+    if !delay.active {
+        return Ok(());
+    }
     let (own, intent) = {
         let mut state = state.lock().await;
         if state.own.screen_sharing == active {
@@ -1533,7 +1665,7 @@ pub(super) async fn receive_termination(
     state: &Arc<Mutex<State>>,
     mut value: Value,
 ) {
-    if core.session_generation.load(Ordering::SeqCst) != generation {
+    if !core.is_current(generation) {
         return;
     }
     if value.get("type").and_then(Value::as_str) == Some("m.room.encrypted") {
@@ -1568,39 +1700,20 @@ pub(super) async fn receive_termination(
             }
             _ => {
                 let mut state = state.lock().await;
-                if core.session_generation.load(Ordering::SeqCst) == generation
-                    && state.termination.ended.is_none()
-                {
+                if core.is_current(generation) && state.termination.ended.is_none() {
                     state.termination.remember_pending(value);
                 }
                 return;
             }
         }
     }
-    let claimed = {
-        // Admission, session removal and join activation share the lock order
-        // calls -> state. A joining session is not in the map yet; its ended
-        // marker is consumed by join before it can become active.
-        let mut calls = core.call_sessions.lock().await;
-        let mut current = state.lock().await;
-        if core.session_generation.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        current
-            .termination
-            .admit(&value, crate::now_ms())
-            .and_then(|ended| calls.remove(&session).map(|call| (call, ended)))
-    };
-    if let Some((call, ended)) = claimed {
-        // Never abort the key-watcher task from within that same task.
-        let core = core.clone();
-        core.clone().track_session_task(
-            spawn(async move {
-                core.complete_call_termination(generation, session, call, ended)
-                    .await;
-            })
-            .abort_on_drop(),
-        );
+    if let Ok(Some(claim)) = core
+        .claim_call_termination(generation, session, state, |termination| {
+            termination.admit(&value, crate::now_ms())
+        })
+        .await
+    {
+        core.complete_call_termination(claim);
     }
 }
 
@@ -1609,13 +1722,14 @@ pub(super) fn termination_during_join(
     room_id: OwnedRoomId,
     ended: super::termination::Ended,
 ) -> RpcError {
-    RpcError::CallTerminatedDuringJoin {
+    RpcCode::CallTerminatedDuringJoin {
         session,
         room_id,
         terminated_by: ended.terminated_by,
         event_id: ended.event_id,
         local: ended.local,
     }
+    .into()
 }
 
 fn watch_members(
@@ -1626,10 +1740,7 @@ fn watch_members(
 ) -> EventHandlerDropGuard {
     let handle = client.add_room_event_handler(
         room_id,
-        move |_: matrix_sdk::ruma::serde::Raw<
-            matrix_sdk::ruma::events::call::member::SyncCallMemberEvent,
-        >,
-              room: Room| {
+        move |_: ruma::serde::Raw<ruma::events::call::member::SyncCallMemberEvent>, room: Room| {
             let wake = wake.clone();
             let state = state.clone();
             async move {
@@ -1659,8 +1770,7 @@ fn watch_redactions(
 ) -> EventHandlerDropGuard {
     let handle = client.add_room_event_handler(
         room_id,
-        move |event: matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent,
-              room: Room| {
+        move |event: ruma::events::room::redaction::SyncRoomRedactionEvent, room: Room| {
             let state = state.clone();
             let wake = wake.clone();
             async move {
@@ -1681,12 +1791,12 @@ fn watch_redactions(
 }
 
 async fn refresh_encrypted_hangup(
-    core: Arc<Core>,
     room: Room,
     own: CallMember,
     delay: Arc<Mutex<super::DelayState>>,
 ) {
-    let Ok(support) = core.delayed_events_support().await else {
+    let client = room.client();
+    let Ok(support) = crate::delayed_events::support(&client).await else {
         return;
     };
     if !support.any() {
@@ -1697,8 +1807,7 @@ async fn refresh_encrypted_hangup(
         return;
     }
     if let Some(id) = delay.id.as_ref() {
-        let result =
-            crate::delayed_events::update(&room.client(), id.clone(), UpdateAction::Cancel).await;
+        let result = crate::delayed_events::update(&client, id.clone(), UpdateAction::Cancel).await;
         if result.is_err() {
             return;
         }
@@ -1714,18 +1823,13 @@ async fn refresh_encrypted_hangup(
     }
 }
 
-async fn restore_hangup(
-    core: &Core,
-    room: &Room,
-    own: &CallMember,
-    delay: &Mutex<super::DelayState>,
-) {
+async fn restore_hangup(room: &Room, own: &CallMember, delay: &Mutex<super::DelayState>) {
     let mut delay = delay.lock().await;
     if !delay.active || !delay.lost {
         return;
     }
     let id = if own.mode == CallMode::Matrix2 {
-        let Ok(support) = core.delayed_events_support().await else {
+        let Ok(support) = crate::delayed_events::support(&room.client()).await else {
             return;
         };
         send_delayed_leave(room, support, own)
@@ -1733,8 +1837,7 @@ async fn restore_hangup(
             .inspect_err(|error| tracing::warn!(?error, "could not restore the delayed call leave"))
             .ok()
     } else {
-        core.schedule_hangup(&room.room_id().to_owned(), &state_key(room, own))
-            .await
+        Core::schedule_hangup(room, &state_key(room, own)).await
     };
     if let Some(id) = id {
         delay.id = Some(id);
@@ -1743,7 +1846,7 @@ async fn restore_hangup(
 }
 
 async fn protect_membership_renewal(
-    core: &Core,
+    client: &Client,
     delay: &Mutex<super::DelayState>,
 ) -> super::Postponed {
     let mut delay = delay.lock().await;
@@ -1757,7 +1860,7 @@ async fn protect_membership_renewal(
             super::Postponed::Restarted
         };
     };
-    let result = core.postpone_hangup(id).await;
+    let result = Core::postpone_hangup(client, id).await;
     if result == super::Postponed::Gone {
         delay.id = None;
         delay.lost = true;
@@ -1890,7 +1993,7 @@ impl UpdateContext {
             self.terminate_membership();
             return;
         }
-        restore_hangup(&self.core, &self.room, &own, &self.delay).await;
+        restore_hangup(&self.room, &own, &self.delay).await;
         let mut refresh_delay = self.encrypted && own.mode == CallMode::Matrix2 && roster_changed;
         let renew_interval = if own.mode == CallMode::Matrix2 {
             STICKY_RENEW_INTERVAL_MS
@@ -1898,7 +2001,7 @@ impl UpdateContext {
             RENEW_INTERVAL_MS
         };
         if absent || crate::now_ms().saturating_sub(*renewed) >= renew_interval {
-            match protect_membership_renewal(&self.core, &self.delay).await {
+            match protect_membership_renewal(&self.room.client(), &self.delay).await {
                 super::Postponed::Gone => {
                     self.terminate_membership();
                     return;
@@ -1918,7 +2021,6 @@ impl UpdateContext {
         }
         if refresh_delay {
             drop(spawn(refresh_encrypted_hangup(
-                self.core.clone(),
                 self.room.clone(),
                 own,
                 self.delay.clone(),
@@ -1944,7 +2046,7 @@ impl UpdateContext {
             };
             self.wait_for_change(&mut sync, &mut watch, interval).await;
             self.apply_live_events().await;
-            if self.core.session_generation.load(Ordering::SeqCst) != self.generation {
+            if self.core.lifecycle.current() != self.generation {
                 return;
             }
             if self.encryption_changed().await {

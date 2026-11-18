@@ -11,10 +11,11 @@ use matrix_sdk::authentication::oauth::qrcode::{
     QrCodeData, QrCodeIntent, QrCodeIntentData, QrProgress, SecureChannelError,
 };
 use matrix_sdk::executor::{JoinHandleExt, spawn};
+use matrix_sdk::ruma::api::FeatureFlag;
 use url::Url;
 
 use crate::ResultExt;
-use crate::protocol::{CoreEvent, QrLoginFailureView, QrLoginProgressView, RpcError};
+use crate::protocol::{CoreEvent, QrLoginFailureView, QrLoginProgressView, RpcCode, RpcError};
 use crate::session::{self, Credentials, PersistedSession};
 use crate::verification::level_h_code;
 use crate::{Core, Task};
@@ -49,7 +50,7 @@ pub(crate) struct QrFlow {
 }
 
 fn decode(data: &str) -> Result<QrCodeData, RpcError> {
-    QrCodeData::from_base64(data).map_err(|_| RpcError::Denied)
+    QrCodeData::from_base64(data).map_err(|_| RpcCode::Denied.into())
 }
 
 fn reciprocating_homeserver(data: &QrCodeData) -> Option<String> {
@@ -208,8 +209,8 @@ impl Core {
     ) -> Result<(), RpcError> {
         let scanned_code = scanned_code.as_deref().map(decode).transpose()?;
         let homeserver = match &scanned_code {
-            Some(data) => reciprocating_homeserver(data).ok_or(RpcError::Denied)?,
-            None => homeserver.ok_or(RpcError::Denied)?,
+            Some(data) => reciprocating_homeserver(data).ok_or(RpcCode::Denied)?,
+            None => homeserver.ok_or(RpcCode::Denied)?,
         };
         let redirect_uri =
             Url::parse(&redirect_uri).or_failed(self, "start_qr_login_redirect_uri")?;
@@ -309,7 +310,7 @@ impl Core {
             .as_ref()
             .is_some_and(|data| data.intent() != QrCodeIntent::Login)
         {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
         let client = self.client().await?;
 
@@ -361,7 +362,7 @@ impl Core {
             .qr_slots()
             .await?
             .take_check_code()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         sender.send(code).await.or_failed(self, "qr_check_code")
     }
 
@@ -373,7 +374,7 @@ impl Core {
             .qr_slots()
             .await?
             .take_continuation()
-            .ok_or(RpcError::Unavailable)?;
+            .ok_or(RpcCode::Unavailable)?;
         let sent = if confirm {
             sender.confirm().await
         } else {
@@ -386,13 +387,22 @@ impl Core {
         self.qr_flow.lock().await.take();
     }
 
+    pub(crate) async fn qr_grant_supported(&self) -> Result<bool, RpcError> {
+        let client = self.client().await?;
+        let features = client
+            .unstable_features()
+            .await
+            .or_failed(self, "qr_grant_supported")?;
+        Ok(features.contains(&FeatureFlag::Msc4108) || msc_4388_supported(&client.oauth()).await)
+    }
+
     async fn qr_slots(&self) -> Result<Arc<QrSlots>, RpcError> {
         self.qr_flow
             .lock()
             .await
             .as_ref()
             .map(|flow| flow.slots.clone())
-            .ok_or(RpcError::Unavailable)
+            .ok_or_else(|| RpcCode::Unavailable.into())
     }
 }
 

@@ -11,12 +11,13 @@ use super::{Handler, Json};
 use crate::media::mxc_uri;
 use crate::profile_overrides::OverrideEdit;
 use crate::profiles::profile_view;
-use crate::protocol::{BookmarkView, NotificationModeView, RpcError, FieldEdit, InviteTriageView, MediaPreviewConfigView, MediaPreviewsView, MutualRoomView, PresenceSharingEdit, PresenceSharingView, PresenceView, ProfileOverridesView, ProfileView, SealedAccountDataView, UserDirectoryEntryView};
-use crate::{Core, ResultExt, presence};
+use crate::protocol::{BookmarkView, NotificationModeView, RpcCode, RpcError, FieldEdit, InviteTriageView, MediaPreviewConfigView, MediaPreviewsView, MutualRoomView, PresenceSharingEdit, PresenceOverrideView, PresenceSharingView, PresenceView, ProfileOverridesView, ProfileView, SealedAccountDataView, UserDirectoryEntryView};
+use crate::{Core, ResultExt};
 
 domain! {
     set_read_receipts,
     user_profile,
+    user_profile_source,
     user_relations,
     well_known,
     data_types,
@@ -35,11 +36,15 @@ domain! {
     unignore_user,
     report_user,
     deactivate_account,
+    change_password,
+    password_change_enabled,
     set_presence,
     set_device_activity,
     fetch_presence,
     presence_sharing,
     edit_presence_sharing,
+    presence_override,
+    set_presence_override,
     search_user_directory,
     dismissed_invites,
     set_invite_dismissed,
@@ -69,6 +74,34 @@ impl Handler for DeactivateAccountParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<String>, RpcError> {
         core.deactivate_account(self.password).await
+    }
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct ChangePasswordParams {
+    pub current_password: String,
+    pub new_password: String,
+    pub logout_devices: bool,
+}
+
+impl Handler for ChangePasswordParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.change_password(self).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PasswordChangeEnabledParams {}
+
+impl Handler for PasswordChangeEnabledParams {
+    type Ok = bool;
+
+    async fn run(self, core: &Arc<Core>) -> Result<bool, RpcError> {
+        core.password_change_enabled().await
     }
 }
 
@@ -123,6 +156,32 @@ impl Handler for UserProfileParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct UserProfileSourceParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub user_id: OwnedUserId,
+}
+
+impl Handler for UserProfileSourceParams {
+    type Ok = String;
+
+    async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
+        let response = core
+            .client()
+            .await?
+            .account()
+            .fetch_user_profile_of(&self.user_id)
+            .await
+            .map_err(|error| core.profile_error(&error))?;
+        let fields = response
+            .iter()
+            .map(|(field, value)| (field.as_str().to_owned(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::to_string_pretty(&fields).or_failed(core, "user_profile_source")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct UserRelationsParams {
     #[cfg_attr(feature = "typegen", specta(type = String))]
     pub user_id: OwnedUserId,
@@ -167,7 +226,7 @@ async fn fetch_mutual_rooms(
         let response = match client.send(request).await {
             Ok(response) => response,
             Err(matrix_sdk::HttpError::IntoHttp(
-                matrix_sdk::ruma::api::error::IntoHttpError::NoUnstablePath,
+                ruma::api::error::IntoHttpError::NoUnstablePath,
             )) => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
@@ -248,8 +307,9 @@ impl Handler for SetDataParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         // Server-managed since MSC4010.
         if matches!(self.event_type.as_str(), "m.push_rules" | "m.fully_read") {
-            return Err(RpcError::Unsupported);
+            return Err(RpcCode::Unsupported.into());
         }
+        let _guard = core.account_data_lock.lock().await;
         core.set_account_data(&self.event_type, &self.content).await
     }
 }
@@ -307,7 +367,7 @@ impl Handler for SetDisplayNameParams {
             .unstable_features()
             .await
             .or_failed(core, "set_display_name")?
-            .contains(&matrix_sdk::ruma::api::FeatureFlag::from(
+            .contains(&ruma::api::FeatureFlag::from(
                 "computer.gingershaped.msc4466",
             ))
         {
@@ -317,7 +377,7 @@ impl Handler for SetDisplayNameParams {
             )
             .or_failed(core, "set_display_name")?;
             let mut request = set_profile_field::v3::Request::new(
-                client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned(),
+                client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned(),
                 value,
             );
             request.propagate_to = profile_propagation(self.propagate_to);
@@ -360,7 +420,7 @@ impl Handler for SetAvatarUrlParams {
             .unstable_features()
             .await
             .or_failed(core, "set_avatar_url")?
-            .contains(&matrix_sdk::ruma::api::FeatureFlag::from(
+            .contains(&ruma::api::FeatureFlag::from(
                 "computer.gingershaped.msc4466",
             ))
         {
@@ -370,7 +430,7 @@ impl Handler for SetAvatarUrlParams {
             )
             .or_failed(core, "set_avatar_url")?;
             let mut request = set_profile_field::v3::Request::new(
-                client.user_id().ok_or(RpcError::NotLoggedIn)?.to_owned(),
+                client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_owned(),
                 value,
             );
             request.propagate_to = profile_propagation(self.propagate_to);
@@ -415,7 +475,7 @@ impl Handler for SetProfileFieldParams {
         match self.value {
             Some(value) => {
                 let value = ProfileFieldValue::new(&self.field, value)
-                    .map_err(|error| core.failed("set_profile_field_invalid_value", error))?;
+                    .map_err(|error| core.failed_with("set_profile_field_invalid_value", &error))?;
                 account
                     .set_profile_field(value)
                     .await
@@ -530,15 +590,11 @@ async fn edit_ignored_users(
     if ignore && core.client().await?.user_id() == Some(user_id) {
         return Err(core.failed(label, "a user cannot ignore themselves"));
     }
-    let current = core
-        .global_account_data(IGNORED_USER_LIST.into(), label)
-        .await?
-        .and_then(|raw| raw.deserialize_as::<serde_json::Value>().ok());
-    let Some(content) = with_ignored_user(current, user_id.as_str(), ignore) else {
-        return Ok(());
-    };
-    core.put_global_account_data(IGNORED_USER_LIST.into(), &content, label)
-        .await
+    core.update_account_data(&[IGNORED_USER_LIST], label, async |current| {
+        Ok(with_ignored_user(current, user_id.as_str(), ignore))
+    })
+    .await?;
+    Ok(())
 }
 
 /// Read from the account data, since the SDK's observable only fills once a sync changes the list.
@@ -641,8 +697,7 @@ impl Handler for SetPresenceParams {
         core.set_desired_presence(self.presence);
 
         let client = core.client().await?;
-        client
-            .set_presence(presence::state(self.presence), self.status_message, true)
+        core.publish_presence(&client, self.status_message)
             .await
             .or_failed(core, "set_presence")?;
 
@@ -1037,6 +1092,34 @@ impl Handler for EditPresenceSharingParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<PresenceSharingView, RpcError> {
         core.edit_presence_sharing(&self.edit).await
+    }
+}
+
+/// `None` when the homeserver does not support MSC4532.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PresenceOverrideParams {}
+
+impl Handler for PresenceOverrideParams {
+    type Ok = Option<PresenceOverrideView>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Option<PresenceOverrideView>, RpcError> {
+        core.presence_override().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct SetPresenceOverrideParams {
+    #[serde(rename = "override")]
+    pub presence_override: PresenceOverrideView,
+}
+
+impl Handler for SetPresenceOverrideParams {
+    type Ok = PresenceOverrideView;
+
+    async fn run(self, core: &Arc<Core>) -> Result<PresenceOverrideView, RpcError> {
+        core.set_presence_override(&self.presence_override).await
     }
 }
 

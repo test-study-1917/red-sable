@@ -13,7 +13,9 @@ use serde_json::Value;
 
 use crate::Core;
 use crate::profiles::{profile_hex_color, pronoun_sets};
-use crate::protocol::{CoreEvent, PronounView, RoomCosmeticsView, RpcError, SenderCosmeticsView};
+use crate::protocol::{
+    CoreEvent, PronounView, RoomCosmeticsView, RpcCode, RpcError, SenderCosmeticsView,
+};
 
 pub(crate) const MEMBER_EVENT: &str = "m.room.member";
 pub(crate) const MEMBER_COLOR_FIELD: &str = "eu.she-a.color";
@@ -314,7 +316,7 @@ impl Core {
         space_id: Option<OwnedRoomId>,
     ) -> Result<RoomCosmeticsView, RpcError> {
         let client = self.client().await?;
-        let room = client.get_room(room_id).ok_or(RpcError::UnknownRoom)?;
+        let room = client.get_room(room_id).ok_or(RpcCode::UnknownRoom)?;
         Ok(self.cosmetics_for(&client, &room, space_id).await)
     }
 
@@ -635,10 +637,7 @@ mod tests {
             (COLOR_EVENT, ALICE, json!({ "color": "red" })),
         ]);
 
-        assert_eq!(
-            resolve(&room, None),
-            [] as [crate::protocol::SenderCosmeticsView; 0]
-        );
+        assert_eq!(resolve(&room, None), Vec::<SenderCosmeticsView>::new());
     }
 
     #[test]
@@ -656,10 +655,7 @@ mod tests {
         assert!(room.apply(MEMBER_EVENT, ALICE, &renamed));
         assert!(!room.apply(MEMBER_EVENT, ALICE, &renamed));
         assert!(room.apply(MEMBER_EVENT, ALICE, &json!({ "membership": "leave" })));
-        assert_eq!(
-            resolve(&room, None),
-            [] as [crate::protocol::SenderCosmeticsView; 0]
-        );
+        assert_eq!(resolve(&room, None), Vec::<SenderCosmeticsView>::new());
     }
 
     #[test]
@@ -670,16 +666,13 @@ mod tests {
             ALICE,
             &json!({ "font": "Georgia" })
         ));
-        assert_eq!(
-            resolve(&room, None),
-            [] as [crate::protocol::SenderCosmeticsView; 0]
-        );
+        assert_eq!(resolve(&room, None), Vec::<SenderCosmeticsView>::new());
     }
 
     async fn joined(server: &MatrixMockServer, rooms: &[&RoomId]) -> matrix_sdk::Client {
         let client = server.client_builder().build().await;
         for room_id in rooms {
-            server.sync_joined_room(&client, room_id).await;
+            server.sync_joined_room(&client, *room_id).await;
         }
         client
     }
@@ -947,7 +940,7 @@ mod tests {
         let room = client.get_room(room_id).unwrap();
         assert_eq!(
             core.cosmetics_for(&client, &room, None).await.users,
-            [] as [crate::protocol::SenderCosmeticsView; 0]
+            Vec::<SenderCosmeticsView>::new()
         );
 
         server
@@ -1002,7 +995,7 @@ mod tests {
             core.cosmetics_for(&client, &room, Some(space_id.to_owned()))
                 .await
                 .users,
-            [] as [crate::protocol::SenderCosmeticsView; 0]
+            Vec::<SenderCosmeticsView>::new()
         );
 
         rename(&server, &client, room_id, &old, &new).await;

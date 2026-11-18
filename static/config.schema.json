@@ -191,6 +191,14 @@
         "themeUrl": {
           "type": "string",
           "pattern": "^(https?://|/)"
+        },
+        "lightThemeUrl": {
+          "type": "string",
+          "pattern": "^(https?://|/)"
+        },
+        "darkThemeUrl": {
+          "type": "string",
+          "pattern": "^(https?://|/)"
         }
       }
     },
@@ -277,6 +285,7 @@
             "system",
             "ar",
             "bg",
+            "ca",
             "cs",
             "de",
             "en",
@@ -450,6 +459,15 @@
           ],
           "default": "always"
         },
+        "voiceParticipantPlacement": {
+          "title": "Voice room participants",
+          "enum": [
+            "both",
+            "below",
+            "inline"
+          ],
+          "default": "both"
+        },
         "showRoomBanners": {
           "title": "Room banners above the list",
           "type": "boolean",
@@ -459,6 +477,16 @@
           "title": "Show topics in direct messages",
           "type": "boolean",
           "default": true
+        },
+        "messagePreviews": {
+          "title": "Message previews",
+          "enum": [
+            "off",
+            "direct",
+            "rooms",
+            "all"
+          ],
+          "default": "off"
         },
         "roomBannerHeight": {
           "type": "number",
@@ -632,10 +660,20 @@
           "type": "boolean",
           "default": false
         },
+        "showBridgeBadges": {
+          "title": "Show the bridged network on room icons",
+          "type": "boolean",
+          "default": true
+        },
         "showSpaceEvents": {
           "title": "Show today’s events in spaces",
           "type": "boolean",
           "default": true
+        },
+        "showAlertZoo": {
+          "title": "Show alert zoo",
+          "type": "boolean",
+          "default": false
         },
         "hour24Clock": {
           "title": "24-hour clock",
@@ -876,6 +914,15 @@
           "type": "boolean",
           "default": false
         },
+        "linkMscReferences": {
+          "title": "Link MSC references",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "default": "ask"
+        },
         "inlineEditing": {
           "title": "Edit messages in the timeline",
           "type": "boolean",
@@ -1010,6 +1057,11 @@
           "type": "boolean",
           "default": false
         },
+        "personaPickerShowAccountWhenDeselected": {
+          "title": "Preview account avatar when deselected",
+          "type": "boolean",
+          "default": true
+        },
         "personaProxying": {
           "title": "Shorthand triggers",
           "type": "boolean",
@@ -1077,6 +1129,7 @@
           "enum": [
             "online",
             "unavailable",
+            "busy",
             "offline"
           ],
           "default": "online"
@@ -1122,6 +1175,11 @@
             "giphy"
           ],
           "default": "default"
+        },
+        "reuploadGifs": {
+          "title": "Upload picked GIFs to your homeserver",
+          "type": "boolean",
+          "default": false
         },
         "urlPreviews": {
           "title": "Server-side embeds",
@@ -1190,6 +1248,11 @@
           "title": "System alerts",
           "type": "boolean",
           "default": true
+        },
+        "inAppBanners": {
+          "title": "In-app banners",
+          "type": "boolean",
+          "default": false
         },
         "badgeDefaultDirect": {
           "enum": [
@@ -1260,7 +1323,7 @@
           "default": true
         },
         "faviconForMentionsOnly": {
-          "title": "Tab badge for mentions and keywords",
+          "title": "Tab badge only for mentions and keywords",
           "type": "boolean",
           "default": false
         },
@@ -1345,6 +1408,13 @@
           "type": "boolean",
           "default": true
         },
+        "microphoneVolume": {
+          "title": "Microphone volume",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1
+        },
         "audioInputDevice": {
           "type": "string",
           "default": ""
@@ -1406,7 +1476,7 @@
             "1440",
             "2160"
           ],
-          "default": "720"
+          "default": "1080"
         },
         "callScreenBitrate": {
           "title": "Screen sharing maximum bitrate",
@@ -1441,7 +1511,7 @@
             "vp9",
             "av1"
           ],
-          "default": "h264"
+          "default": "vp8"
         },
         "callSimulcast": {
           "title": "Use simulcast",
@@ -1710,6 +1780,7 @@
             "system",
             "ar",
             "bg",
+            "ca",
             "cs",
             "de",
             "en",
@@ -1883,6 +1954,15 @@
           ],
           "default": "always"
         },
+        "voiceParticipantPlacement": {
+          "title": "Voice room participants",
+          "enum": [
+            "both",
+            "below",
+            "inline"
+          ],
+          "default": "both"
+        },
         "showRoomBanners": {
           "title": "Room banners above the list",
           "type": "boolean",
@@ -1892,6 +1972,16 @@
           "title": "Show topics in direct messages",
           "type": "boolean",
           "default": true
+        },
+        "messagePreviews": {
+          "title": "Message previews",
+          "enum": [
+            "off",
+            "direct",
+            "rooms",
+            "all"
+          ],
+          "default": "off"
         },
         "roomBannerHeight": {
           "type": "number",
@@ -2065,10 +2155,20 @@
           "type": "boolean",
           "default": false
         },
+        "showBridgeBadges": {
+          "title": "Show the bridged network on room icons",
+          "type": "boolean",
+          "default": true
+        },
         "showSpaceEvents": {
           "title": "Show today’s events in spaces",
           "type": "boolean",
           "default": true
+        },
+        "showAlertZoo": {
+          "title": "Show alert zoo",
+          "type": "boolean",
+          "default": false
         },
         "hour24Clock": {
           "title": "24-hour clock",
@@ -2309,6 +2409,15 @@
           "type": "boolean",
           "default": false
         },
+        "linkMscReferences": {
+          "title": "Link MSC references",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "default": "ask"
+        },
         "inlineEditing": {
           "title": "Edit messages in the timeline",
           "type": "boolean",
@@ -2443,6 +2552,11 @@
           "type": "boolean",
           "default": false
         },
+        "personaPickerShowAccountWhenDeselected": {
+          "title": "Preview account avatar when deselected",
+          "type": "boolean",
+          "default": true
+        },
         "personaProxying": {
           "title": "Shorthand triggers",
           "type": "boolean",
@@ -2510,6 +2624,7 @@
           "enum": [
             "online",
             "unavailable",
+            "busy",
             "offline"
           ],
           "default": "online"
@@ -2555,6 +2670,11 @@
             "giphy"
           ],
           "default": "default"
+        },
+        "reuploadGifs": {
+          "title": "Upload picked GIFs to your homeserver",
+          "type": "boolean",
+          "default": false
         },
         "urlPreviews": {
           "title": "Server-side embeds",
@@ -2623,6 +2743,11 @@
           "title": "System alerts",
           "type": "boolean",
           "default": true
+        },
+        "inAppBanners": {
+          "title": "In-app banners",
+          "type": "boolean",
+          "default": false
         },
         "badgeDefaultDirect": {
           "enum": [
@@ -2693,7 +2818,7 @@
           "default": true
         },
         "faviconForMentionsOnly": {
-          "title": "Tab badge for mentions and keywords",
+          "title": "Tab badge only for mentions and keywords",
           "type": "boolean",
           "default": false
         },
@@ -2778,6 +2903,13 @@
           "type": "boolean",
           "default": true
         },
+        "microphoneVolume": {
+          "title": "Microphone volume",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1
+        },
         "audioInputDevice": {
           "type": "string",
           "default": ""
@@ -2839,7 +2971,7 @@
             "1440",
             "2160"
           ],
-          "default": "720"
+          "default": "1080"
         },
         "callScreenBitrate": {
           "title": "Screen sharing maximum bitrate",
@@ -2874,7 +3006,7 @@
             "vp9",
             "av1"
           ],
-          "default": "h264"
+          "default": "vp8"
         },
         "callSimulcast": {
           "title": "Use simulcast",

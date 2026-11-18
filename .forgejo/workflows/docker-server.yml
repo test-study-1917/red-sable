@@ -3,8 +3,18 @@ name: Server Docker image
 on:
   push:
     branches: [main]
-
-permissions: {}
+    paths:
+      - 'crates/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'patches/**'
+      - 'packaging/server/**'
+      - '.forgejo/workflows/docker-server.yml'
 
 concurrency:
   group: docker-server-${{ github.workflow }}-${{ github.ref }}
@@ -23,8 +33,6 @@ jobs:
             runner: docker
           - arch: arm64
             runner: docker-arm64
-    permissions:
-      contents: read
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -644,10 +644,15 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
         false,
     )));
     let session = CallSessionId(99);
+    let membership = core
+        .call_memberships
+        .acquire(core.lifecycle.current(), &room.room_id().to_owned())
+        .await;
     core.call_sessions.lock().await.insert(
         session,
         CallSession {
-            room_id: room.room_id().to_owned(),
+            room: room.clone(),
+            _membership: membership,
             state_key: membership_state_key(&own.user_id, own.own_device_id(), "11"),
             delay_id: DelayState::shared(None),
             postpone: None,
@@ -674,7 +679,10 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
         }
     }
     assert!(ended <= 1, "one session has only one termination owner");
-    if matches!(leave, Err(crate::protocol::RpcError::UnknownCall)) {
+    if matches!(
+        leave.map_err(|error| error.code),
+        Err(crate::protocol::RpcCode::UnknownCall)
+    ) {
         assert_eq!(ended, 1, "a winning remote end emits exactly once");
     } else {
         assert_eq!(ended, 0, "a winning ordinary leave does not broadcast");
@@ -685,7 +693,7 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
 #[tokio::test]
 async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
     use crate::calls::runtime::{State, receive_termination, termination_during_join};
-    use crate::protocol::{CallSessionId, RpcError};
+    use crate::protocol::{CallSessionId, RpcCode};
     use crate::{Core, store::MemorySessionStore};
     use matrix_sdk::{ruma::room_id, test_utils::mocks::MatrixMockServer};
     use std::sync::Arc;
@@ -724,8 +732,8 @@ async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
     assert!(events.try_recv().is_err());
     let ended = state.lock().await.termination.ended.clone().unwrap();
     assert!(matches!(
-        termination_during_join(session, room.room_id().to_owned(), ended),
-        RpcError::CallTerminatedDuringJoin {
+        termination_during_join(session, room.room_id().to_owned(), ended).code,
+        RpcCode::CallTerminatedDuringJoin {
             session: CallSessionId(1),
             local: false,
             ..
@@ -781,10 +789,15 @@ async fn rpc_fixture() -> RpcFixture {
         false,
     )));
     let session = CallSessionId(99);
+    let membership = core
+        .call_memberships
+        .acquire(core.lifecycle.current(), &room.room_id().to_owned())
+        .await;
     core.call_sessions.lock().await.insert(
         session,
         CallSession {
-            room_id: room.room_id().to_owned(),
+            room: room.clone(),
+            _membership: membership,
             state_key: membership_state_key(&own.user_id, own.own_device_id(), "11"),
             delay_id: DelayState::shared(None),
             postpone: None,
@@ -834,7 +847,7 @@ async fn wait_for_send(server: &matrix_sdk::test_utils::mocks::MatrixMockServer)
 async fn production_rpc_retries_the_same_transaction_only_after_failure() {
     use crate::{
         api::calls::EndForEveryoneParams,
-        protocol::{CoreEvent, RpcError},
+        protocol::{CoreEvent, RpcCode},
     };
     use wiremock::{
         Mock, ResponseTemplate,
@@ -851,8 +864,9 @@ async fn production_rpc_retries_the_same_transaction_only_after_failure() {
     assert!(matches!(
         f.core
             .run(EndForEveryoneParams { session: f.session })
-            .await,
-        Err(RpcError::Unavailable)
+            .await
+            .map_err(|error| error.code),
+        Err(RpcCode::Unavailable)
     ));
     assert!(f.core.call_sessions.lock().await.contains_key(&f.session));
     assert!(f.events.try_recv().is_err());
@@ -875,8 +889,9 @@ async fn production_rpc_retries_the_same_transaction_only_after_failure() {
     assert!(matches!(
         f.core
             .run(EndForEveryoneParams { session: f.session })
-            .await,
-        Err(RpcError::UnknownCall)
+            .await
+            .map_err(|error| error.code),
+        Err(RpcCode::UnknownCall)
     ));
     let requests: Vec<_> = f
         .server
@@ -899,7 +914,7 @@ async fn production_rpc_retries_the_same_transaction_only_after_failure() {
 
 #[tokio::test]
 async fn production_rpc_busy_and_leave_or_logout_cancel_an_in_flight_send() {
-    use crate::{api::calls::EndForEveryoneParams, protocol::RpcError};
+    use crate::{api::calls::EndForEveryoneParams, protocol::RpcCode};
     use std::time::Duration;
     use wiremock::{
         Mock, ResponseTemplate,
@@ -921,8 +936,11 @@ async fn production_rpc_busy_and_leave_or_logout_cancel_an_in_flight_send() {
         let sending = tokio::spawn(async move { core.run(EndForEveryoneParams { session }).await });
         wait_for_send(&f.server).await;
         assert!(matches!(
-            f.core.run(EndForEveryoneParams { session }).await,
-            Err(RpcError::CallTerminationInProgress)
+            f.core
+                .run(EndForEveryoneParams { session })
+                .await
+                .map_err(|error| error.code),
+            Err(RpcCode::CallTerminationInProgress)
         ));
         let core = f.core.clone();
         let leaving = tokio::spawn(async move {
@@ -936,8 +954,9 @@ async fn production_rpc_busy_and_leave_or_logout_cancel_an_in_flight_send() {
             tokio::time::timeout(Duration::from_secs(2), sending)
                 .await
                 .unwrap()
-                .unwrap(),
-            Err(RpcError::UnknownCall | RpcError::NotLoggedIn)
+                .unwrap()
+                .map_err(|error| error.code),
+            Err(RpcCode::UnknownCall | RpcCode::NotLoggedIn)
         ));
         leaving.abort();
         assert!(!f.core.call_sessions.lock().await.contains_key(&session));
@@ -1026,18 +1045,157 @@ async fn production_rpc_own_echo_and_response_are_one_normal_end_in_either_order
 }
 
 #[tokio::test]
-async fn rejoin_waits_for_old_membership_cleanup_without_delaying_media_end() {
-    use crate::{
-        api::calls::EndForEveryoneParams,
-        protocol::{CoreEvent, RpcError},
-    };
-    use std::{sync::atomic::Ordering, time::Duration};
+async fn remote_end_blocks_rejoin_before_the_cleanup_task_runs() {
+    use crate::calls::runtime::receive_termination;
+
+    let mut f = rpc_fixture().await;
+    let room_id = f.room.room_id().to_owned();
+    let generation = f.core.lifecycle.current();
+    receive_termination(
+        &f.core,
+        generation,
+        f.session,
+        &f.room,
+        &f.state,
+        event("@alice:example.org", crate::now_ms()),
+    )
+    .await;
+
+    // The event and session removal already happened. The network task has
+    // not run on this current-thread runtime, and publication must still wait.
+    assert!(
+        !f.core
+            .call_sessions
+            .try_lock()
+            .unwrap()
+            .contains_key(&f.session)
+    );
+    assert!(matches!(
+        f.events.try_recv(),
+        Ok(crate::protocol::CoreEvent::CallTerminated { .. })
+    ));
+    let mut publishing = std::pin::pin!(f.core.call_memberships.acquire(generation, &room_id));
+    assert!(futures_util::poll!(&mut publishing).is_pending());
+    f.core.end_all_calls().await;
+    assert!(futures_util::poll!(&mut publishing).is_ready());
+}
+
+#[tokio::test]
+async fn a_claim_completed_after_account_switch_cannot_signal_on_the_replacement() {
+    use crate::session::Session;
+    use matrix_sdk::{ruma::event_id, test_utils::mocks::MatrixMockServer};
+    use matrix_sdk_ui::sync_service::SyncService;
+    use std::sync::Arc;
+
+    let mut f = rpc_fixture().await;
+    f.server
+        .mock_room_send_state()
+        .ok(event_id!("$left"))
+        .mount()
+        .await;
+    let generation = f.core.lifecycle.current();
+    let value = event("@alice:example.org", crate::now_ms());
+    let claim = f
+        .core
+        .claim_call_termination(generation, f.session, &f.state, |termination| {
+            termination.admit(&value, crate::now_ms())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let room_id = f.room.room_id().to_owned();
+    let next = MatrixMockServer::new().await;
+    let client = next.client_builder().build().await;
+    next.sync_joined_room(&client, &room_id).await;
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    f.core.lock_session_transition().await.invalidate();
+    f.core.session_tasks.lock().clear();
+    *f.core.session.write().await = Some(Session {
+        account_id: "replacement".into(),
+        client,
+        sync_service,
+        homeserver: next.server().uri(),
+        oauth: false,
+    });
+
+    f.core.complete_call_termination(claim);
+    f.core.end_all_calls().await;
+    assert!(f.core.session_tasks.lock().is_empty());
+    assert!(f.events.try_recv().is_err());
+    assert!(
+        next.server()
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| {
+                request.method.as_str() != "PUT" || !request.url.path().contains("/state/")
+            })
+    );
+    let mut lease = std::pin::pin!(f.core.call_memberships.acquire(generation, &room_id));
+    assert!(futures_util::poll!(&mut lease).is_ready());
+}
+
+#[tokio::test]
+async fn account_retirement_owns_unclaimed_calls_and_awaits_already_claimed_ones() {
+    use crate::calls::runtime::receive_termination;
+    use std::time::Duration;
     use wiremock::{
         Mock, ResponseTemplate,
         matchers::{method, path_regex},
     };
 
-    for cancel_cleanup in [false, true] {
+    for claimed_first in [false, true] {
+        let mut f = rpc_fixture().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/rooms/.*/state/.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id":"$left"})))
+            .expect(1)
+            .mount(f.server.server())
+            .await;
+        let generation = f.core.lifecycle.current();
+        let value = event("@alice:example.org", crate::now_ms());
+        if claimed_first {
+            let claim = f
+                .core
+                .claim_call_termination(generation, f.session, &f.state, |termination| {
+                    termination.admit(&value, crate::now_ms())
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let mut retiring = std::pin::pin!(f.core.retire_calls());
+            assert!(futures_util::poll!(&mut retiring).is_pending());
+            f.core.complete_call_termination(claim);
+            f.core.session_tasks.lock().clear();
+            tokio::time::timeout(Duration::from_secs(5), retiring)
+                .await
+                .unwrap();
+        } else {
+            {
+                let _calls = f.core.call_sessions.lock().await;
+                f.core.call_memberships.retire(generation);
+            }
+            receive_termination(&f.core, generation, f.session, &f.room, &f.state, value).await;
+            assert!(f.core.call_sessions.lock().await.contains_key(&f.session));
+            f.core.retire_calls().await;
+        }
+        assert!(f.core.call_sessions.lock().await.is_empty());
+        assert!(f.events.try_recv().is_err());
+        f.server.server().verify().await;
+    }
+}
+
+#[tokio::test]
+async fn rejoin_waits_for_old_membership_cleanup_without_delaying_media_end() {
+    use crate::{api::calls::EndForEveryoneParams, protocol::CoreEvent};
+    use std::time::Duration;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    for switch_account in [false, true] {
         let mut f = rpc_fixture().await;
         Mock::given(method("PUT"))
             .and(path_regex(r"/rooms/.*/send/io\.element\.call\.reaction/.*"))
@@ -1051,11 +1209,7 @@ async fn rejoin_waits_for_old_membership_cleanup_without_delaying_media_end() {
             .respond_with(move |_: &wiremock::Request| {
                 started.notify_one();
                 ResponseTemplate::new(200)
-                    .set_delay(if cancel_cleanup {
-                        Duration::from_secs(60)
-                    } else {
-                        Duration::from_millis(200)
-                    })
+                    .set_delay(Duration::from_millis(200))
                     .set_body_json(json!({"event_id":"$left"}))
             })
             .mount(f.server.server())
@@ -1073,30 +1227,23 @@ async fn rejoin_waits_for_old_membership_cleanup_without_delaying_media_end() {
             .await
             .unwrap();
 
-        let core = f.core.clone();
         let room_id = f.room.room_id().to_owned();
-        let mut joining =
-            tokio::spawn(async move { core.join_call(room_id, None, None, None).await });
-        // A join may not even discover/publish its new membership while the
-        // old state-key deletion is still on the wire.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut joining)
-                .await
-                .is_err()
-        );
-        f.core.session_generation.fetch_add(1, Ordering::SeqCst);
-        if cancel_cleanup {
+        let generation = f.core.lifecycle.current();
+        let mut publishing = std::pin::pin!(f.core.call_memberships.acquire(generation, &room_id));
+        assert!(futures_util::poll!(&mut publishing).is_pending());
+        if switch_account {
+            f.core.lock_session_transition().await.invalidate();
+            let replacement = f
+                .core
+                .call_memberships
+                .acquire(f.core.lifecycle.current(), &room_id);
+            assert!(futures_util::poll!(std::pin::pin!(replacement)).is_ready());
             f.core.session_tasks.lock().clear();
+            assert!(futures_util::poll!(&mut publishing).is_pending());
         }
-        // Changing accounts while waiting must not join using the new account.
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(5), joining)
-                .await
-                .unwrap()
-                .unwrap(),
-            Err(RpcError::NotLoggedIn)
-        ));
-        assert!(f.core.call_cleanups.lock().await.is_empty());
+        let _lease = tokio::time::timeout(Duration::from_secs(5), publishing)
+            .await
+            .unwrap();
         f.core.session_tasks.lock().clear();
     }
 }

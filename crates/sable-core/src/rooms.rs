@@ -31,7 +31,7 @@ use matrix_sdk_base::{RawStateEventWithKeys, RoomInfo, RoomInfoNotableUpdateReas
 use crate::ResultExt;
 use crate::api::rooms::PublicRoomsOk;
 use crate::api::spaces::HierarchyOk;
-use crate::protocol::{JoinRuleView, RoomPreviewView, RpcError};
+use crate::protocol::{JoinRuleView, RoomPreviewView, RpcCode, RpcError};
 
 use crate::Core;
 use crate::view;
@@ -111,7 +111,7 @@ pub(crate) async fn reconcile_memberships(client: &Client) -> Result<(), matrix_
     Ok(())
 }
 
-pub(crate) async fn poll_memberships(core: std::sync::Arc<crate::Core>, client: Client) {
+pub(crate) async fn poll_memberships(core: std::sync::Arc<Core>, client: Client) {
     loop {
         matrix_sdk::sleep::sleep(MEMBERSHIP_POLL_INTERVAL).await;
         core.wait_until_active().await;
@@ -154,7 +154,7 @@ pub(crate) async fn fill_own_members(client: &Client) -> Result<(), matrix_sdk::
     Ok(())
 }
 
-pub(crate) async fn fill_own_member(room: &matrix_sdk::Room) -> Result<(), matrix_sdk::Error> {
+pub(crate) async fn fill_own_member(room: &Room) -> Result<(), matrix_sdk::Error> {
     if room.joined_members_count() > OWN_MEMBER_FILL_MAX_MEMBERS
         || room.get_member_no_sync(room.own_user_id()).await?.is_some()
     {
@@ -166,6 +166,33 @@ pub(crate) async fn fill_own_member(room: &matrix_sdk::Room) -> Result<(), matri
     Ok(())
 }
 
+const DM_DEFAULT_EVENT: &str = "moe.sable.dm_notification_default";
+
+async fn clear_dm_default(client: &Client) -> matrix_sdk::Result<()> {
+    let event_type = DM_DEFAULT_EVENT;
+    let Some(raw) = client
+        .account()
+        .fetch_account_data(event_type.into())
+        .await?
+    else {
+        return Ok(());
+    };
+    if raw
+        .deserialize_as_unchecked::<serde_json::Map<String, serde_json::Value>>()
+        .is_ok_and(|content| content.is_empty())
+    {
+        return Ok(());
+    }
+    client
+        .account()
+        .set_account_data_raw(
+            event_type.into(),
+            ruma::serde::Raw::from_json_string("{}".to_owned())?,
+        )
+        .await?;
+    Ok(())
+}
+
 impl Core {
     /// The active account, with the rooms it left or was banned from: their conversations are gone.
     ///
@@ -174,7 +201,7 @@ impl Core {
     /// When no account is signed in.
     pub async fn left_rooms(&self) -> Result<(String, Vec<String>), RpcError> {
         let client = self.client().await?;
-        let user_id = client.user_id().ok_or(RpcError::NotLoggedIn)?.to_string();
+        let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_string();
         let rooms = client
             .rooms()
             .into_iter()
@@ -188,30 +215,50 @@ impl Core {
         &self,
         room_id: &OwnedRoomId,
         direct: bool,
-        user_id: Option<matrix_sdk::ruma::OwnedUserId>,
+        user_id: Option<ruma::OwnedUserId>,
     ) -> Result<(), RpcError> {
         let client = self.client().await?;
         let room = self.room(room_id).await?;
 
-        if direct {
+        let others = if direct {
             let members = room
                 .members(RoomMemberships::ACTIVE)
                 .await
                 .or_failed(self, "set_direct_members")?;
-            let others = match user_id {
+            match &user_id {
                 Some(user_id)
                     if Some(user_id.as_ref()) != client.user_id()
                         && members.iter().any(|member| member.user_id() == user_id) =>
                 {
-                    vec![user_id]
+                    vec![user_id.clone()]
                 }
-                Some(_) => return Err(RpcError::Denied),
+                Some(_) => return Err(RpcCode::Denied.into()),
                 None => members
                     .iter()
                     .map(|member| member.user_id().to_owned())
                     .filter(|user_id| Some(user_id.as_ref()) != client.user_id())
                     .collect(),
-            };
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Written before `m.direct`, whose update is what refreshes the room's name.
+        let partner = user_id.filter(|_| direct);
+        if partner.is_some() || view::chosen_partner(&room).await.is_some() {
+            let content = partner.map_or_else(
+                || serde_json::json!({}),
+                |user_id| serde_json::json!({ "user_id": user_id }),
+            );
+            let raw = ruma::serde::Raw::new(&content)
+                .or_failed(self, "set_direct_partner")?
+                .cast_unchecked();
+            room.set_account_data_raw(view::DIRECT_PARTNER_EVENT.into(), raw)
+                .await
+                .or_failed(self, "set_direct_partner")?;
+        }
+
+        if direct {
             client
                 .account()
                 .mark_as_dm(room_id, &others)
@@ -240,12 +287,12 @@ impl Core {
             JoinRuleView::Knock if supports_knock => {
                 RoomJoinRulesEventContent::new(JoinRule::Knock)
             }
-            JoinRuleView::Knock => return Err(RpcError::Unsupported),
+            JoinRuleView::Knock => return Err(RpcCode::Unsupported.into()),
             JoinRuleView::Restricted if !supports_restricted => {
-                return Err(RpcError::Unsupported);
+                return Err(RpcCode::Unsupported.into());
             }
             JoinRuleView::KnockRestricted if !supports_knock_restricted => {
-                return Err(RpcError::Unsupported);
+                return Err(RpcCode::Unsupported.into());
             }
             JoinRuleView::Restricted | JoinRuleView::KnockRestricted => {
                 let client = self.client().await?;
@@ -255,7 +302,7 @@ impl Core {
                     .map(AllowRule::room_membership)
                     .collect();
                 if allow.is_empty() {
-                    return Err(RpcError::Denied);
+                    return Err(RpcCode::Denied.into());
                 }
                 if matches!(rule, JoinRuleView::Restricted) {
                     RoomJoinRulesEventContent::restricted(allow)
@@ -325,6 +372,10 @@ impl Core {
             tracing::warn!("could not clean up notification rules: {error}");
             return false;
         }
+        if let Err(error) = clear_dm_default(&client).await {
+            tracing::warn!("could not clear the old DM notification default: {error}");
+            return false;
+        }
         true
     }
 
@@ -343,9 +394,9 @@ impl Core {
             .await
             .or_failed(self, "room_encryption_state")?
         {
-            matrix_sdk::EncryptionState::Encrypted => Ok(true),
-            matrix_sdk::EncryptionState::NotEncrypted => Ok(false),
-            matrix_sdk::EncryptionState::Unknown => Err(RpcError::Unavailable),
+            EncryptionState::Encrypted => Ok(true),
+            EncryptionState::NotEncrypted => Ok(false),
+            EncryptionState::Unknown => Err(RpcCode::Unavailable.into()),
         }
     }
 
@@ -395,7 +446,7 @@ impl Core {
         let client = self.client().await?;
         let own = client
             .user_id()
-            .ok_or(RpcError::NotLoggedIn)?
+            .ok_or(RpcCode::NotLoggedIn)?
             .server_name()
             .to_string();
 
@@ -483,13 +534,13 @@ impl Core {
         {
             Ok(content)
         } else {
-            let via = via.ok_or(RpcError::UnknownRoom)?;
+            let via = via.ok_or(RpcCode::UnknownRoom)?;
             let via: Vec<_> = via
                 .into_iter()
-                .map(|server| ServerName::parse(server).map_err(|_| RpcError::UnknownRoom))
+                .map(|server| ServerName::parse(server).map_err(|_| RpcCode::UnknownRoom))
                 .collect::<Result<_, _>>()?;
             if via.is_empty() {
-                return Err(RpcError::UnknownRoom);
+                return Err(RpcCode::UnknownRoom.into());
             }
             Ok(SpaceChildEventContent::new(via))
         }
@@ -553,7 +604,7 @@ impl Core {
         via: &[String],
         context: &str,
     ) -> Result<(OwnedRoomId, Vec<OwnedServerName>), RpcError> {
-        let address = RoomOrAliasId::parse(address).map_err(|_| RpcError::UnknownRoom)?;
+        let address = RoomOrAliasId::parse(address).map_err(|_| RpcCode::UnknownRoom)?;
         let mut servers = via
             .iter()
             .filter_map(|server| ServerName::parse(server).ok())
@@ -598,7 +649,7 @@ impl Core {
                     && let Some((_, reason)) =
                         crate::invites::own_membership(&room, &MembershipState::Ban).await
                 {
-                    return Err(RpcError::Banned { reason });
+                    return Err(RpcCode::Banned { reason }.into());
                 }
                 return Err(self.rpc_error("join_room", &error));
             }
@@ -630,7 +681,7 @@ impl Core {
         via: &[String],
     ) -> Result<RoomPreviewView, RpcError> {
         let client = self.client().await?;
-        let address = RoomOrAliasId::parse(address).map_err(|_| RpcError::UnknownRoom)?;
+        let address = RoomOrAliasId::parse(address).map_err(|_| RpcCode::UnknownRoom)?;
         let via = via
             .iter()
             .filter_map(|server| ServerName::parse(server).ok())
@@ -704,7 +755,7 @@ impl Core {
         }: PublicRoomsParams,
     ) -> Result<PublicRoomsOk, RpcError> {
         let server = match server.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(name) => Some(ServerName::parse(name).map_err(|_| RpcError::UnknownHomeserver)?),
+            Some(name) => Some(ServerName::parse(name).map_err(|_| RpcCode::UnknownHomeserver)?),
             None => None,
         };
 
@@ -792,7 +843,7 @@ impl Core {
                     .is_some_and(|id| id == transaction_id)
             })
             .and_then(matrix_sdk_ui::timeline::EventTimelineItem::local_echo_send_handle)
-            .ok_or(RpcError::UnknownLocalEcho)
+            .ok_or_else(|| RpcCode::UnknownLocalEcho.into())
     }
 }
 
@@ -894,7 +945,7 @@ mod tests {
         assert!(room.successor_room().is_none());
         let row = crate::view::listless_room_list_item(
             room,
-            &matrix_sdk::ruma::push::Ruleset::server_default(client.user_id().unwrap()),
+            &ruma::push::Ruleset::server_default(client.user_id().unwrap()),
             &crate::nicknames::Nicknames::default(),
         )
         .await;
@@ -1031,5 +1082,69 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn converting_to_a_chat_with_one_person_remembers_them() {
+        use matrix_sdk::ruma::{room_id, user_id};
+        use matrix_sdk::test_utils::mocks::MatrixMockServer;
+        use matrix_sdk_test::JoinedRoomBuilder;
+        use matrix_sdk_test::event_factory::EventFactory;
+        use serde_json::json;
+        use wiremock::matchers::{body_json, method, path_regex};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let room_id = room_id!("!chat:example.org");
+        let own = client.user_id().unwrap().to_owned();
+        let partner = user_id!("@partner:example.org");
+        let backup = user_id!("@backup:example.org");
+        let factory = EventFactory::new().room(room_id);
+        let members = [own.as_ref(), partner, backup];
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room_id)
+                    .add_state_bulk(members.iter().map(|member| factory.member(*member).into()))
+                    .set_joined_members_count(3),
+            )
+            .await;
+        let member_events: Vec<_> = members
+            .iter()
+            .map(|member| factory.member(*member).into_raw_timeline())
+            .collect();
+        Mock::given(method("GET"))
+            .and(path_regex(r"/members"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "chunk": member_events })),
+            )
+            .mount(server.server())
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"/rooms/.*/account_data/moe\.sable\.direct_partner",
+            ))
+            .and(body_json(json!({ "user_id": partner })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(server.server())
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/account_data/m\.direct"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(server.server())
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"/account_data/m\.direct"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(server.server())
+            .await;
+        let (core, _events) = crate::test_support::signed_in_core(&server, client.clone()).await;
+
+        core.set_direct(&room_id.to_owned(), true, Some(partner.to_owned()))
+            .await
+            .unwrap();
     }
 }

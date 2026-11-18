@@ -29,6 +29,8 @@ use crate::view::FORUM_ROOM_TYPE;
 use crate::{Core, ResultExt, power_levels, view};
 
 const WIDGETS_EVENT_TYPE: &str = "im.vector.modular.widgets";
+const POLICY_ROOM_TYPE: &str = "m.policy";
+const POLICY_ROOM_TYPE_UNSTABLE: &str = "support.feline.policy.lists.msc.v1";
 
 domain! {
     open,
@@ -84,6 +86,8 @@ pub enum RoomKind {
     Forum,
     /// `chat.commet.calendar`
     Calendar,
+    /// `m.policy` / `support.feline.policy.lists.msc.v1`
+    Policy,
 }
 
 impl RoomKind {
@@ -98,6 +102,8 @@ impl RoomKind {
             Some(RoomType::Call) => Some(Self::Voice),
             Some(other) if other.as_str() == FORUM_ROOM_TYPE => Some(Self::Forum),
             Some(other) if other.as_str() == CALENDAR_ROOM_TYPE => Some(Self::Calendar),
+            Some(other) if other.as_str() == POLICY_ROOM_TYPE => Some(Self::Policy),
+            Some(other) if other.as_str() == POLICY_ROOM_TYPE_UNSTABLE => Some(Self::Policy),
             Some(_) => None,
         }
     }
@@ -111,6 +117,7 @@ impl RoomKind {
             Self::Voice => Some(RoomType::Call),
             Self::Forum => Some(RoomType::from(FORUM_ROOM_TYPE)),
             Self::Calendar => Some(RoomType::from(CALENDAR_ROOM_TYPE)),
+            Self::Policy => Some(RoomType::from(POLICY_ROOM_TYPE)),
         }
     }
 }
@@ -444,6 +451,10 @@ impl Handler for CreateParams {
             request.initial_state.push(rule.to_raw_any());
         }
 
+        if let Some(rules) = core.delegated_rules_state(self.parent_space.as_ref()).await {
+            request.initial_state.push(rules);
+        }
+
         if matches!(self.kind, RoomKind::Voice) {
             // The override is a shallow merge: naming `events` drops the
             // server's default map, so it is re-stated.
@@ -531,12 +542,16 @@ impl Handler for CreateDmParams {
             room
         } else {
             let mut request = create_room::v3::Request::new();
-            request.creation_content = Some(
-                Raw::new(&serde_json::json!({ "additional_creators": [&user_id] }))
-                    .or_failed(core, "create_dm_creation_content")?
-                    .cast_unchecked(),
-            );
-            request.invite = vec![user_id];
+            let own = client.user_id() == Some(&*user_id);
+            // The sender already creates the room, and may not be listed again.
+            if !own {
+                request.creation_content = Some(
+                    Raw::new(&serde_json::json!({ "additional_creators": [&user_id] }))
+                        .or_failed(core, "create_dm_creation_content")?
+                        .cast_unchecked(),
+                );
+                request.invite = vec![user_id.clone()];
+            }
             request.is_direct = true;
             request.preset = Some(RoomPreset::TrustedPrivateChat);
             if encrypted == Some(true) || (encrypted.is_none() && encrypt_new) {
@@ -553,10 +568,19 @@ impl Handler for CreateDmParams {
             {
                 request.initial_state.push(hint);
             }
-            client
+            let room = client
                 .create_room(request)
                 .await
-                .or_failed(core, "create_dm")?
+                .or_failed(core, "create_dm")?;
+            // The SDK marks a direct room only from its invitees.
+            if own {
+                client
+                    .account()
+                    .mark_as_dm(room.room_id(), &[user_id])
+                    .await
+                    .or_failed(core, "create_dm_mark")?;
+            }
+            room
         };
 
         Ok(room.room_id().to_string())
@@ -579,17 +603,21 @@ impl Handler for VersionsParams {
             .or_failed(core, "room_versions")?;
 
         let versions = response.capabilities.room_versions;
-        Ok(RoomVersionsView {
-            default: versions.default.to_string(),
-            available: versions
-                .available
-                .into_iter()
-                .map(|(id, stability)| RoomVersionView {
-                    id: id.to_string(),
-                    stable: stability == RoomVersionStability::Stable,
-                })
-                .collect(),
-        })
+        let mut available: Vec<RoomVersionView> = versions
+            .available
+            .into_iter()
+            .map(|(id, stability)| RoomVersionView {
+                id: id.to_string(),
+                stable: stability == RoomVersionStability::Stable,
+            })
+            .collect();
+        available.sort_by(|a, b| {
+            b.id.parse::<u32>()
+                .ok()
+                .cmp(&a.id.parse::<u32>().ok())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(RoomVersionsView { default: versions.default.to_string(), available })
     }
 }
 

@@ -11,6 +11,7 @@ import type {
 
 import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
+import { embedServiceUrl } from '#lib/config/embed-service.js';
 import { runtimeConfig } from '#lib/config/runtime-config.js';
 import { t } from '#lib/i18n.js';
 import type { CoreClient, OutgoingMentions } from '#lib/core/client.svelte.js';
@@ -39,11 +40,21 @@ import {
 } from '#lib/features/composer/sed-edit.js';
 import { runSlash, SlashError } from '#lib/features/composer/slash-commands.js';
 import { knockPagePath } from '#lib/rooms/join-or-knock.js';
-import { gifFilename, proxiedGif, type GifResult } from '#lib/gif/providers.js';
+import {
+  gifFilename,
+  isAllowedGifMediaUrl,
+  isUploadedGifSource,
+  proxiedGif,
+  type GifResult,
+} from '#lib/gif/providers.js';
 import { replyPreviewBody, type ReplyVersion } from '#lib/features/room/messages/reply-preview.js';
 import { isMediaCaptionContent } from '#lib/features/room/messages/media-caption.js';
 import { previewableLinks, previewWhitelistEntry } from '#lib/features/room/media/link-preview.js';
-import { previewSources, resolveUrlPreview } from '#lib/features/room/media/link-preview-cache.js';
+import {
+  previewSources,
+  resolveUrlPreview,
+  usesTunnel,
+} from '#lib/features/room/media/link-preview-cache.js';
 import { projectPersona } from '#lib/personas/persona.js';
 import type { PersonaStore } from '#lib/personas/personas.svelte.js';
 import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
@@ -63,6 +74,7 @@ export type ConversationDeps = {
   roomId: () => string;
   spaceIds?: (roomId: string) => readonly string[];
   encrypted?: () => boolean | null;
+  publicRoom?: () => boolean;
   beforeSend?: () => Promise<void>;
   afterSend?: (roomId: string) => void;
   threadRoot?: string | null;
@@ -87,6 +99,7 @@ export class Conversation {
   readonly #roomId: () => string;
   readonly #spaceIds: (roomId: string) => readonly string[];
   readonly #encrypted: () => boolean | null;
+  readonly #publicRoom: () => boolean;
   readonly #threadRoot: string | null;
   readonly #beforeSend: () => Promise<void>;
   readonly #afterSend: (roomId: string) => void;
@@ -100,6 +113,7 @@ export class Conversation {
     roomId,
     spaceIds = () => [],
     encrypted,
+    publicRoom,
     beforeSend = () => Promise.resolve(),
     afterSend = () => {},
     threadRoot = null,
@@ -110,6 +124,7 @@ export class Conversation {
     this.#roomId = roomId;
     this.#spaceIds = spaceIds;
     this.#encrypted = encrypted ?? (() => null);
+    this.#publicRoom = publicRoom ?? (() => false);
     this.#threadRoot = threadRoot;
     this.#beforeSend = beforeSend;
     this.#afterSend = afterSend;
@@ -150,13 +165,14 @@ export class Conversation {
     dismissed: readonly string[]
   ): Promise<{ previews: UrlPreviewView[]; suppressed: boolean }> {
     const sources = previewSources(this.#encrypted());
+    const tunnel = usesTunnel(this.#encrypted(), this.#publicRoom());
     if (!html) return { previews: [], suppressed: false };
     const links = previewableLinks(html, body).filter((url) => body.includes(url));
     const wanted = links.filter((url) => !dismissed.includes(url));
     const previews = await Promise.all(
       wanted.map(
         async (url) =>
-          (await resolveUrlPreview(this.#core.rpc.messages, url, sources)) ??
+          (await resolveUrlPreview(this.#core.rpc.messages, url, sources, tunnel)) ??
           previewWhitelistEntry(url)
       )
     );
@@ -387,6 +403,20 @@ export class Conversation {
   };
 
   readonly sendGif = async (targetRoomId: string, gif: GifResult): Promise<void> => {
+    if (preferences.reuploadGifs && !isUploadedGifSource(gif.mediaUrl)) {
+      if (!isAllowedGifMediaUrl(gif.mediaUrl)) throw new Error('GIF is not from a known provider');
+      const service = (await runtimeConfig()).embeds.serviceUrl;
+      if (service === null) throw new Error('no embed service to fetch the GIF through');
+      const response = await fetch(embedServiceUrl(service, 'gifs/media', { url: gif.mediaUrl }));
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`);
+      const name = gifFilename(gif.title, gif.mimetype);
+      await this.sendAttachment(
+        targetRoomId,
+        new File([await response.blob()], name, { type: gif.mimetype })
+      );
+      return;
+    }
+
     await this.#beforeSend();
     const { gifs } = await runtimeConfig();
     const proxied = proxiedGif(gif, gifs.proxyUrl);

@@ -25,10 +25,15 @@ test('message permalinks are labelled separately from body links', () => {
 });
 
 test('a link under the cursor adds a row beside the message permalink', () => {
-  const rows = messageMenuRows({ onCopyHref: () => {}, onCopyLink: () => {} });
+  const rows = messageMenuRows({
+    onCopyHref: () => {},
+    onShareHref: () => {},
+    onCopyLink: () => {},
+  });
 
   expect(rows.map((row) => [row.key, row.label])).toEqual([
     ['href', 'timeline.copyLink'],
+    ['share-href', 'timeline.shareLink'],
     ['link', 'timeline.copyMessageLink'],
   ]);
 });
@@ -77,4 +82,13 @@ test('both selection quote actions appear alongside the ordinary reply', () => {
   expect(rows.map(({ key }) => key)).toEqual(['quote-markdown', 'quote-reply', 'reply']);
   expect(rows[0].run).toBe(markdown);
   expect(rows[1].run).toBe(reply);
+});
+
+test('banning the sender with Meowlnir sits with report, marked as destructive', () => {
+  const rows = messageMenuRows({ onReport: () => {}, onMeowlnirBan: () => {} });
+
+  expect(rows.map((row) => [row.key, row.destructive ?? false, row.separated ?? false])).toEqual([
+    ['report', false, true],
+    ['meowlnir-ban', true, false],
+  ]);
 });

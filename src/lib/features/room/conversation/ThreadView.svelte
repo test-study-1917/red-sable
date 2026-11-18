@@ -99,8 +99,9 @@
     personas,
     timeline,
     roomId: () => roomId,
-    spaceIds: (id) => personaSpaces(roomList.rooms, id, page.params.spaceId).order,
+    spaceIds: (id) => personaSpaces(roomList, id, page.params.spaceId).order,
     encrypted: () => encrypted,
+    publicRoom: () => roomList.byId(roomId)?.join_rule === 'public',
     threadRoot: untrack(() => rootEventId),
     beforeSend: () => returnToThread(),
     afterSend: (id) => donateSentMessage(core, roomList.byId(id)),
@@ -228,7 +229,7 @@
           : (backLabel ?? i18n.t('timeline.backToConversation'))}
         onclick={onClose}
       >
-        {#if sidePanel}<XIcon />{:else}<BackIcon />{/if}
+        {#if sidePanel}<XIcon />{:else}<BackIcon class="mirror-rtl" />{/if}
       </PanelHeaderButton>
     {/snippet}
     {#snippet suffix()}
