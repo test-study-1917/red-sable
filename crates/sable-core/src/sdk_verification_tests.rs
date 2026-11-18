@@ -37,8 +37,6 @@ impl Device {
             }
         }
     }
-
-    #[expect(clippy::unwrap_used, reason = "test code")]
     async fn assert_verified(&mut self) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while !self.encryption.as_ref().is_some_and(|status| {
@@ -80,13 +78,11 @@ impl Device {
         })
     }
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn device(server: &MatrixMockServer, id: &str) -> Device {
     let client = server
         .client_builder_for_crypto_end_to_end(
             &owned_user_id!("@alice:example.org"),
-            <&matrix_sdk::ruma::DeviceId>::from(id),
+            <&ruma::DeviceId>::from(id),
         )
         .build()
         .await;
@@ -142,8 +138,6 @@ async fn deliver(
         }
     }
 }
-
-#[expect(clippy::unwrap_used, reason = "test code")]
 async fn two_devices(
     server: &MatrixMockServer,
     cross_signed: bool,
@@ -242,10 +236,37 @@ async fn an_unsigned_session_is_not_verified_after_done() {
     let user_id = new.client.user_id().unwrap().to_owned();
     tokio::time::pause();
 
-    assert!(!new.core.verified_after_done(&user_id).await);
+    assert!(
+        !new.core
+            .verified_after_done(&user_id, device_id!("BBBBBBBB"))
+            .await
+    );
     assert!(
         new.core
-            .verified_after_done(&owned_user_id!("@bob:example.org"))
+            .verified_after_done(&owned_user_id!("@bob:example.org"), device_id!("BBBBBBBB"))
+            .await
+    );
+}
+
+#[tokio::test]
+async fn a_signed_session_is_not_done_until_the_device_it_verified_is_signed() {
+    let server = MatrixMockServer::new().await;
+    let (old, new, _queue) = two_devices(&server, true).await;
+    let user_id = old.client.user_id().unwrap().to_owned();
+    tokio::time::pause();
+
+    assert!(
+        old.client
+            .encryption()
+            .get_own_device()
+            .await
+            .unwrap()
+            .unwrap()
+            .is_cross_signed_by_owner()
+    );
+    assert!(
+        !old.core
+            .verified_after_done(&user_id, new.client.device_id().unwrap())
             .await
     );
 }
@@ -693,8 +714,6 @@ async fn choosing_emoji_after_a_qr_scan_does_not_leave_either_side_waiting() {
 
 #[tokio::test]
 async fn the_account_data_key_is_shared_only_with_a_verified_own_device() {
-    use std::sync::atomic::Ordering;
-
     use matrix_sdk_base::crypto::LocalTrust;
     use serde_json::json;
 
@@ -725,7 +744,7 @@ async fn the_account_data_key_is_shared_only_with_a_verified_own_device() {
                     .await
                     .unwrap();
             }
-            let generation = device.core.session_generation.load(Ordering::SeqCst);
+            let generation = device.core.lifecycle.current();
             device
                 .core
                 .watch_account_data_key_sharing(&device.client, generation);

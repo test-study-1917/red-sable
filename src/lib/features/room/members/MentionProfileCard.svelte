@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { serverNameOf } from '#lib/matrix-id.js';
   import PronounPill from '#lib/ui/primitives/PronounPill.svelte';
   import UserSupporterBadge from '#lib/supporter/UserSupporterBadge.svelte';
   import { profileSupporterAppearance } from '#lib/supporter/variants.js';
@@ -46,12 +47,14 @@
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
+  import { formatNowInZone } from '#lib/ui/date-time.js';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import { lastSeenBucket, lastSeenMs, usePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { resolveUserStatus } from '#lib/rooms/user-status.js';
   import { roleColorOnDark, roleColorOnLight } from '#lib/ui/primitives/readable-color.js';
   import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
   import { presenceSharing } from '#lib/rooms/presence-sharing.svelte.js';
+  import { meowlnirFor } from '#lib/rooms/meowlnir-registry.svelte.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -60,8 +63,6 @@
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
-  import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
-  import FormField from '#lib/ui/primitives/FormField.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import Pill from '#lib/ui/primitives/Pill.svelte';
@@ -70,6 +71,8 @@
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
 
   import MessageReportDialog from '../messages/MessageReportDialog.svelte';
+  import MessageSourceDialog from '../messages/MessageSourceDialog.svelte';
+  import MeowlnirBanDialog from './MeowlnirBanDialog.svelte';
   import ProfileOverrideDialog from './ProfileOverrideDialog.svelte';
   import { sendReport } from '../messages/report';
   import FormattedBody from '../messages/FormattedBody.svelte';
@@ -81,9 +84,11 @@
 
   import '#lib/ui/primitives/menu.css';
   import CaretDownIcon from 'phosphor-svelte/lib/CaretDownIcon';
+  import CodeIcon from 'phosphor-svelte/lib/CodeIcon';
   import { profileFieldJson, profileFieldMap, profileFieldPreview } from './profile-field-map.js';
   import { MemberProfileRelations } from './member-profile-relations.svelte';
-  import { MemberProfileActions, moderationErrorMessage } from './member-profile-actions';
+  import { MemberProfileActions, deletedMessagesNotice } from './member-profile-actions';
+  import ModerationDialog from './ModerationDialog.svelte';
   import UserSecurityDialog from './UserSecurityDialog.svelte';
   import PersonaCard from './PersonaCard.svelte';
 
@@ -177,6 +182,9 @@
   let overrideOpen = $state(false);
   let reportOpen = $state(false);
   let securityOpen = $state(false);
+  let sourceOpen = $state(false);
+  let sourceTitle = $state('');
+  let source = $state('');
   let color = $derived(currentProfile?.hero_color ?? senderColor(userId));
   let cosmetics = $derived(roomCosmetics?.for(userId) ?? null);
   let pronouns = $derived(
@@ -185,18 +193,8 @@
   let localTime = $derived.by(() => {
     const timezone = currentProfile?.timezone;
     if (!timezone) return null;
-
-    try {
-      const time = new Intl.DateTimeFormat(undefined, {
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: !preferences.hour24Clock,
-        timeZone: timezone,
-      }).format(new Date());
-      return { time, timezone };
-    } catch {
-      return null;
-    }
+    const time = formatNowInZone(timezone);
+    return time === null ? null : { time, timezone };
   });
   let animalText = $derived.by(() => {
     const animal = currentProfile?.animal;
@@ -237,7 +235,7 @@
     confirmingDirect = next;
     onNestedMenuOpenChange?.(next);
   }
-  let homeserver = $derived(userId.slice(userId.indexOf(':') + 1));
+  let homeserver = $derived(serverNameOf(userId));
   let elevated = $derived(roomMember !== null && roomMember.power_level >= 50);
   let roleTag = $derived(
     roomMember && powerTags !== null ? powerTag(roomMember.power_level, i18n.t, powerTags) : null
@@ -278,7 +276,7 @@
       .sort((left, right) => right - left)
       .map((level) => ({ level, label: powerTag(level, i18n.t, powerTags ?? {}).name }))
   );
-  let profileLink = $derived(`https://matrix.to/#/${userId}`);
+  let profileLink = $derived(`https://link.sable.moe/#/${userId}`);
   const canShareLink = typeof navigator !== 'undefined' && 'share' in navigator;
   const relations = new MemberProfileRelations(core);
   const profileActions = new MemberProfileActions(core);
@@ -337,6 +335,37 @@
     });
   }
 
+  async function viewProfileSource(): Promise<void> {
+    try {
+      source = await core.rpc.account.userProfileSource({ user_id: userId });
+      sourceTitle = i18n.t('timeline.profileSourceTitle');
+      sourceOpen = true;
+    } catch (error) {
+      console.warn('[sable profile] loading profile source failed', error);
+      toasts.error(i18n.t('errors.actionFailed'));
+    }
+  }
+
+  async function viewMemberEvent(): Promise<void> {
+    try {
+      const content = await core.rpc.room_state.event({
+        room_id: roomId,
+        event_type: 'm.room.member',
+        state_key: userId,
+      });
+      if (content === null || content === undefined) {
+        toasts.info(i18n.t('room.devMissing'));
+        return;
+      }
+      source = JSON.stringify(content, null, 2);
+      sourceTitle = i18n.t('timeline.profileMemberEventTitle');
+      sourceOpen = true;
+    } catch (error) {
+      console.warn('[sable profile] loading member event failed', error);
+      toasts.error(i18n.t('errors.actionFailed'));
+    }
+  }
+
   async function toggleIgnored(): Promise<void> {
     const next = !ignored;
     try {
@@ -354,41 +383,26 @@
     };
   }
 
+  let meowlnir = $derived(isSelf ? null : meowlnirFor(roomId, core.session?.user_id));
+  let meowlnirBanOpen = $state(false);
   let moderationAction = $state<'kick' | 'ban' | null>(null);
-  let moderationReason = $state('');
-  let moderationBusy = $state(false);
-  let moderationError = $state<string | null>(null);
-  const moderationFieldId = $props.id();
-  const miscId = `${moderationFieldId}-misc`;
+  const profileId = $props.id();
+  const miscId = `${profileId}-misc`;
 
   function openModeration(action: 'kick' | 'ban'): void {
     moderationAction = action;
-    moderationReason = '';
-    moderationError = null;
   }
 
-  function cancelModeration(): void {
-    moderationAction = null;
-    moderationReason = '';
-  }
-
-  async function confirmModeration(): Promise<void> {
-    const action = moderationAction;
-    if (!action || moderationBusy) return;
-
-    const reason = moderationReason.trim();
-    moderationBusy = true;
-    moderationError = null;
-    try {
-      await profileActions.moderate(roomId, userId, action, reason || null);
-      moderationAction = null;
-      moderationReason = '';
-    } catch (error) {
-      console.warn('[sable profile] moderation action failed', error);
-      moderationError = moderationErrorMessage(error);
-    } finally {
-      moderationBusy = false;
-    }
+  async function confirmModeration(reason: string | null, redactEvents: boolean): Promise<void> {
+    if (!moderationAction) return;
+    const deleted = await profileActions.moderate(
+      roomId,
+      userId,
+      moderationAction,
+      reason,
+      redactEvents
+    );
+    if (redactEvents) toasts.info(deletedMessagesNotice(displayName, deleted));
   }
 
   function setPowerLevel(level: number): void {
@@ -556,6 +570,16 @@
           {i18n.t('timeline.profileShareLink')}
         </ActionMenuItem>
       {/if}
+      <ActionMenuItem onSelect={viewProfileSource}>
+        <CodeIcon />
+        {i18n.t('common.viewSource')}
+      </ActionMenuItem>
+      {#if roomId !== ''}
+        <ActionMenuItem onSelect={viewMemberEvent}>
+          <CodeIcon />
+          {i18n.t('timeline.profileMemberEvent')}
+        </ActionMenuItem>
+      {/if}
       {#if !isSelf}
         <ActionMenuSeparator />
         <ActionMenuItem onSelect={() => (securityOpen = true)}>
@@ -623,8 +647,14 @@
           {i18n.t('timeline.profileBan')}
         </ActionMenuItem>
       {/if}
+      {#if meowlnir}
+        <ActionMenuItem destructive onSelect={() => (meowlnirBanOpen = true)}>
+          <GavelIcon />
+          {i18n.t('timeline.meowlnirBan')}
+        </ActionMenuItem>
+      {/if}
       {#if !isSelf}
-        {#if canKick || canBan}
+        {#if canKick || canBan || meowlnir}
           <ActionMenuSeparator />
         {/if}
         <ActionMenuItem onSelect={() => (overrideOpen = true)}>
@@ -742,7 +772,7 @@
           disabled={sending}
         >
           {#if hasDraft}
-            <PaperPlaneRightIcon />
+            <PaperPlaneRightIcon class="mirror-rtl" />
           {:else}
             <ChatCircleIcon />
           {/if}
@@ -777,7 +807,7 @@
         {i18n.t('timeline.profileHideMiscData', { count: extra.length })}
       {/if}
     {:else}
-      <CaretRightIcon />
+      <CaretRightIcon class="mirror-rtl" />
       {i18n.t('timeline.profileMiscData', { count: extra.length })}
     {/if}
   </Button>
@@ -893,6 +923,8 @@
   onOpenChange={(next) => (overrideOpen = next)}
 />
 
+<MessageSourceDialog bind:open={sourceOpen} title={sourceTitle} {source} />
+
 <UserSecurityDialog
   open={securityOpen}
   {userId}
@@ -929,40 +961,21 @@
   }}
 />
 
-<DialogFrame
-  open={moderationAction !== null}
-  onOpenChange={(next) => {
-    if (!next) cancelModeration();
-  }}
-  variant="verification"
-  label={moderationAction === 'ban'
-    ? i18n.t('timeline.profileBan')
-    : i18n.t('timeline.profileKick')}
->
-  {#if moderationAction}
-    <div class="moderation">
-      <h2>
-        {moderationAction === 'ban'
-          ? i18n.t('timeline.profileBanConfirm', { name: displayName })
-          : i18n.t('timeline.profileKickConfirm', { name: displayName })}
-      </h2>
-      {#if moderationError}
-        <Alert variant="critical" role="alert">{moderationError}</Alert>
-      {/if}
-      <FormField fieldId={moderationFieldId} label={i18n.t('timeline.deleteReason')}>
-        <TextInput id={moderationFieldId} bind:value={moderationReason} autocomplete="off" />
-      </FormField>
-      <div class="moderation-actions">
-        <Button variant="ghost" onclick={cancelModeration}>{i18n.t('common.cancel')}</Button>
-        <Button variant="danger" loading={moderationBusy} onclick={confirmModeration}>
-          {moderationAction === 'ban'
-            ? i18n.t('timeline.profileBan')
-            : i18n.t('timeline.profileKick')}
-        </Button>
-      </div>
-    </div>
-  {/if}
-</DialogFrame>
+{#if meowlnir}
+  <MeowlnirBanDialog
+    bind:open={meowlnirBanOpen}
+    management={meowlnir}
+    {userId}
+    name={displayName}
+  />
+{/if}
+
+<ModerationDialog
+  action={moderationAction}
+  name={displayName}
+  onConfirm={confirmModeration}
+  onClose={() => (moderationAction = null)}
+/>
 
 <style>
   :global(.profile-mutual-menu) {
@@ -1035,7 +1048,7 @@
   }
 
   :global(.profile-card-actions > .pill-icon-only) {
-    margin-left: auto;
+    margin-inline-start: auto;
   }
 
   :global(.profile-power-name) {
@@ -1112,24 +1125,5 @@
     margin: 0;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
-  }
-
-  .moderation {
-    display: grid;
-    gap: var(--space-300);
-    width: min(27rem, calc(100vw - 2rem));
-  }
-
-  .moderation h2 {
-    font-size: var(--font-size-heading);
-    line-height: 1.3;
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .moderation-actions {
-    display: flex;
-    gap: var(--space-200);
-    justify-content: flex-end;
   }
 </style>

@@ -5,9 +5,9 @@ import android.app.NotificationManager
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import androidx.core.app.ActivityCompat
-import androidx.work.WorkManager
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
@@ -67,6 +67,7 @@ class PolicyArgs {
     var clearOnRead: Boolean = true
     var privateReceipts: Boolean = false
     var quietWhenActiveElsewhere: Boolean = false
+    var inAppBanners: Boolean = false
 }
 
 @InvokeArg
@@ -76,7 +77,11 @@ class ChimeArgs {
 
 private const val CHIME_ASSET = "msg.webm"
 
-@TauriPlugin
+@TauriPlugin(
+    permissions = [
+        Permission(strings = ["android.permission.ACCESS_LOCAL_NETWORK"], alias = "localNetwork"),
+    ],
+)
 class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
     private val manager = activity.getSystemService(NotificationManager::class.java)
 
@@ -108,20 +113,20 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun dismiss(invoke: Invoke) {
-        dismiss(invoke.parseArgs(DismissArgs::class.java).ids)
+        AppDismissals.dismiss(activity, invoke.parseArgs(DismissArgs::class.java).ids)
         invoke.resolve()
     }
 
     @Command
     fun dismissShown(invoke: Invoke) {
         val shown = manager.activeNotifications.filter { it.tag == null }.map { it.id }.toSet()
-        dismiss(invoke.parseArgs(DismissArgs::class.java).ids.filter { it in shown })
+        AppDismissals.dismiss(activity, invoke.parseArgs(DismissArgs::class.java).ids.filter { it in shown })
         invoke.resolve()
     }
 
     @Command
     fun dismissAll(invoke: Invoke) {
-        dismissAll()
+        AppDismissals.dismissAll(activity)
         invoke.resolve()
     }
 
@@ -140,6 +145,7 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(OpenConversationArgs::class.java)
         val userId = args.userId?.takeIf { it.isNotEmpty() }
         val roomId = args.roomId?.takeIf { it.isNotEmpty() }
+        AppDismissals.opened(activity, userId, roomId)
         val locus = if (userId != null && roomId != null) ConversationShortcuts.locus(userId, roomId) else null
         activity.runOnUiThread { ActivityCompat.setLocusContext(activity, locus, null) }
         invoke.resolve()
@@ -156,6 +162,7 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
     fun setPolicy(invoke: Invoke) {
         val args = invoke.parseArgs(PolicyArgs::class.java)
         val policy = PushPolicy(activity)
+        val hides = AppDismissals.hidesShown(policy, args.enabled, args.content)
         policy.notificationsEnabled = args.enabled
         policy.showContent = args.content
         policy.showEncryptedContent = args.encryptedContent
@@ -164,7 +171,8 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
         policy.clearOnRead = args.clearOnRead
         policy.privateReceipts = args.privateReceipts
         policy.quietWhenActiveElsewhere = args.quietWhenActiveElsewhere
-        if (!args.enabled || !args.content) dismissAll()
+        policy.inAppBanners = args.inAppBanners
+        if (hides) AppDismissals.dismissAll(activity)
         invoke.resolve()
     }
 
@@ -218,18 +226,5 @@ class SablePushPlugin(private val activity: Activity) : Plugin(activity) {
         } finally {
             asset.close()
         }
-    }
-
-    private fun dismiss(ids: List<Int>) {
-        for (id in ids) {
-            WorkManager.getInstance(activity).cancelAllWorkByTag("push-room:$id")
-            PushNotificationGate.dismiss(activity, id) { manager.cancel(id) }
-        }
-        PushNotifier.cancelOrphanedSummary(activity)
-    }
-
-    private fun dismissAll() {
-        WorkManager.getInstance(activity).cancelAllWorkByTag("push-render")
-        PushNotificationGate.dismiss(activity, null) { manager.cancelAll() }
     }
 }

@@ -22,7 +22,7 @@ use crate::Core;
 use crate::ResultExt;
 use crate::notifications;
 use crate::preview;
-use crate::protocol::{CoreEvent, InboxItemView, RpcError};
+use crate::protocol::{CoreEvent, InboxItemView, RpcCode, RpcError};
 use crate::push_rules;
 
 const SCHEMA: u32 = 1;
@@ -184,18 +184,19 @@ pub(crate) struct InboxCache {
     stored: Option<Stored>,
     revision: u64,
     saved: u64,
+    resets: u64,
 }
 
 impl InboxCache {
-    async fn stored(
-        &mut self,
-        core: &Core,
-        client: &matrix_sdk::Client,
-    ) -> Result<&mut Stored, RpcError> {
-        if self.stored.is_none() {
-            self.stored = Some(core.with_open_stores(async || load(client).await).await?);
-        }
-        Ok(self.stored.get_or_insert_default())
+    fn stored(&mut self) -> &mut Stored {
+        self.stored.get_or_insert_default()
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self {
+            resets: self.resets + 1,
+            ..Self::default()
+        };
     }
 }
 
@@ -205,7 +206,7 @@ async fn load(client: &matrix_sdk::Client) -> Result<Stored, RpcError> {
         Ok(None) => return Ok(Stored::default()),
         Err(error) => {
             warn!("reading the inbox store failed: {error}");
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         }
     };
     match serde_json::from_slice::<Stored>(&bytes) {
@@ -222,7 +223,7 @@ fn encode(stored: &mut Stored) -> Result<Vec<u8>, RpcError> {
     stored.version = SCHEMA;
     serde_json::to_vec(stored).map_err(|error| {
         warn!("serialising the inbox store failed: {error}");
-        RpcError::Unavailable
+        crate::errors::coded("inbox_encode", RpcCode::Unavailable, &error)
     })
 }
 
@@ -233,7 +234,7 @@ async fn write(client: &matrix_sdk::Client, bytes: Vec<u8>) -> Result<(), RpcErr
         .await
     {
         warn!("persisting the inbox store failed: {error}");
-        return Err(RpcError::Unavailable);
+        return Err(RpcCode::Unavailable.into());
     }
     Ok(())
 }
@@ -308,6 +309,27 @@ async fn thread_receipt_ts(room: &Room, thread_root: &OwnedEventId) -> u64 {
         }
     }
     latest
+}
+
+/// The later of the thread's receipt and the room's, which `read_state` skips for a room
+/// without notifications.
+async fn thread_read_ts(
+    core: &Core,
+    room: &Room,
+    thread_root: &OwnedEventId,
+    room_receipts: &mut HashMap<OwnedRoomId, u64>,
+) -> Result<u64, RpcError> {
+    let thread = core
+        .with_open_stores(async || thread_receipt_ts(room, thread_root).await)
+        .await;
+    let room_ts = if let Some(ts) = room_receipts.get(room.room_id()) {
+        *ts
+    } else {
+        let ts = room_receipt_ts(core, room).await?;
+        room_receipts.insert(room.room_id().to_owned(), ts);
+        ts
+    };
+    Ok(thread.max(room_ts))
 }
 
 async fn resolve_receipt_ts(room: &Room, stored: StoredReceipts) -> matrix_sdk::Result<u64> {
@@ -385,6 +407,13 @@ async fn read_state(core: &Core, room: &Room) -> Result<RoomReadState, RpcError>
             remaining,
         });
     }
+    Ok(RoomReadState {
+        receipt_ts: room_receipt_ts(core, room).await?,
+        remaining,
+    })
+}
+
+async fn room_receipt_ts(core: &Core, room: &Room) -> Result<u64, RpcError> {
     let receipt_ts = async {
         let stored = core
             .with_open_stores(async || stored_receipts(room).await)
@@ -392,13 +421,10 @@ async fn read_state(core: &Core, room: &Room) -> Result<RoomReadState, RpcError>
         resolve_receipt_ts(room, stored).await
     }
     .await;
-    Ok(RoomReadState {
-        receipt_ts: receipt_ts.map_err(|error| {
-            warn!("resolving the inbox read receipt failed: {error}");
-            RpcError::Unavailable
-        })?,
-        remaining,
-    })
+    Ok(receipt_ts.map_err(|error| {
+        warn!("resolving the inbox read receipt failed: {error}");
+        RpcCode::Unavailable
+    })?)
 }
 
 async fn backfill_candidates(
@@ -528,20 +554,64 @@ impl Core {
         if fresh.is_empty() && cursors.is_empty() && unread_scans.is_empty() {
             return Ok(0);
         }
-        let mut inbox = self.inbox.lock().await;
-        let stored = inbox.stored(self, client).await?;
+        let mut inbox = self.loaded_inbox(client).await?;
+        let stored = inbox.stored();
         let added = merge(&mut stored.entries, fresh);
         stored.cursors.extend(cursors);
         stored.unread_scans.extend(unread_scans);
         inbox.revision += 1;
+        self.inbox_changed.notify_one();
         Ok(added)
     }
 
     async fn stored_inbox(&self, client: &matrix_sdk::Client) -> Result<Stored, RpcError> {
-        self.inbox.lock().await.stored(self, client).await.cloned()
+        Ok(self.loaded_inbox(client).await?.stored().clone())
+    }
+
+    /// Suspension flushes the inbox before it closes the stores, so the store read must not hold
+    /// the inbox while it waits for them.
+    async fn loaded_inbox(
+        &self,
+        client: &matrix_sdk::Client,
+    ) -> Result<tokio::sync::MutexGuard<'_, InboxCache>, RpcError> {
+        let resets = {
+            let inbox = self.inbox.lock().await;
+            if inbox.stored.is_some() {
+                return Ok(inbox);
+            }
+            inbox.resets
+        };
+        let loaded = self.with_open_stores(async || load(client).await).await?;
+        let mut inbox = self.inbox.lock().await;
+        // The session changed during the read, so `loaded` belongs to the previous account.
+        if inbox.resets != resets {
+            return Err(RpcCode::Unavailable.into());
+        }
+        inbox.stored.get_or_insert(loaded);
+        Ok(inbox)
     }
 
     pub(crate) async fn flush_inbox(&self, client: &matrix_sdk::Client) {
+        self.save_inbox(async |bytes| {
+            self.with_open_stores(async || write(client, bytes).await)
+                .await
+        })
+        .await;
+    }
+
+    /// For a suspension, where `with_open_stores` would wait for stores it has already closed.
+    pub(crate) async fn flush_inbox_locked(
+        &self,
+        client: &matrix_sdk::Client,
+        transition: &crate::activity::Transition<'_>,
+    ) {
+        if transition.stores_open() {
+            self.save_inbox(async |bytes| write(client, bytes).await)
+                .await;
+        }
+    }
+
+    async fn save_inbox(&self, write: impl AsyncFnOnce(Vec<u8>) -> Result<(), RpcError>) {
         let _writing = self.inbox_flush.lock().await;
         let (revision, bytes) = {
             let mut inbox = self.inbox.lock().await;
@@ -556,13 +626,11 @@ impl Core {
             };
             (inbox.revision, bytes)
         };
-        if self
-            .with_open_stores(async || write(client, bytes).await)
-            .await
-            .is_ok()
-        {
+        if write(bytes).await.is_ok() {
             let mut inbox = self.inbox.lock().await;
             inbox.saved = inbox.saved.max(revision);
+        } else {
+            self.inbox_changed.notify_one();
         }
     }
 
@@ -572,6 +640,7 @@ impl Core {
         self.track_session_task(
             spawn(async move {
                 loop {
+                    core.inbox_changed.notified().await;
                     matrix_sdk::sleep::sleep(INBOX_FLUSH_INTERVAL).await;
                     core.flush_inbox(&client).await;
                 }
@@ -619,9 +688,9 @@ impl Core {
         };
         let client = room.client();
         let undecryptable = {
-            let mut inbox = self.inbox.lock().await;
-            inbox.stored(self, &client).await.is_ok_and(|stored| {
-                stored
+            self.loaded_inbox(&client).await.is_ok_and(|mut inbox| {
+                inbox
+                    .stored()
                     .entries
                     .iter()
                     .any(|entry| entry.event_id == event_id && entry.undecryptable)
@@ -646,6 +715,7 @@ impl Core {
         let stored = self.stored_inbox(&client).await?;
         let mut rooms: HashMap<OwnedRoomId, Option<(bool, RoomReadState)>> = HashMap::new();
         let mut threads: HashMap<OwnedEventId, u64> = HashMap::new();
+        let mut room_receipts: HashMap<OwnedRoomId, u64> = HashMap::new();
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut items = Vec::new();
         let mut has_more = false;
@@ -694,17 +764,14 @@ impl Core {
                     } else {
                         let ts = match client.get_room(&entry.room_id) {
                             Some(room) => {
-                                self.with_open_stores(async || {
-                                    thread_receipt_ts(&room, thread_root).await
-                                })
-                                .await
+                                thread_read_ts(self, &room, thread_root, &mut room_receipts).await?
                             }
                             None => 0,
                         };
                         threads.insert(thread_root.clone(), ts);
                         ts
                     };
-                    entry.ts > read.receipt_ts.max(thread_read_ts)
+                    entry.ts > thread_read_ts
                 }
                 None => is_unread(&entry, read),
             };
@@ -773,7 +840,7 @@ impl Core {
                     Ok(messages) => messages,
                     Err(error) => {
                         warn!(room_id = %room.room_id(), "inbox backfill failed: {error}");
-                        failure = Some(self.failed("inbox_backfill", error));
+                        failure = Some(self.failed_with("inbox_backfill", &error));
                         continue 'rooms;
                     }
                 };
@@ -786,7 +853,7 @@ impl Core {
                     if every_encrypted && notifications::raw_is_encrypted(event.raw()) {
                         continue;
                     }
-                    let actions = crate::push_rules::related_actions(
+                    let actions = push_rules::related_actions(
                         &room,
                         event.raw(),
                         event.push_actions().unwrap_or_default().to_vec(),
@@ -799,7 +866,7 @@ impl Core {
                 }
                 let exhausted = messages.end.is_none() || messages.chunk.is_empty();
                 if !exhausted && messages.end == scan.from {
-                    failure = Some(RpcError::Unavailable);
+                    failure = Some(RpcCode::Unavailable.into());
                     continue 'rooms;
                 }
                 scan.from = messages.end.clone();
@@ -905,11 +972,7 @@ mod tests {
         (core, client, room)
     }
 
-    fn message(
-        event_id: &str,
-        ts: u64,
-        user: Option<&matrix_sdk::ruma::UserId>,
-    ) -> serde_json::Value {
+    fn message(event_id: &str, ts: u64, user: Option<&ruma::UserId>) -> serde_json::Value {
         json!({"type": "m.room.message", "event_id": event_id, "room_id": "!room:example.org",
             "sender": User::Alice, "origin_server_ts": ts,
             "content": {"msgtype": "m.text", "body": "hello", "m.mentions": {"user_ids": user.into_iter().collect::<Vec<_>>()}}})
@@ -954,6 +1017,55 @@ mod tests {
         assert_eq!(stored.entries.len(), 2);
         *core.inbox.lock().await = super::InboxCache::default();
         assert_eq!(core.stored_inbox(&client).await.unwrap().entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn suspending_with_unsaved_notifications_saves_them_and_lets_sync_resume() {
+        let server = MatrixMockServer::new().await;
+        let (core, client, _room) = setup(&server, 1).await;
+        core.record_inbox(
+            &client,
+            vec![entry("first", 100)],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let cycle = async {
+            core.update_app_active(false).await;
+            core.update_app_active(true).await;
+        };
+        matrix_sdk::timeout::timeout(cycle, std::time::Duration::from_secs(5))
+            .await
+            .expect("suspending must not deadlock");
+
+        assert_eq!(super::load(&client).await.unwrap().entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn suspending_during_the_first_inbox_load_does_not_deadlock() {
+        let server = MatrixMockServer::new().await;
+        let (core, client, _room) = setup(&server, 1).await;
+        let closing = core.activity.closing_stores().await;
+        let record = core.record_inbox(
+            &client,
+            vec![entry("first", 100)],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        tokio::pin!(record);
+        assert!(futures_util::poll!(record.as_mut()).is_pending());
+
+        matrix_sdk::timeout::timeout(
+            core.update_app_active(false),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("suspending must not wait for the inbox a pending load holds");
+        drop(closing);
+        let recorded = record.await;
+        assert_eq!(recorded.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1202,6 +1314,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_room_receipt_reads_thread_replies_in_a_room_without_notifications() {
+        let server = MatrixMockServer::new().await;
+        let (core, client, room) = setup(&server, 0).await;
+        let factory = EventFactory::new().room(room.room_id()).sender(User::Alice);
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room.room_id()).add_receipt(
+                    factory
+                        .read_receipts()
+                        .add(
+                            event_id!("$read"),
+                            client.user_id().unwrap(),
+                            ReceiptType::Read,
+                            ReceiptThread::Unthreaded,
+                        )
+                        .into_event(),
+                ),
+            )
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("/event/.*read$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(message("$read", 250, None)))
+            .mount(server.server())
+            .await;
+        let in_thread = |event: &str, ts| Entry {
+            thread_root: Some(event_id!("$root").to_owned()),
+            ..entry(event, ts)
+        };
+        core.record_inbox(
+            &client,
+            vec![in_thread("seen", 200), in_thread("new", 300)],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let (items, _) = core
+            .inbox_notifications(InboxFilter::All, true, 30, None, InboxScope::default())
+            .await
+            .unwrap();
+        let read: Vec<_> = items
+            .iter()
+            .map(|item| (item.event_id.as_str(), item.read))
+            .collect();
+        assert_eq!(read, [("$new", false), ("$seen", true)]);
+    }
+
     #[test]
     fn an_entry_stored_before_threads_were_recorded_is_not_in_a_thread() {
         let stored = json!({"room_id": "!room:example.org", "event_id": "$old", "ts": 1,
@@ -1229,7 +1391,7 @@ mod tests {
                                 client.user_id().unwrap(),
                                 ReceiptType::Read,
                                 ReceiptThread::Unthreaded,
-                                Some(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(300u32.into())),
+                                Some(ruma::MilliSecondsSinceUnixEpoch(300u32.into())),
                             )
                             .into_event(),
                     )
@@ -1307,7 +1469,7 @@ mod tests {
                                 client.user_id().unwrap(),
                                 ReceiptType::Read,
                                 ReceiptThread::Unthreaded,
-                                Some(matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(150u32.into())),
+                                Some(ruma::MilliSecondsSinceUnixEpoch(150u32.into())),
                             )
                             .into_event(),
                     )
@@ -1413,8 +1575,7 @@ mod tests {
                 format!("extra{index}")
             };
             if index > 0 {
-                let room_id =
-                    matrix_sdk::ruma::RoomId::parse(format!("!{name}:example.org")).unwrap();
+                let room_id = ruma::RoomId::parse(format!("!{name}:example.org")).unwrap();
                 let factory = EventFactory::new().room(&room_id).sender(User::Alice);
                 server
                     .sync_room(

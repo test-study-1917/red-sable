@@ -670,7 +670,7 @@
           label={i18n.t('timeline.back')}
           onclick={backToRoomList}
         >
-          <BackIcon />
+          <BackIcon class="mirror-rtl" />
         </IconButton>
       </div>
     {/if}
@@ -713,6 +713,7 @@
       name={space?.name ?? ''}
       size="large"
       uniform
+      autoplay
     />
     <h1>{space?.name ?? i18n.t('nav.space')}</h1>
     {#if space?.topic}
@@ -887,10 +888,7 @@
           void join(child, via, parentId, action);
         }}
         onCopyLink={(child: HierarchyRoomView) => {
-          void copyRoomLink(core, child).then((copied) => {
-            if (!copied) toasts.error(i18n.t('errors.copyFailed'));
-            else toasts.info(i18n.t('timeline.linkCopied'));
-          });
+          void copyRoomLink(core, child);
         }}
         onRemove={(section: HierarchySection, entry: HierarchyRoom) => {
           void remove(section, entry);
@@ -1022,14 +1020,14 @@
   }
 
   .mobile-back-menu {
-    left: 0;
+    inset-inline-start: 0;
     position: absolute;
     top: var(--space-300);
   }
 
   .hero-menu {
+    inset-inline-end: 0;
     position: absolute;
-    right: 0;
     top: var(--space-300);
   }
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use self::blocks::Block;
 use self::inline::{Inline, Mark, Token, add_mark, fold, formats, merged, sable_syntax};
-use crate::text::{head, is_space, span, tail, trim};
+use crate::text::{head, is_space, tail, trim};
 
 /// The placeholder a client writes where a pill sits in the typed text.
 pub const PILL: char = '\u{FFFC}';
@@ -113,7 +113,7 @@ fn mentions(text: &str, pills: &[ComposerPill], blocks: &[Block<Vec<Inline>>]) -
         .into_iter()
         .flatten()
         .filter_map(|node| match node {
-            Inline::Pill(index) => Some(*index),
+            Inline::Pill(index, _) => Some(*index),
             _ => None,
         })
     {
@@ -130,8 +130,8 @@ fn mentions(text: &str, pills: &[ComposerPill], blocks: &[Block<Vec<Inline>>]) -
     }
 }
 
-/// The pills put back where their placeholders were. A pill keeps none of the
-/// marks around it; inside a code block it is its text.
+/// The pills put back where their placeholders were. Emotes keep emphasis;
+/// inside a code block a pill is its text.
 fn splice_pills(nodes: Vec<Inline>, next: &mut usize, pills: &[ComposerPill]) -> Vec<Inline> {
     let mut out = Vec::with_capacity(nodes.len());
     for node in nodes {
@@ -147,8 +147,15 @@ fn splice_pills(nodes: Vec<Inline>, next: &mut usize, pills: &[ComposerPill]) ->
                         out.push(Inline::Text(pill.text(), marks.clone()));
                         *next += 1;
                     }
-                    Some(_) => {
-                        out.push(Inline::Pill(*next));
+                    Some(pill) => {
+                        let emphasis = if matches!(pill, ComposerPill::Emote { .. })
+                            && marks.contains(&Mark::Em)
+                        {
+                            vec![Mark::Em]
+                        } else {
+                            Vec::new()
+                        };
+                        out.push(Inline::Pill(*next, emphasis));
                         *next += 1;
                     }
                     None => out.push(Inline::Text(PILL.to_string(), marks.clone())),
@@ -201,70 +208,6 @@ fn splice_blocks(
         .collect()
 }
 
-fn word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// The byte ranges of `MSC1234`-style references in `text`.
-fn msc_references(text: &str) -> Vec<(usize, usize, String)> {
-    let mut found = Vec::new();
-    let lower = text.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(offset) = tail(&lower, from).find("msc") {
-        let at = from + offset;
-        from = at + 3;
-        if head(text, at).chars().next_back().is_some_and(word_char) {
-            continue;
-        }
-        let digits = tail(text, at + 3)
-            .bytes()
-            .take_while(u8::is_ascii_digit)
-            .count();
-        let end = at + 3 + digits;
-        if (1..=5).contains(&digits) && !tail(text, end).chars().next().is_some_and(word_char) {
-            found.push((at, end, span(text, at + 3, end).to_owned()));
-            from = end;
-        }
-    }
-    found
-}
-
-fn link_mscs(nodes: Vec<Inline>) -> Vec<Inline> {
-    let mut out = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        match node {
-            Inline::Text(text, marks)
-                if !marks
-                    .iter()
-                    .any(|mark| matches!(mark, Mark::Link(_) | Mark::Code)) =>
-            {
-                let mut from = 0;
-                for (start, end, number) in msc_references(&text) {
-                    if start > from {
-                        out.push(Inline::Text(
-                            span(&text, from, start).to_owned(),
-                            marks.clone(),
-                        ));
-                    }
-                    let href = format!(
-                        "https://github.com/matrix-org/matrix-spec-proposals/pull/{number}"
-                    );
-                    out.push(Inline::Text(
-                        span(&text, start, end).to_owned(),
-                        add_mark(&marks, Mark::Link(href)),
-                    ));
-                    from = end;
-                }
-                if from < text.len() {
-                    out.push(Inline::Text(tail(&text, from).to_owned(), marks));
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 /// The top-level domains markdown-it's linkify accepts besides the two-letter ones.
 const GENERIC_TLDS: [&str; 16] = [
     "biz", "com", "edu", "gov", "net", "org", "pro", "web", "xxx", "aero", "asia", "coop", "info",
@@ -278,10 +221,7 @@ fn bare_href(address: &str, kind: &LinkKind) -> Option<String> {
         return Some(format!("mailto:{address}"));
     }
     if let Some((scheme, _)) = address.split_once("://") {
-        return ["http", "https", "ftp"]
-            .iter()
-            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-            .then(|| address.to_owned());
+        return crate::html::link_scheme_allowed(scheme).then(|| address.to_owned());
     }
     let host = address.split(['/', '?', '#', ':']).next()?;
     let tld = host.rsplit('.').next()?;
@@ -368,9 +308,6 @@ fn parse(source: &str, pills: &[ComposerPill]) -> Vec<Block<Vec<Inline>>> {
         .collect();
     let spliced = splice_blocks(parsed, &mut 0, pills);
     without_trailing_paragraphs(spliced)
-        .into_iter()
-        .map(|block| block.map(&mut |nodes| merged(link_mscs(nodes))))
-        .collect()
 }
 
 fn line_feeds(markdown: &str) -> String {
@@ -469,10 +406,12 @@ mod tests {
         ] {
             assert!(!topic_to_html(topic).contains("<a"), "{topic}");
         }
-        assert!(
-            topic_to_html("FTP://files.example.org/a")
-                .contains("href=\"FTP://files.example.org/a\"")
-        );
+        for topic in ["FTP://files.example.org/a", "discord://-/channels/1/2"] {
+            assert!(
+                topic_to_html(topic).contains(&format!("href=\"{topic}\"")),
+                "{topic}"
+            );
+        }
     }
 
     #[test]
@@ -555,12 +494,6 @@ mod tests {
             ),
             ("[javascript](javascript:alert(1))", None),
             ("<script>alert(1)</script>", None),
-            (
-                "MSC1234",
-                Some(
-                    "<a href=\"https://github.com/matrix-org/matrix-spec-proposals/pull/1234\">MSC1234</a>",
-                ),
-            ),
             ("-# small", Some("<sub data-md=\"-#\">small</sub>")),
             (
                 "$[fg.color=f00 red]",
@@ -645,6 +578,31 @@ mod tests {
                 "<strong>hey</strong> <img data-mx-emoticon=\"\" src=\"mxc://example.org/wave\" alt=\"wave\" title=\"wave\" height=\"32\">"
             )
         );
+    }
+
+    #[test]
+    fn an_emote_keeps_italics_in_html_and_the_editor_doc() {
+        let pills = [ComposerPill::Emote {
+            shortcode: "wave".to_owned(),
+            url: "mxc://example.org/wave".to_owned(),
+            body: None,
+        }];
+        for source in ["*\u{fffc}*", "_\u{fffc}_", "***\u{fffc}***"] {
+            let content = markdown_to_content(source, &pills);
+            assert_eq!(
+                content.formatted_body.as_deref(),
+                Some(
+                    "<em><img data-mx-emoticon=\"\" src=\"mxc://example.org/wave\" alt=\"wave\" title=\"wave\" height=\"32\"></em>"
+                ),
+                "{source}"
+            );
+            let doc = markdown_to_doc(source, &pills);
+            assert_eq!(
+                doc["content"][0]["content"][0]["marks"],
+                serde_json::json!([{ "type": "em" }]),
+                "{source}"
+            );
+        }
     }
 
     #[test]

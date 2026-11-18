@@ -26,14 +26,14 @@ use super::{
 };
 use crate::Core;
 use crate::attachments::attachment_contents;
-use crate::protocol::{RoomAttachmentKind, RoomAttachmentView, RpcError};
+use crate::protocol::{RoomAttachmentKind, RoomAttachmentView, RpcCode, RpcError};
 
 impl Core {
     pub(crate) async fn prepare_search_query(&self, query: &str) -> Result<(), RpcError> {
         if tokenize::contains_chinese(query) {
-            dictionary::ensure(&self.store_id)
-                .await
-                .map_err(|_| RpcError::Unavailable)?;
+            dictionary::ensure(&self.store_id).await.map_err(|error| {
+                crate::errors::coded("search_dictionary", RpcCode::Unavailable, &error)
+            })?;
             self.search_index.lock().await.refresh_chinese().await;
         }
         Ok(())
@@ -44,6 +44,7 @@ impl Core {
         self.track_session_task(
             spawn(async move {
                 loop {
+                    core.wait_until_active().await;
                     let pending = core.search_index.lock().await.chinese_pending();
                     if pending
                         && core.search_crawl_active()

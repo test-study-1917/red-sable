@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use matrix_sdk::executor::{JoinHandleExt, spawn};
 use matrix_sdk::{
@@ -17,22 +14,20 @@ use crate::{Core, protocol::CoreEvent};
 
 impl Core {
     pub(crate) fn lock_account(self: &Arc<Self>, generation: u64) {
-        if !self.is_current(generation) || self.account_locked.swap(true, Ordering::SeqCst) {
+        if !self.is_current(generation) || self.activity.lock_account() {
             return;
         }
         let core = self.clone();
         self.track_session_task(
             spawn(async move {
-                let (client, sync, account_id) = {
-                    let session = core.session.read().await;
-                    let Some(session) = session.as_ref() else {
-                        return;
-                    };
+                let Some((client, sync, account_id)) = core.session.current(|session| {
                     (
                         session.client.clone(),
                         session.sync_service.clone(),
                         session.account_id.clone(),
                     )
+                }) else {
+                    return;
                 };
                 if !core.is_current(generation) {
                     return;
@@ -46,7 +41,7 @@ impl Core {
                     },
                 );
                 {
-                    let _serial = core.activity_lock.lock().await;
+                    let _transition = core.activity.transition().await;
                     sync.stop().await;
                 }
                 let mut delay = Duration::from_secs(30);
@@ -67,7 +62,7 @@ impl Core {
                         if !core.is_current(generation) {
                             return;
                         }
-                        core.account_locked.store(false, Ordering::SeqCst);
+                        core.activity.unlock_account();
                         client.send_queue().set_enabled(true).await;
                         core.resume_sync(&sync).await;
                         core.emit_if_current(
@@ -167,14 +162,10 @@ mod tests {
             ),
             client: client.clone(),
         });
-        core.session_generation
-            .store(1, std::sync::atomic::Ordering::SeqCst);
+        core.lifecycle.set_current(1);
         assert!(core.detect_account_lock(&client, 1).await);
         assert_eq!(client.session_tokens().unwrap(), tokens);
-        assert!(
-            core.account_locked
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(core.activity.account_locked());
         assert!(matches!(
             events.recv().await,
             Some(crate::protocol::CoreEvent::AccountLockChanged { locked: true, .. })

@@ -6,7 +6,6 @@ yanked = "warn"
 unmaintained = "workspace"
 ignore = [
   { id = "RUSTSEC-2023-0071", reason = "openidconnect uses RSA to verify provider signatures with public keys; Sable does not perform RSA private-key operations" },
-  { id = "RUSTSEC-2026-0387", reason = "openidconnect uses p256 and p384 to verify provider signatures with public keys; Sable does not use them for secret-key operations" },
 ]
 
 [licenses]
@@ -38,16 +37,9 @@ deny = []
 # These exact older versions are pulled by transitive crates with incompatible
 # semver requirements. Keep the duplicate check strict for any new versions.
 skip = [
-  { crate = "base16ct@0.2.0", reason = "openidconnect uses elliptic-curve 0.13 while Matrix uses 0.14" },
   { crate = "const-oid@0.9.6", reason = "openidconnect uses elliptic-curve 0.13 while Matrix uses 0.14" },
-  { crate = "curve25519-dalek@4.1.3", reason = "openidconnect uses ed25519-dalek 2 while Matrix uses 3" },
   { crate = "der@0.7.10", reason = "openidconnect uses elliptic-curve 0.13 while Matrix uses 0.14" },
-  { crate = "ed25519@2.2.3", reason = "openidconnect uses ed25519-dalek 2 while Matrix uses 3" },
-  { crate = "ed25519-dalek@2.2.0", reason = "openidconnect uses ed25519-dalek 2 while Matrix uses 3" },
-  { crate = "fiat-crypto@0.2.9", reason = "openidconnect uses curve25519-dalek 4 while Matrix uses 5" },
-  { crate = "hkdf@0.12.4", reason = "openidconnect uses elliptic-curve 0.13 while Matrix uses 0.14" },
   { crate = "hmac@0.12.1", reason = "openidconnect uses elliptic-curve 0.13 while Matrix uses 0.14" },
-  { crate = "itertools@0.10.5", reason = "openidconnect requires itertools 0.10 while Matrix uses 0.15" },
   { crate = "pkcs8@0.10.2", reason = "openidconnect uses elliptic-curve 0.13 while Matrix uses 0.14" },
   { crate = "rand@0.9.5", reason = "transitive dependencies still require rand 0.9 while Matrix uses 0.10" },
   { crate = "rand_chacha@0.3.1", reason = "rand 0.8 requires rand_chacha 0.3 while rand 0.9 uses 0.9" },
@@ -58,7 +50,7 @@ skip = [
   { crate = "wasapi@0.24.0", reason = "Audiofox 1.1 requires wasapi 0.24 while system audio capture uses 0.26" },
   { crate = "block-buffer@0.10.4", reason = "sha1/sha2 0.10 pull the digest 0.10 line while vodozemac uses digest 0.11" },
   { crate = "cfg-expr@0.15.8", reason = "system-deps 6, via the GTK/WebKit -sys crates, requires cfg-expr 0.15 while system-deps 7 uses 0.20" },
-  { crate = "crypto-common@0.1.6", reason = "paired with the digest 0.10 line above" },
+  { crate = "crypto-common@0.1.7", reason = "paired with the digest 0.10 line above" },
   { crate = "digest@0.10.7", reason = "ruma's headers dependency requires sha1 0.10 while vodozemac requires digest 0.11" },
   { crate = "nix@0.30.1", reason = "PipeWire's libspa requires nix 0.30 while sentry's os_info uses 0.31" },
   { crate = "nix@0.29.0", reason = "evdev, via handy-keys, requires nix 0.29" },
@@ -76,6 +68,10 @@ skip = [
   { crate = "jni-sys@0.4.1", reason = "jni 0.22 requires jni-sys 0.4 while jni 0.21 requires jni-sys 0.3" },
   { crate = "base64@0.22.1", reason = "transitive dependencies have not adopted the base64 0.23 line" },
   { crate = "bitflags@1.3.2", reason = "legacy GTK/WebKit bindings require bitflags 1.x" },
+  { crate = "tokio-tungstenite@0.29.0", reason = "axum 0.8 requires tokio-tungstenite 0.29 while the link preview tunnel uses 0.30" },
+  { crate = "tungstenite@0.29.0", reason = "paired with tokio-tungstenite 0.29 above" },
+  { crate = "sha1@0.10.7", reason = "axum 0.8 and ruma's headers require sha1 0.10 while tungstenite 0.30 uses 0.11" },
+  { crate = "webpki-roots@0.26.11", reason = "tokio-tungstenite 0.30 requires the webpki-roots 0.26 shim over 1.0" },
   { crate = "cpufeatures@0.2.17", reason = "AES and digest transitive dependencies have incompatible requirements" },
   { crate = "cssparser@0.37.0", reason = "Tauri dom_query has not adopted the cssparser 0.38 line used by ammonia" },
   { crate = "deadpool@0.12.3", reason = "wiremock requires deadpool 0.12 while matrix-sdk-sqlite requires 0.13" },
@@ -164,6 +160,19 @@ skip = [
   { crate = "windows_x86_64_msvc@0.42.2", reason = "paired with windows-targets 0.42.2 above" },
   { crate = "windows_x86_64_msvc@0.52.6", reason = "paired with windows-targets 0.52.6 above" },
   { crate = "winnow@0.5.40", reason = "legacy toml dependencies require winnow 0.5" },
+  { crate = "cssparser@0.36.0", reason = "lol_html requires cssparser 0.36 while Tauri and ammonia use newer versions" },
+  { crate = "cssparser-macros@0.6.1", reason = "paired with cssparser 0.36" },
+  { crate = "object@0.39.1", reason = "ar_archive_writer requires object 0.39 while backtrace uses 0.40" },
+  { crate = "pem-rfc7468@0.7.0", reason = "openidconnect uses der 0.7 while Matrix uses der 0.8" },
+  { crate = "selectors@0.37.0", reason = "lol_html requires selectors 0.37 while Tauri uses 0.38" },
+  { crate = "windows-core@0.62.2", reason = "Tauri requires windows-core 0.62 while generator uses 0.100" },
+  { crate = "windows-implement@0.60.2", reason = "paired with windows-core 0.61 and 0.62" },
+  { crate = "windows-interface@0.59.3", reason = "paired with windows-core 0.61 and 0.62" },
+  { crate = "windows-link@0.2.1", reason = "Tauri requires windows-link 0.2 while generator uses 0.100" },
+  { crate = "windows-result@0.4.1", reason = "paired with windows-core 0.62" },
+  { crate = "windows-strings@0.5.1", reason = "paired with windows-core 0.62" },
+  { crate = "zbus@5.19.0", reason = "ashpd and keyring require zbus 5 while notify-rust uses 6" },
+  { crate = "zbus_macros@5.19.0", reason = "paired with zbus 5.19.0" },
 ]
 skip-tree = []
 
@@ -172,6 +181,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
+  "https://git.sable.moe/SableClient/link-preview",
   "https://github.com/yanqianglu/tauri-plugin-auth-session",
   "https://github.com/ruma/ruma",
   "https://github.com/test-study-1917/matrix-rust-sdk",

@@ -20,6 +20,7 @@ vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
 }));
 
 import CommandPalette from './CommandPalette.svelte';
+import { findOrJoinState } from '#lib/ui/find-or-join-state.svelte.js';
 
 declare module 'vitest/browser' {
   interface BrowserCommands {
@@ -35,7 +36,6 @@ const rooms = ['Alpha', 'Beta'].map((name) =>
     topic: null,
     topic_html: null,
     avatar_url: null,
-    bridge: null,
     is_direct: false,
     direct_targets: [],
     join_rule: 'invite',
@@ -50,6 +50,7 @@ const rooms = ['Alpha', 'Beta'].map((name) =>
     supports_restricted: false,
     supports_knock_restricted: false,
     space_children: [],
+    bridge: null,
     unread: 0,
     notifying: 0,
     highlight: 0,
@@ -93,6 +94,23 @@ test.each(['light', 'dark'] as const)(
     await userEvent.keyboard('{ArrowUp}');
     expectHighlight(beta.element(), alpha.element());
     await userEvent.keyboard('{Enter}');
+    await expect.element(dialog).not.toBeInTheDocument();
     expect(goto).toHaveBeenCalledWith('/rooms/!beta%3Aexample.org');
   }
 );
+
+test('offers find or join when no joined room matches', async () => {
+  await render(CommandPalette, { open: true });
+  const input = page.getByRole('combobox');
+
+  await userEvent.fill(input, '#new:example.org');
+  await expect
+    .element(page.getByRole('button', { name: 'shortcuts.paletteFindOrJoin:#new:example.org' }))
+    .toBeVisible();
+  await userEvent.keyboard('{Enter}');
+
+  await expect.element(page.getByRole('combobox')).not.toBeInTheDocument();
+  expect(findOrJoinState.open).toBe(true);
+  expect(findOrJoinState.initial).toBe('#new:example.org');
+  findOrJoinState.open = false;
+});

@@ -24,10 +24,10 @@ import { createMedia } from './media.svelte.js';
 import { invalidatePacks, isPackAccountDataEvent } from '#lib/emoji/load-packs.js';
 import { createTransport } from '#src/transport/create';
 import type { Transport } from '../../transport';
-import { CoreError } from '../../transport';
+import { CoreError, isCoreError } from '../../transport';
 import QuickLRU from 'quick-lru';
 import { on } from 'svelte/events';
-import { deviceDisplayName } from '#lib/deployment/policy.js';
+import { deviceDisplayName, oauthClientName } from '#lib/deployment/policy.js';
 import {
   activateAccountConfiguration,
   removeAccountConfiguration,
@@ -44,9 +44,12 @@ import { clearRoomListSnapshot } from '#lib/rooms/room-list-snapshot.js';
 import { clearRoomTimelines } from '#lib/rooms/timeline.svelte.js';
 import { MemberPreviews } from '#lib/rooms/member-previews.svelte.js';
 import { clearRecentSearches } from '#lib/search/recent-searches.svelte.js';
+import { reportCoreFailure } from '#lib/observability/core-failure.js';
 import { reportSessionFailure } from '#lib/observability/session-telemetry.js';
 import {
   browserGatesCoreNetwork,
+  probeFromPage,
+  requestAndroidLocalNetwork,
   localNetworkDenied,
   LocalNetworkBlockedError,
 } from '#lib/platform/local-network.js';
@@ -60,6 +63,7 @@ const profileCacheFreshMs = 2 * 60 * 1000;
 const profileFailureRetryMs = 60 * 1000;
 const relationsCacheFreshMs = 60 * 1000;
 const SLOW_START_MS = 15_000;
+const LOCAL_NETWORK_SETTLED_MS = 30_000;
 const MAX_PROFILE_CACHE_ENTRIES = 256;
 const MAX_RELATIONS_CACHE_ENTRIES = 128;
 const MAX_PROFILE_LOOKUPS = 24;
@@ -89,7 +93,9 @@ function homeserverUrl(homeserver: string): URL {
 
 async function grantLocalNetworkAccess(baseUrl: string): Promise<boolean> {
   try {
-    await fetch(new URL('_matrix/client/versions', homeserverUrl(baseUrl)), { mode: 'cors' });
+    await probeFromPage(new URL('_matrix/client/versions', homeserverUrl(baseUrl)), {
+      mode: 'cors',
+    });
     return true;
   } catch (error) {
     console.warn('[sable auth] homeserver unreachable from the page', {
@@ -191,6 +197,7 @@ export class CoreClient {
   deviceList = $state.raw<DeviceView[]>([]);
   /** The homeserver's OAuth metadata: `undefined` until known, `null` when it has no OAuth. */
   oauthMetadata = $state.raw<OAuthMetadataView | null | undefined>(undefined);
+  qrGrantSupported = $state(false);
   unresponsive = $state(false);
   localNetworkBlocked = $state<string | null>(null);
   accountRevision = $state(0);
@@ -226,6 +233,7 @@ export class CoreClient {
   private readonly profileChangeListeners = new Set<(userId: string) => void>();
   private readonly changedProfiles = new Set<string>();
   private profileChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  private localNetworkClearTimer: ReturnType<typeof setTimeout> | null = null;
   private profileLookups = 0;
   private readonly profileLookupQueue: {
     resolve: () => void;
@@ -445,7 +453,7 @@ export class CoreClient {
       homeserver: resolvedHomeserver,
       redirect_uri: redirectUri,
       intent,
-      device_display_name: deviceDisplayName(await prepareLoginConfiguration(homeserver)),
+      device_display_name: oauthClientName(await prepareLoginConfiguration(homeserver)),
     });
   }
 
@@ -609,7 +617,7 @@ export class CoreClient {
         return profile;
       })
       .catch((error: unknown) => {
-        const rateLimited = error instanceof CoreError && error.detail.code === 'rate_limited';
+        const rateLimited = isCoreError(error, 'rate_limited');
         const cancelled = error instanceof DOMException && error.name === 'AbortError';
         if (!rateLimited && !cancelled && this.profileRequests.get(userId)?.request === request) {
           this.profileFailures.set(userId, { accountId, error });
@@ -986,8 +994,10 @@ export class CoreClient {
     this.encryption = null;
     this.deviceList = [];
     this.oauthMetadata = undefined;
+    this.qrGrantSupported = false;
     this.searchCoverage = null;
     this.searchCoverageUnavailable = false;
+    this.cancelLocalNetworkClear();
     this.localNetworkBlocked = null;
   }
 
@@ -1023,6 +1033,7 @@ export class CoreClient {
       void this.primeEncryptionStatus();
       void this.primeSyncStatus();
       void this.primeOAuthMetadata();
+      void this.primeQrGrantSupport();
       void this.primeOwnProfile(session.user_id);
       if (browserGatesCoreNetwork()) void grantLocalNetworkAccess(session.homeserver);
     }
@@ -1194,13 +1205,30 @@ export class CoreClient {
     }
   }
 
+  private async primeQrGrantSupport(): Promise<void> {
+    const revision = this.accountRevision;
+    try {
+      const supported = await this.rpc.session.qrGrantSupported();
+      if (revision === this.accountRevision) this.qrGrantSupported = supported;
+    } catch (error) {
+      console.debug('[sable core] QR grant support unavailable', error);
+    }
+  }
+
   private applySyncStatus(status: SyncStatus): void {
     this.sync = status;
     if (status.state !== 'offline') {
-      this.localNetworkBlocked = null;
+      if (this.localNetworkBlocked !== null) {
+        this.localNetworkClearTimer ??= setTimeout(() => {
+          this.localNetworkClearTimer = null;
+          this.localNetworkBlocked = null;
+        }, LOCAL_NETWORK_SETTLED_MS);
+      }
       return;
     }
+    this.cancelLocalNetworkClear();
     if (browserGatesCoreNetwork()) void this.checkLocalNetwork();
+    else if (navigator.onLine) void requestAndroidLocalNetwork();
   }
 
   private async checkLocalNetwork(): Promise<void> {
@@ -1210,8 +1238,13 @@ export class CoreClient {
     const blocked =
       (await grantLocalNetworkAccess(session.homeserver)) ||
       (navigator.onLine && (await localNetworkDenied()));
-    if (revision !== this.accountRevision || this.sync?.state !== 'offline') return;
-    this.localNetworkBlocked = blocked ? homeserverUrl(session.homeserver).hostname : null;
+    if (!blocked || revision !== this.accountRevision || this.sync?.state !== 'offline') return;
+    this.localNetworkBlocked = homeserverUrl(session.homeserver).hostname;
+  }
+
+  private cancelLocalNetworkClear(): void {
+    if (this.localNetworkClearTimer !== null) clearTimeout(this.localNetworkClearTimer);
+    this.localNetworkClearTimer = null;
   }
 
   private readonly handleEvent = (event: CoreEvent): void => {
@@ -1255,6 +1288,9 @@ export class CoreClient {
         return;
       case 'image_packs_changed':
         invalidatePacks(this.rpc);
+        return;
+      case 'failure':
+        reportCoreFailure(event);
         return;
       case 'session_ended':
         reportSessionFailure('session_ended', undefined, event.reason);

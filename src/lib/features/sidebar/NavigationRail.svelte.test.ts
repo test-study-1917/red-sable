@@ -51,8 +51,10 @@ import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
 import NavigationRail from './NavigationRail.svelte';
 import { LONG_PRESS_MS } from '#lib/ui/long-press.svelte.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
+import { setBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
 import { withCounts } from '#lib/rooms/summary-fixtures.js';
 import { savedSpacePaths, spaceNavigationHref } from './space-paths.js';
+import { findOrJoinState } from '#lib/ui/find-or-join-state.svelte.js';
 import { reads as mediaImageReads } from './media-image-reads.test-support.js';
 
 beforeEach(() => {
@@ -262,6 +264,23 @@ test('badges a space with its mentions and dots one with only unread messages', 
   expect(tab('Beta').querySelector('.unread-badge-dot')).toBeInTheDocument();
   expect(tab('Beta')).toHaveAccessibleDescription('nav.unreadMessages:4');
   expect(tab('nav.unspaced')).toHaveAccessibleDescription('');
+});
+
+test('a space where someone is in voice says so, and one with your call keeps its own mark', async () => {
+  renderRail({
+    props: {
+      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+      voiceSpaces: new Set(['!a:example.org', '!b:example.org']),
+      callSpaces: new Set(['!b:example.org']),
+      mobile: true,
+    },
+  });
+  await tick();
+
+  expect(tab('Alpha').querySelector('.call-mark.others')).toBeInTheDocument();
+  expect(tab('Alpha')).toHaveAccessibleDescription('nav.voiceActive');
+  expect(tab('Beta').querySelector('.call-mark.others')).not.toBeInTheDocument();
+  expect(tab('Beta').querySelector('.call-mark')).toBeInTheDocument();
 });
 
 test('a space badge follows unread changes without re-running its avatar', async () => {
@@ -793,6 +812,20 @@ test('restores the home and rooms tabs to their last desktop room', async () => 
   expect(tab('nav.unspaced')).toHaveAttribute('href', '/rooms/!b%3Aexample.org');
 });
 
+test('the home tab leads to its landing page from inside the home section', async () => {
+  localStorage.setItem(
+    'sable-space-paths',
+    JSON.stringify({ home: '/home/!a%3Aexample.org', rooms: '/rooms/!b%3Aexample.org' })
+  );
+  setPreference('showHome', true);
+  visit('/home/!a%3Aexample.org');
+  renderRail({ spaces: [] });
+  await tick();
+
+  expect(tab('nav.home')).toHaveAttribute('href', '/home');
+  expect(tab('nav.unspaced')).toHaveAttribute('href', '/rooms/!b%3Aexample.org');
+});
+
 test('records the active desktop home and rooms routes', async () => {
   renderRail({ spaces: [] });
   await tick();
@@ -854,7 +887,7 @@ test('a space joined by address does not become the rooms tab target', async () 
   expect(savedSpacePaths().rooms).toBe('/rooms');
 });
 
-test('offers join by address from the add button', async () => {
+test('offers find or join from the add button', async () => {
   const visited: string[] = [];
   renderRail({
     spaces: [],
@@ -869,14 +902,16 @@ test('offers join by address from the add button', async () => {
     expect(labels(screen.getAllByRole('menuitem'))).toEqual([
       'common.createRoom',
       'common.createSpace',
-      'nav.joinWithAddress',
+      'nav.findOrJoin',
       'nav.explore',
     ]);
   });
 
-  await user.click(screen.getByRole('menuitem', { name: 'nav.joinWithAddress' }));
+  await user.click(screen.getByRole('menuitem', { name: 'nav.findOrJoin' }));
 
-  expect(visited).toEqual(['/explore#explore-join-by-address']);
+  expect(visited).toEqual([]);
+  expect(findOrJoinState.open).toBe(true);
+  findOrJoinState.open = false;
 });
 
 test('the rail is a navigation landmark holding one tree with a single tab stop', async () => {
@@ -928,4 +963,33 @@ test('arrows walk the rail and an open folder nests its spaces one level down', 
   expect(collapse).toHaveFocus();
   await user.keyboard('{ArrowLeft}');
   expect(toggled).toEqual(['f']);
+});
+
+test('a space marked as bridged carries the network of its rooms', async () => {
+  const bridged = {
+    ...space('!a:example.org', 'Alpha'),
+    space_children: [
+      {
+        room_id: '!child:example.org',
+        via: [],
+        order: null,
+        origin_server_ts: 0,
+        suggested: false,
+      },
+    ],
+  };
+  listed.push({
+    ...space('!child:example.org', 'Child'),
+    room_kind: null,
+    bridge: { network: 'Discord', avatar_url: 'mxc://example.org/discord' },
+  });
+  setBridgedSpace('!a:example.org', true);
+  onTestFinished(() => {
+    setBridgedSpace('!a:example.org', false);
+  });
+  renderRail({ props: { spaces: [bridged, space('!b:example.org', 'Beta')] } });
+  await tick();
+
+  expect(within(tab('Alpha')).getByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeVisible();
+  expect(within(tab('Beta')).queryByRole('img', { name: /bridgedFrom/ })).toBeNull();
 });

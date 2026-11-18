@@ -477,45 +477,7 @@ impl Core {
         loop {
             self.report_coverage(client, &mut reported).await;
 
-            if !self
-                .search_crawler_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                self.search_crawl.lock().await.enter(SearchCrawlPhase::Idle);
-                matrix_sdk::sleep::sleep(CRAWL_IDLE).await;
-                continue;
-            }
-
-            self.save_changed_checkpoints(client).await;
-
-            if !self.search_crawl_active() {
-                self.search_crawl
-                    .lock()
-                    .await
-                    .enter(SearchCrawlPhase::Paused);
-                matrix_sdk::sleep::sleep(CRAWL_PAUSE).await;
-                continue;
-            }
-
-            if self.foreground_paginations() > 0 {
-                self.search_crawl
-                    .lock()
-                    .await
-                    .enter(SearchCrawlPhase::Yielding);
-                matrix_sdk::sleep::sleep(CRAWL_PAUSE).await;
-                continue;
-            }
-
-            let spent = self.search_crawl.lock().await.spent();
-            let full = self.search_index.lock().await.is_full();
-
-            if spent || full {
-                self.search_crawl.lock().await.enter(if spent {
-                    SearchCrawlPhase::BudgetSpent
-                } else {
-                    SearchCrawlPhase::IndexFull
-                });
-                matrix_sdk::sleep::sleep(CRAWL_IDLE).await;
+            if self.held_back(client).await {
                 continue;
             }
 
@@ -567,6 +529,56 @@ impl Core {
             let pause = self.search_crawl.lock().await.paced(pause);
             matrix_sdk::sleep::sleep(pause).await;
         }
+    }
+
+    /// Waits out whatever keeps the crawler from its next room, and says whether it did.
+    async fn held_back(&self, client: &matrix_sdk::Client) -> bool {
+        if !self
+            .search_crawler_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.search_crawl.lock().await.enter(SearchCrawlPhase::Idle);
+            matrix_sdk::sleep::sleep(CRAWL_IDLE).await;
+            return true;
+        }
+
+        self.save_changed_checkpoints(client).await;
+
+        if !self.search_crawl_active() {
+            self.search_crawl
+                .lock()
+                .await
+                .enter(SearchCrawlPhase::Paused);
+            if self.activity.app_active() {
+                matrix_sdk::sleep::sleep(CRAWL_PAUSE).await;
+            } else {
+                self.wait_until_active().await;
+            }
+            return true;
+        }
+
+        if self.foreground_paginations() > 0 {
+            self.search_crawl
+                .lock()
+                .await
+                .enter(SearchCrawlPhase::Yielding);
+            matrix_sdk::sleep::sleep(CRAWL_PAUSE).await;
+            return true;
+        }
+
+        let spent = self.search_crawl.lock().await.spent();
+        let full = self.search_index.lock().await.is_full();
+        if spent || full {
+            self.search_crawl.lock().await.enter(if spent {
+                SearchCrawlPhase::BudgetSpent
+            } else {
+                SearchCrawlPhase::IndexFull
+            });
+            matrix_sdk::sleep::sleep(CRAWL_IDLE).await;
+            return true;
+        }
+
+        false
     }
 
     pub(super) async fn save_changed_checkpoints(&self, client: &matrix_sdk::Client) {
@@ -837,7 +849,9 @@ impl Core {
                 },
             );
         }
-        let result = room.decrypt_event(event.cast_ref_unchecked(), None).await;
+        let result = room
+            .decrypt_event_without_key_request(event.cast_ref_unchecked())
+            .await;
         if result
             .as_ref()
             .is_ok_and(|decrypted| decrypted.kind.is_utd())
@@ -1255,8 +1269,8 @@ mod tests {
     fn encrypted(
         event_id: &str,
         session_id: &str,
-    ) -> matrix_sdk::ruma::serde::Raw<matrix_sdk::ruma::events::AnyTimelineEvent> {
-        matrix_sdk::ruma::serde::Raw::new(&serde_json::json!({
+    ) -> ruma::serde::Raw<ruma::events::AnyTimelineEvent> {
+        ruma::serde::Raw::new(&serde_json::json!({
             "type": "m.room.encrypted",
             "event_id": event_id,
             "room_id": room(),
@@ -1804,14 +1818,11 @@ mod tests {
         server
             .mock_room_messages()
             .ok(RoomMessagesResponseTemplate::default()
-                .events(vec![
-                    factory.text_msg("deleted history").server_ts(
-                        matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(
-                            matrix_sdk::ruma::UInt::try_from(super::now_ms() - 1_000)
-                                .expect("a timestamp"),
-                        ),
+                .events(vec![factory.text_msg("deleted history").server_ts(
+                    ruma::MilliSecondsSinceUnixEpoch(
+                        ruma::UInt::try_from(super::now_ms() - 1_000).expect("a timestamp"),
                     ),
-                ])
+                )])
                 .end_token("deeper"))
             .mount()
             .await;
@@ -1864,14 +1875,11 @@ mod tests {
         server
             .mock_room_messages()
             .ok(RoomMessagesResponseTemplate::default()
-                .events(vec![
-                    factory.text_msg("imported history").server_ts(
-                        matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(
-                            matrix_sdk::ruma::UInt::try_from(super::now_ms() - 1_000)
-                                .expect("a timestamp"),
-                        ),
+                .events(vec![factory.text_msg("imported history").server_ts(
+                    ruma::MilliSecondsSinceUnixEpoch(
+                        ruma::UInt::try_from(super::now_ms() - 1_000).expect("a timestamp"),
                     ),
-                ])
+                )])
                 .end_token("deeper"))
             .mount()
             .await;
@@ -1929,14 +1937,11 @@ mod tests {
         server
             .mock_room_messages()
             .ok(RoomMessagesResponseTemplate::default()
-                .events(vec![
-                    factory.text_msg("imported history").server_ts(
-                        matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(
-                            matrix_sdk::ruma::UInt::try_from(super::now_ms() - 1_000)
-                                .expect("a timestamp"),
-                        ),
+                .events(vec![factory.text_msg("imported history").server_ts(
+                    ruma::MilliSecondsSinceUnixEpoch(
+                        ruma::UInt::try_from(super::now_ms() - 1_000).expect("a timestamp"),
                     ),
-                ])
+                )])
                 .end_token("deeper"))
             .mount()
             .await;
@@ -2001,9 +2006,7 @@ mod tests {
             .mock_room_messages()
             .ok(RoomMessagesResponseTemplate::default()
                 .events(vec![factory.text_msg("deleted history").server_ts(
-                    matrix_sdk::ruma::MilliSecondsSinceUnixEpoch(matrix_sdk::ruma::UInt::from(
-                        10_u32,
-                    )),
+                    ruma::MilliSecondsSinceUnixEpoch(ruma::UInt::from(10_u32)),
                 )])
                 .end_token("deeper"))
             .mount()
@@ -2162,10 +2165,10 @@ mod tests {
     #[test]
     fn test_an_expired_shared_resume_token_restarts_from_the_live_timeline() {
         let room = matrix_sdk::ruma::room_id!("!resume:localhost").to_owned();
-        let mut progress = super::CrawlProgress::default();
-        progress.restore(std::collections::BTreeMap::from([(
+        let mut progress = CrawlProgress::default();
+        progress.restore(BTreeMap::from([(
             room.clone(),
-            super::StoredCrawlRoom {
+            StoredCrawlRoom {
                 shared_resume: true,
                 frontier: Some(10),
                 gapped: false,

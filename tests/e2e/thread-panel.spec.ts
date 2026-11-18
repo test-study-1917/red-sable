@@ -205,10 +205,12 @@ for (const context of ['desktop', 'mobile'] as const) {
       if (surface === 'forum') await page.goto('/rooms/!room%3Aexample.test');
       else await app.openRoom('!room:example.test');
       const parent = page.locator(surface === 'forum' ? '.forum-main' : '.room-view > .timeline');
+      if (surface === 'forum')
+        await parent.getByRole('button', { name: en.forum.newThread }).click();
       const editor = parent.locator('[contenteditable="true"]').first();
       await expect(editor).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
-      if (surface === 'room') await parent.locator('.members-button').click();
+      if (surface === 'room') await page.locator('.room-view .members-button').click();
       await editor.fill('Unsent parent draft');
       const subscription = await core.subscription();
       await core.emitTimelineDiff(subscription, [
@@ -225,7 +227,7 @@ for (const context of ['desktop', 'mobile'] as const) {
         },
       ]);
       const opener = parent
-        .locator(surface === 'forum' ? '.forum-thread-meta' : '.thread-summary')
+        .locator(surface === 'forum' ? '.forum-thread-open' : '.thread-summary')
         .last();
       await opener.scrollIntoViewIfNeeded();
       await expect(opener).toBeVisible();
@@ -310,7 +312,9 @@ for (const context of ['desktop', 'mobile'] as const) {
       if (surface === 'forum') await page.goto('/rooms/!room%3Aexample.test');
       else await app.openRoom('!room:example.test');
       const parent = page.locator(surface === 'forum' ? '.forum-main' : '.room-view > .timeline');
-      if (surface === 'room') await parent.locator('.members-button').click();
+      if (surface === 'room') await page.locator('.room-view .members-button').click();
+      if (surface === 'forum')
+        await parent.getByRole('button', { name: en.forum.newThread }).click();
       await expect(parent.locator('[contenteditable="true"]').first()).toBeVisible();
       await core.emitTimelineDiff(await core.subscription(), [
         {
@@ -327,7 +331,7 @@ for (const context of ['desktop', 'mobile'] as const) {
           ],
         },
       ]);
-      const opener = parent.locator(surface === 'forum' ? '.forum-thread-meta' : '.thread-summary');
+      const opener = parent.locator(surface === 'forum' ? '.forum-thread-open' : '.thread-summary');
       await expect(opener).toHaveCount(1);
       await opener.click();
       const thread = page.getByRole('region', { name: en.timeline.thread, exact: true });

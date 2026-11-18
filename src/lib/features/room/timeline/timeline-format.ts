@@ -4,7 +4,7 @@ import type {
   TimelineItemView,
 } from '#src/generated/protocol';
 import { preferences } from '#lib/settings/preferences.svelte.js';
-import type { ReplyPreviewStyle, TimelinePreferences } from '#lib/settings/preferences.svelte.js';
+import type { ReplyPreviewStyle, TimelinePreferences } from '#lib/settings/definitions.js';
 import { dayKey } from '#lib/ui/date-time.js';
 
 export { senderColor } from '#lib/ui/primitives/identity-color.js';
@@ -260,6 +260,7 @@ function virtualItem(
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,

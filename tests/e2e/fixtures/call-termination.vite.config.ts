@@ -9,8 +9,10 @@ const fixture = (name: string) => fileURLToPath(new URL(name, import.meta.url));
 // Isolated call fixture: real CallSession and controls, fake core/transport, no homeserver.
 export default defineConfig({
   root,
+  cacheDir: `${root}/node_modules/.vite-call-termination`,
   publicDir: `${root}/static`,
   define: { __SABLE_STABLE__: 'false' },
+  server: { watch: null },
   resolve: {
     alias: {
       '#src/generated/wasm': `${root}/src/generated/wasm`,

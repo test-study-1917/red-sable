@@ -6,6 +6,7 @@ use crate::api::auth::LoginIdentifier;
 use crate::api::auth::StartOidcLoginParams;
 use crate::api::auth::StartSsoLoginParams;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use matrix_sdk::authentication::oauth::error::OAuthDiscoveryError;
 use matrix_sdk::ruma::OwnedUserId;
@@ -17,8 +18,7 @@ use matrix_sdk::utils::UrlOrQuery;
 use url::Url;
 
 use crate::ResultExt;
-use crate::errors::CoreError;
-use crate::protocol::RpcError;
+use crate::protocol::{RpcCode, RpcError};
 
 use crate::session::{Credentials, PersistedSession};
 
@@ -39,14 +39,14 @@ impl Core {
             .accounts
             .into_iter()
             .find(|account| account.account_id == account_id)
-            .ok_or(RpcError::NotLoggedIn)?;
+            .ok_or(RpcCode::NotLoggedIn)?;
         if !account.needs_reauth {
             #[cfg(not(target_family = "wasm"))]
             let missing = self.login_tokens_missing(&account).await?;
             #[cfg(target_family = "wasm")]
             let missing = false;
             if !missing {
-                return Err(RpcError::NotLoggedIn);
+                return Err(RpcCode::NotLoggedIn.into());
             }
             self.mark_account_needs_reauth(Some(&account_id), false)
                 .await?;
@@ -55,14 +55,14 @@ impl Core {
         if !account.device_invalidated {
             match session::validate_saved_crypto_store(&account.store_id, &account.session).await {
                 Ok(()) => {}
-                Err(CoreError::Invalid(reason)) => {
+                Err(error) if let Some(reason) = error.invalid_reason() => {
                     tracing::warn!(reason, "reauthenticating on a new device");
                     self.mark_account_needs_reauth(Some(&account_id), true)
                         .await?;
                     account.device_invalidated = true;
                     account.session.credentials.discard_tokens();
                 }
-                Err(error) => return Err(self.failed("reauth_crypto_store", error)),
+                Err(error) => return Err(self.failed_report("reauth_crypto_store", error)),
             }
         }
         Ok(Some(account))
@@ -111,7 +111,7 @@ impl Core {
             .await
         {
             Err(error) => Err(error),
-            Ok(None) => Err(RpcError::NotLoggedIn),
+            Ok(None) => Err(RpcCode::NotLoggedIn.into()),
             Ok(Some(account))
                 if client.user_id().map(ToString::to_string)
                     != Some(account.session.credentials.user_id())
@@ -122,7 +122,7 @@ impl Core {
                         && client.device_id().map(ToString::to_string)
                             == Some(account.session.credentials.device_id())) =>
             {
-                Err(RpcError::Denied)
+                Err(RpcCode::Denied.into())
             }
             Ok(Some(_)) => Ok(()),
         };
@@ -282,7 +282,7 @@ impl Core {
                 flows.oidc_registration = metadata.prompt_values_supported.iter().any(|prompt| {
                     matches!(
                         prompt,
-                        matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create
+                        ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create
                     )
                 });
             }
@@ -291,13 +291,13 @@ impl Core {
                 return Err(self.rpc_error("login_flows_oauth", &error));
             }
             Err(error) if !flows.password && !flows.sso => {
-                return Err(self.failed("login_flows_oauth", error));
+                return Err(self.failed_with("login_flows_oauth", &error));
             }
             Err(error) => tracing::debug!("OAuth login is unavailable: {error}"),
         }
 
         if !flows.password && !flows.sso && !flows.oidc {
-            return Err(RpcError::Unsupported);
+            return Err(RpcCode::Unsupported.into());
         }
 
         tracing::info!(
@@ -351,7 +351,7 @@ impl Core {
             session::client_metadata(&redirect_uri, device_display_name.as_deref()).into();
         if let Some(account) = &reauth {
             if matches!(intent, AuthIntent::Register) {
-                return Err(RpcError::Denied);
+                return Err(RpcCode::Denied.into());
             }
             if let Credentials::OAuth { client_id, .. } = &account.session.credentials
                 && reuses_oauth_client(&account.session, &redirect_uri)
@@ -371,7 +371,7 @@ impl Core {
                 .oauth()
                 .login(redirect_uri.clone(), device_id, Some(registration), None);
         if let Some(account) = &reauth {
-            let user_id: matrix_sdk::ruma::OwnedUserId = account
+            let user_id: OwnedUserId = account
                 .session
                 .credentials
                 .user_id()
@@ -381,7 +381,7 @@ impl Core {
         }
         if matches!(intent, AuthIntent::Register) {
             login = login.prompt(vec![
-                matrix_sdk::ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create,
+                ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt::Create,
             ]);
         }
         let data = login
@@ -399,13 +399,14 @@ impl Core {
             .as_ref()
             .is_some_and(|pending| pending.method == LoginMethod::Sso)
         {
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         }
 
         if pending.is_some() {
             tracing::warn!("replacing unfinished OIDC login with a new attempt");
         }
         *pending = Some(PendingLogin {
+            attempt: self.next_login_attempt.fetch_add(1, Ordering::Relaxed),
             method: LoginMethod::Oidc,
             account_id,
             account_store_id,
@@ -429,32 +430,61 @@ impl Core {
         tracing::info!(operation = "oidc_login", "completing OAuth login callback");
         let url = Url::parse(&callback_url).or_failed(self, "complete_oidc_login_callback_url")?;
 
-        let mut pending = self.pending_login.lock().await;
-        let Some(PendingLogin {
-            redirect_uri: expected_redirect_uri,
-            client,
-            ..
-        }) = pending
-            .as_ref()
-            .filter(|pending| pending.method == LoginMethod::Oidc)
-        else {
-            tracing::warn!("no pending OIDC login: it was started elsewhere or the core restarted");
-            return Err(RpcError::Unavailable);
+        let (attempt, client) = {
+            let pending = self.pending_login.lock().await;
+            let Some(PendingLogin {
+                attempt,
+                redirect_uri: expected_redirect_uri,
+                client,
+                ..
+            }) = pending
+                .as_ref()
+                .filter(|pending| pending.method == LoginMethod::Oidc)
+            else {
+                tracing::warn!(
+                    "no pending OIDC login: it was started elsewhere or the core restarted"
+                );
+                return Err(RpcCode::Unavailable.into());
+            };
+
+            if !same_redirect_target(expected_redirect_uri, &url) {
+                unexpected_callback("oidc_login", expected_redirect_uri, &url);
+                return Err(self.failed(
+                    "complete_oidc_login_callback_url",
+                    "callback URL does not match the redirect URI used to start OAuth",
+                ));
+            }
+            (*attempt, client.clone())
         };
 
-        if !same_redirect_target(expected_redirect_uri, &url) {
-            unexpected_callback("oidc_login", expected_redirect_uri, &url);
-            return Err(self.failed(
-                "complete_oidc_login_callback_url",
-                "callback URL does not match the redirect URI used to start OAuth",
-            ));
-        }
-
-        client
+        // A suspension reads the pending login to close its stores, so the request must not hold it.
+        let finished = client
             .oauth()
             .finish_login(authorization_response(&url))
-            .await
-            .or_failed(self, "complete_oidc_login")?;
+            .await;
+        let mut pending = self.pending_login.lock().await;
+        if pending
+            .as_ref()
+            .is_none_or(|pending| pending.attempt != attempt)
+        {
+            return Err(RpcCode::Unavailable.into());
+        }
+
+        if let Err(error) = finished {
+            let refused = pending.take_if(|pending| {
+                refuses_device(&error)
+                    && matches!(&pending.reauth, Some(account) if !account.device_invalidated)
+            });
+            drop(pending);
+            if let Some(account) = refused.and_then(|pending| pending.reauth) {
+                tracing::warn!(
+                    "the server refused the saved device: the next sign-in uses a new one"
+                );
+                self.mark_account_needs_reauth(Some(&account.account_id), true)
+                    .await?;
+            }
+            return Err(self.rpc_error("complete_oidc_login", &error));
+        }
 
         let Some(PendingLogin {
             account_id,
@@ -466,7 +496,7 @@ impl Core {
             ..
         }) = pending.take()
         else {
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         };
         drop(pending);
 
@@ -517,13 +547,13 @@ impl Core {
             .map_or(homeserver, |account| account.session.homeserver.clone());
         let (account_id, account_store_id) = self.authentication_store(reauth.as_ref()).await?;
         if reauth.is_some() && matches!(intent, AuthIntent::Register) {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
         tracing::info!(operation = "sso_login", intent = ?intent, "starting SSO login");
         let redirect_uri =
             Url::parse(&redirect_uri).or_failed(self, "start_sso_login_redirect_uri")?;
         if !has_single_nonempty_query_parameter(&redirect_uri, "sable_sso_state") {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
 
         let client = self
@@ -549,9 +579,10 @@ impl Core {
 
         let mut pending = self.pending_login.lock().await;
         if pending.is_some() {
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         }
         *pending = Some(PendingLogin {
+            attempt: self.next_login_attempt.fetch_add(1, Ordering::Relaxed),
             method: LoginMethod::Sso,
             account_id,
             account_store_id,
@@ -581,7 +612,7 @@ impl Core {
         let callback_url =
             Url::parse(&callback_url).or_failed(self, "complete_sso_login_callback_url")?;
         if !has_single_nonempty_query_parameter(&callback_url, "loginToken") {
-            return Err(RpcError::Denied);
+            return Err(RpcCode::Denied.into());
         }
 
         let mut pending = self.pending_login.lock().await;
@@ -593,7 +624,7 @@ impl Core {
             .filter(|pending| pending.method == LoginMethod::Sso)
         else {
             tracing::warn!("no pending SSO login: it was started elsewhere or the core restarted");
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         };
 
         if !same_redirect_target(expected_redirect_uri, &callback_url) {
@@ -613,7 +644,7 @@ impl Core {
             ..
         }) = pending.take()
         else {
-            return Err(RpcError::Unavailable);
+            return Err(RpcCode::Unavailable.into());
         };
         drop(pending);
 
@@ -732,7 +763,24 @@ fn has_single_nonempty_query_parameter(url: &Url, name: &str) -> bool {
     matches!(values.next(), Some(value) if !value.is_empty()) && values.next().is_none()
 }
 
-fn reuses_oauth_client(session: &session::PersistedSession, redirect_uri: &Url) -> bool {
+/// The device scope is the only one that differs between a reauthentication
+/// and a login the server accepts.
+fn refuses_device(error: &matrix_sdk::Error) -> bool {
+    use matrix_sdk::authentication::oauth::error::{
+        BasicErrorResponseType, OAuthAuthorizationCodeError, OAuthError, RequestTokenError,
+    };
+    let matrix_sdk::Error::OAuth(error) = error else {
+        return false;
+    };
+    matches!(
+        &**error,
+        OAuthError::AuthorizationCode(OAuthAuthorizationCodeError::RequestToken(
+            RequestTokenError::ServerResponse(response)
+        )) if *response.error() == BasicErrorResponseType::InvalidScope
+    )
+}
+
+fn reuses_oauth_client(session: &PersistedSession, redirect_uri: &Url) -> bool {
     session::registered_redirect_uri(session, redirect_uri)
         == session::registration_redirect_uri(redirect_uri)
 }
@@ -894,7 +942,10 @@ mod tests {
 
         assert!(matches!(
             core.reauthentication_account(Some("a1".into())).await,
-            Err(RpcError::NotLoggedIn)
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
         ));
         assert!(!core.accounts().await.unwrap().accounts[0].needs_reauth);
 
@@ -907,7 +958,13 @@ mod tests {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    async fn oauth_reauthentication_url(registered: &str, requested: &str) -> (String, bool) {
+    async fn oauth_reauthentication_core(
+        registered: &str,
+    ) -> (
+        matrix_sdk::test_utils::mocks::MatrixMockServer,
+        Arc<Core>,
+        std::path::PathBuf,
+    ) {
         use matrix_sdk::authentication::oauth::UserSession;
         use matrix_sdk::test_utils::mocks::MatrixMockServer;
         use matrix_sdk::{SessionMeta, SessionTokens};
@@ -922,16 +979,14 @@ mod tests {
         let oauth = server.oauth();
         oauth.mock_server_metadata().ok().mount().await;
         oauth.mock_registration().ok().mount().await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-oauth-reauth-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-oauth-reauth-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
             Box::new(crate::store::MemorySessionStore::default()),
         );
-        let persisted = session::PersistedSession {
+        let persisted = PersistedSession {
             oauth_issuer: Some(Url::parse(&server.server().uri()).unwrap()),
             oauth_redirect_uri: Some(Url::parse(registered).unwrap()),
             resolved_homeserver: Some(Url::parse(&server.server().uri()).unwrap()),
@@ -968,24 +1023,37 @@ mod tests {
             .await
             .unwrap();
         drop(client);
+        (server, core, directory)
+    }
 
-        let url = core
-            .start_oidc_login(crate::api::auth::StartOidcLoginParams {
-                homeserver: "ignored.invalid".to_owned(),
-                redirect_uri: requested.to_owned(),
-                intent: AuthIntent::Login,
-                reauth_account_id: Some("a1".to_owned()),
-                device_display_name: None,
-            })
-            .await
-            .unwrap();
-        let invalidated = core
-            .accounts()
+    #[cfg(not(target_family = "wasm"))]
+    async fn start_oauth_reauthentication(core: &Arc<Core>, requested: &str) -> String {
+        core.start_oidc_login(StartOidcLoginParams {
+            homeserver: "ignored.invalid".to_owned(),
+            redirect_uri: requested.to_owned(),
+            intent: AuthIntent::Login,
+            reauth_account_id: Some("a1".to_owned()),
+            device_display_name: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn device_invalidated(core: &Core) -> bool {
+        core.accounts()
             .await
             .unwrap()
             .accounts
             .iter()
-            .any(|account| account.account_id == "a1" && account.device_invalidated);
+            .any(|account| account.account_id == "a1" && account.device_invalidated)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    async fn oauth_reauthentication_url(registered: &str, requested: &str) -> (String, bool) {
+        let (_server, core, directory) = oauth_reauthentication_core(registered).await;
+        let url = start_oauth_reauthentication(&core, requested).await;
+        let invalidated = device_invalidated(&core).await;
         *core.pending_login.lock().await = None;
         drop(core);
         std::fs::remove_dir_all(directory).unwrap();
@@ -1006,6 +1074,47 @@ mod tests {
             oauth_reauthentication_url("moe.sable.app:/login", "moe.sable.next:/login").await;
         assert!(!url.contains("EXISTING"), "{url}");
         assert!(invalidated);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn a_refused_device_moves_the_next_reauthentication_to_a_new_device() {
+        const REDIRECT: &str = "moe.sable.next:/login";
+        let (server, core, directory) = oauth_reauthentication_core(REDIRECT).await;
+        server
+            .oauth()
+            .mock_token()
+            .respond_with_code_and_json(
+                400,
+                serde_json::json!({
+                    "error": "invalid_scope",
+                    "error_description": "A device with the supplied ID already exists for this user"
+                }),
+            )
+            .mount()
+            .await;
+
+        let url = Url::parse(&start_oauth_reauthentication(&core, REDIRECT).await).unwrap();
+        assert!(url.as_str().contains("EXISTING"), "{url}");
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        core.complete_oidc_login(CompleteOidcLoginParams {
+            callback_url: format!("{REDIRECT}?state={state}&code=code"),
+        })
+        .await
+        .unwrap_err();
+        assert!(device_invalidated(&core).await);
+        assert!(core.pending_login.lock().await.is_none());
+
+        let url = start_oauth_reauthentication(&core, REDIRECT).await;
+        assert!(!url.contains("EXISTING"), "{url}");
+        *core.pending_login.lock().await = None;
+        drop(core);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -1033,10 +1142,8 @@ mod tests {
             .expect(1)
             .mount(server.server())
             .await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-reauth-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-reauth-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
@@ -1124,10 +1231,8 @@ mod tests {
                 .mount(server.server())
                 .await;
         }
-        let directory = std::env::temp_dir().join(format!(
-            "sable-identifier-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-identifier-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
@@ -1152,7 +1257,16 @@ mod tests {
                 )
                 .await
                 .expect_err("the mock refuses every login");
-            assert!(matches!(error, RpcError::Denied), "got {error:?}");
+            assert!(
+                matches!(
+                    error,
+                    RpcError {
+                        code: RpcCode::Denied,
+                        ..
+                    }
+                ),
+                "got {error:?}"
+            );
         }
 
         server.server().verify().await;
@@ -1183,10 +1297,8 @@ mod tests {
             })))
             .mount(server.server())
             .await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-endpoint-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-endpoint-{}", ruma::TransactionId::new()));
         let store_id = directory.to_str().unwrap();
         let (core, _events) = Core::new(
             store_id,
@@ -1257,10 +1369,8 @@ mod tests {
             .expect(1)
             .mount(server.server())
             .await;
-        let directory = std::env::temp_dir().join(format!(
-            "sable-no-sss-{}",
-            matrix_sdk::ruma::TransactionId::new()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sable-no-sss-{}", ruma::TransactionId::new()));
         let (core, _events) = Core::new(
             directory.to_str().unwrap(),
             Box::new(crate::store::MemorySessionStore::default()),
@@ -1278,7 +1388,13 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(outcome, Err(RpcError::SlidingSyncUnsupported)));
+        assert!(matches!(
+            outcome,
+            Err(RpcError {
+                code: RpcCode::SlidingSyncUnsupported,
+                ..
+            })
+        ));
         assert!(core.accounts().await.unwrap().accounts.is_empty());
         drop(core);
         let _ = std::fs::remove_dir_all(directory);
@@ -1290,7 +1406,7 @@ mod tests {
         use matrix_sdk::test_utils::mocks::MatrixMockServer;
         let server = MatrixMockServer::new().await;
         server.mock_versions().ok().mount().await;
-        let found = crate::session::discovery_client(&server.server().uri())
+        let found = session::discovery_client(&server.server().uri())
             .await
             .expect("discovery succeeds")
             .homeserver()
@@ -1354,7 +1470,13 @@ mod tests {
             .validate_reauthentication(Some(&account), &client)
             .await;
 
-        assert!(matches!(result, Err(RpcError::Denied)));
+        assert!(matches!(
+            result,
+            Err(RpcError {
+                code: RpcCode::Denied,
+                ..
+            })
+        ));
         server.server().verify().await;
     }
 

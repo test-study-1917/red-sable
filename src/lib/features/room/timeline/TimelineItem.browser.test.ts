@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, expect, onTestFinished, test, vi } from 'vitest';
 import { commands, page, userEvent } from 'vitest/browser';
 
 import en from '../../../../locales/en.json' with { type: 'json' };
@@ -93,6 +93,7 @@ function message(id: string, sender: string, senderName: string): TimelineItemVi
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -111,6 +112,7 @@ function replyToAlice(id: string, sender: string, senderName: string): TimelineI
       sender_name: 'Alice',
       body: 'General message 1',
       fallback: null,
+      emotes: [],
     },
   };
 }
@@ -159,6 +161,32 @@ test('a compact connected reply keeps its connector clear of the name gutter', a
     reply.getBoundingClientRect().left + parseFloat(getComputedStyle(reply, '::before').left);
   expect(connectorLeft).toBeGreaterThanOrEqual(gutter.getBoundingClientRect().right);
 });
+
+for (const dir of ['ltr', 'rtl'] as const) {
+  test(`a connected reply centres its connector on the avatar in ${dir}`, async () => {
+    document.documentElement.dir = dir;
+    onTestFinished(() => {
+      document.documentElement.removeAttribute('dir');
+    });
+    setPreference('replyPreviewStyle', 'connected');
+    await mountItem(replyToAlice('centred-reply', '@bob:example.test', 'Bob'));
+
+    const reply = document.querySelector('.reply-connected');
+    const avatar = document.querySelector(
+      '.message > .sender-avatar-button, .message > .message-avatar'
+    );
+    if (!reply || !avatar) throw new Error('missing connected reply parts');
+    const box = reply.getBoundingClientRect();
+    const line = getComputedStyle(reply, '::before');
+    const stroke =
+      dir === 'rtl'
+        ? box.right - parseFloat(line.right) - parseFloat(line.borderRightWidth) / 2
+        : box.left + parseFloat(line.left) + parseFloat(line.borderLeftWidth) / 2;
+    const face = avatar.getBoundingClientRect();
+    expect(Math.abs(stroke - (face.left + face.right) / 2)).toBeLessThanOrEqual(0.5);
+    expect(dir === 'rtl' ? line.borderTopRightRadius : line.borderTopLeftRadius).not.toBe('0px');
+  });
+}
 
 test('a compact reply preview keeps the name gutter level with the message body', async () => {
   setPreference('replyPreviewStyle', 'compact');
@@ -227,7 +255,7 @@ function layers(root: Element): number[][] {
 
 test('an avatar picture fills its frame exactly, however wide the image', async () => {
   await parkPointer();
-  Object.assign(core, { fetchMedia: vi.fn(widePng) });
+  Object.assign(core, { fetchMedia: vi.fn().mockResolvedValue(await widePng()) });
   await mountItem({
     ...message('wide', '@alice:example.test', 'Alice'),
     sender_avatar: 'mxc://example.test/wide-avatar',
@@ -241,10 +269,10 @@ test('an avatar picture fills its frame exactly, however wide the image', async 
 
 test('the hover animation stacks over the still picture inside the frame', async () => {
   await parkPointer();
-  Object.assign(core, { fetchMedia: vi.fn(widePng) });
+  Object.assign(core, { fetchMedia: vi.fn().mockResolvedValue(await widePng()) });
   await mountItem({
     ...message('hover', '@hover:example.test', 'Hover'),
-    sender_avatar: 'mxc://example.test/wide-avatar',
+    sender_avatar: 'mxc://example.test/hover-avatar',
   });
 
   await expect.poll(() => document.querySelector('.avatar-root img')).not.toBeNull();

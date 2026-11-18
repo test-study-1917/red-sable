@@ -22,7 +22,7 @@ use sha2::Sha256;
 
 use crate::Core;
 use crate::ResultExt;
-use crate::protocol::{CoreEvent, RpcError, SealStateView, SealedAccountDataView};
+use crate::protocol::{CoreEvent, RpcCode, RpcError, SealStateView, SealedAccountDataView};
 
 pub(crate) const ADK_SECRET: &str = "dev.zirco.msc4483.account_data.key";
 const CACHE_KEY: &[u8] = b"sable.msc4483.account_data_key";
@@ -247,7 +247,15 @@ pub(crate) async fn read_account_data(
     } else {
         account.account_data_raw(event_type.into()).await?
     };
-    Ok(content.and_then(|raw| raw.deserialize_as::<serde_json::Value>().ok()))
+    content
+        .map(|raw| match raw.deserialize_as::<serde_json::Value>()? {
+            content @ serde_json::Value::Object(_) => Ok(content),
+            _ => Err(serde::de::Error::custom(
+                "the account data is not a JSON object",
+            )),
+        })
+        .transpose()
+        .map_err(|error: serde_json::Error| error.into())
 }
 
 pub(crate) async fn read_document(
@@ -280,7 +288,7 @@ impl Core {
         event_type: &str,
     ) -> Result<SealedAccountDataView, RpcError> {
         if !sealable(event_type) {
-            return Err(RpcError::Unsupported);
+            return Err(RpcCode::Unsupported.into());
         }
         let client = self.client().await?;
         let key = self
@@ -296,8 +304,18 @@ impl Core {
         event_type: &str,
         content: &serde_json::Value,
     ) -> Result<(), RpcError> {
+        let _guard = self.account_data_lock.lock().await;
+        self.set_sealed_account_data_locked(event_type, content)
+            .await
+    }
+
+    pub(crate) async fn set_sealed_account_data_locked(
+        &self,
+        event_type: &str,
+        content: &serde_json::Value,
+    ) -> Result<(), RpcError> {
         if !sealable(event_type) {
-            return Err(RpcError::Unsupported);
+            return Err(RpcCode::Unsupported.into());
         }
         let client = self.client().await?;
         let content = match self

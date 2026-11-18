@@ -85,6 +85,7 @@ function root(id: string, body: string): TimelineItemView {
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
     forum_title: null,
@@ -104,7 +105,6 @@ test('lists thread roots page by page and opens the one picked', async () => {
     roomId: '!room:example.org',
     members: [],
     onOpenThread,
-    onClose: vi.fn(),
   });
   await vi.waitFor(() => {
     expect(rows()).toHaveLength(1);
@@ -130,7 +130,6 @@ test('says so when a room has no threads', async () => {
     roomId: '!room:example.org',
     members: [],
     onOpenThread: vi.fn(),
-    onClose: vi.fn(),
   });
 
   expect(await screen.findByText('No threads in this room yet.')).toBeInTheDocument();
@@ -157,7 +156,6 @@ test('a root shows its reply count and latest reply instead of an open button', 
     roomId: '!room:example.org',
     members: [],
     onOpenThread,
-    onClose: vi.fn(),
   });
 
   const summary = await screen.findByRole('button', { name: /3 replies/ });
@@ -179,7 +177,6 @@ test('thread previews show the sender profile color and pronouns', async () => {
     roomId: '!room:example.org',
     members: [],
     onOpenThread: vi.fn(),
-    onClose: vi.fn(),
   });
 
   await vi.waitFor(() => {

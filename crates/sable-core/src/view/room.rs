@@ -46,11 +46,12 @@ pub struct RoomInfo {
     /// `None` for direct rooms, whose avatar can change through a member.
     pub avatar_source: Option<AvatarSource>,
     pub direct_name: Option<String>,
+    pub explicit_name: bool,
     pub children: Vec<SpaceChildEdge>,
     /// The last read of `children` failed, so they are the previous ones.
     pub children_stale: bool,
     pub tags: Vec<RoomTag>,
-    pub screen_sharers: Vec<OwnedUserId>,
+    pub(crate) voice_roster: Option<crate::calls::VoiceRoomRoster>,
     pub avatar_override: Option<String>,
     /// Read once per row, as a bridge sets it when it creates the room.
     pub bridge: Option<BridgeView>,
@@ -70,6 +71,7 @@ pub fn room_list_item<S: BuildHasher>(
     nicknames: &crate::nicknames::Nicknames,
 ) -> RoomListItemView {
     let info = room_cache.get(item.room_id());
+    let voice_roster = info.and_then(|info| info.voice_roster.as_ref());
     let latest_event = latest_event(item);
     let latest_event_id = latest_event
         .as_ref()
@@ -113,8 +115,13 @@ pub fn room_list_item<S: BuildHasher>(
         state: item.state().into(),
         is_tombstoned: info.is_some_and(|i| i.is_tombstoned),
         room_kind: RoomKind::from_room_type(item.room_type().as_ref()),
-        call_participants: item.active_room_call_participants(),
-        screen_sharers: info.map(|i| i.screen_sharers.clone()).unwrap_or_default(),
+        call_participants: voice_roster.map_or_else(
+            || item.active_room_call_participants(),
+            |roster| roster.participants.clone(),
+        ),
+        screen_sharers: voice_roster
+            .map(|roster| roster.screen_sharers.clone())
+            .unwrap_or_default(),
         supports_knock: info.is_some_and(|i| i.supports_knock),
         supports_restricted: info.is_some_and(|i| i.supports_restricted),
         supports_knock_restricted: info.is_some_and(|i| i.supports_knock_restricted),
@@ -130,7 +137,7 @@ pub fn room_list_item<S: BuildHasher>(
         display_name: String::new(),
         display_avatar_url: None,
     };
-    nicknames.apply_room(&mut view);
+    nicknames.apply_room(&mut view, info.is_some_and(|info| info.explicit_name));
     apply_avatar_override(&mut view, info);
     view
 }
@@ -194,7 +201,7 @@ pub(crate) fn unread_counts(
         count(item.num_unread_mentions()),
     );
 
-    if latest_event_id == Some(&*receipt.event_id) {
+    if latest_event_id == Some(&*receipt.event_id) || local.0 == 0 {
         return local;
     }
 
@@ -224,6 +231,7 @@ pub(crate) fn notifying_count(
 
     let local = count(item.num_unread_notifications());
     if latest_event_id == Some(&*receipt.event_id)
+        || item.num_unread_messages() == 0
         || (every_encrypted && item.encryption_state().is_encrypted())
     {
         local
@@ -359,7 +367,7 @@ pub(crate) async fn enrich_rooms<'a, S: BuildHasher>(
     }
 }
 
-pub(super) fn latest_items(diffs: &[eyeball_im::VectorDiff<RoomListItem>]) -> Vec<&RoomListItem> {
+pub(crate) fn latest_items(diffs: &[eyeball_im::VectorDiff<RoomListItem>]) -> Vec<&RoomListItem> {
     let mut latest: HashMap<&RoomId, &RoomListItem> = HashMap::new();
     for item in diffs.iter().flat_map(diff_values) {
         latest.insert(item.room_id(), item);
@@ -401,19 +409,22 @@ const BRIDGE_EVENT_TYPES: [&str; 2] = ["m.bridge", "uk.half-shot.bridge"];
 
 fn bridge_view(event: &str) -> Option<BridgeView> {
     let event: serde_json::Value = serde_json::from_str(event).ok()?;
-    let protocol = event.get("content")?.get("protocol")?;
-    let text = |key: &str| {
-        protocol
+    let content = event.get("content")?;
+    let text = |section: &str, key: &str| {
+        content
+            .get(section)?
             .get(key)
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
     };
+    let avatar =
+        |section: &str| text(section, "avatar_url").filter(|url| url.starts_with("mxc://"));
     Some(BridgeView {
-        network: text("displayname").or_else(|| text("id"))?.to_owned(),
-        avatar_url: text("avatar_url")
-            .filter(|url| url.starts_with("mxc://"))
-            .map(str::to_owned),
+        network: text("protocol", "displayname")
+            .or_else(|| text("protocol", "id"))?
+            .to_owned(),
+        avatar_url: avatar("protocol").map(str::to_owned),
     })
 }
 
@@ -484,6 +495,7 @@ async fn room_info(room: &Room, previous: Option<&RoomInfo>) -> RoomInfo {
         avatar_url,
         avatar_source,
         direct_name,
+        explicit_name: room.name().is_some(),
         children,
         children_stale,
         tags: room_tags(room),
@@ -491,10 +503,10 @@ async fn room_info(room: &Room, previous: Option<&RoomInfo>) -> RoomInfo {
             Some(previous) => previous.bridge.clone(),
             None => room_bridge(room).await,
         },
-        screen_sharers: if room.is_call() {
-            crate::calls::screen_sharers(room).await
+        voice_roster: if room.is_call() {
+            Some(crate::calls::voice_room_roster(room).await)
         } else {
-            Vec::new()
+            None
         },
         avatar_override,
     }
@@ -516,7 +528,7 @@ impl AvatarSource {
     }
 }
 
-async fn room_avatar_url(room: &Room) -> Option<String> {
+pub(crate) async fn room_avatar_url(room: &Room) -> Option<String> {
     let avatar = if let Ok(Some(event)) = room
         .get_state_event_static::<RoomAvatarEventContent>()
         .await
@@ -537,6 +549,29 @@ async fn room_avatar_url(room: &Room) -> Option<String> {
     }
 }
 
+/// An `m.direct` room that grew past two people is a group, even if the
+/// `m.direct` entry still names one of them.
+pub(crate) fn is_one_to_one(room: &Room) -> bool {
+    let service = room.active_service_members_count().unwrap_or_else(|| {
+        room.service_members()
+            .map_or(0, |members| members.len() as u64)
+    });
+    room.active_members_count().saturating_sub(service) <= 2
+}
+
+pub(crate) const DIRECT_PARTNER_EVENT: &str = "moe.sable.direct_partner";
+
+/// The person `/converttodm` was given, so a direct room with more people in it
+/// still goes by them.
+pub(crate) async fn chosen_partner(room: &Room) -> Option<OwnedUserId> {
+    let raw = room
+        .account_data(DIRECT_PARTNER_EVENT.into())
+        .await
+        .ok()??;
+    let content = raw.get_field::<serde_json::Value>("content").ok()??;
+    OwnedUserId::try_from(content.get("user_id")?.as_str()?).ok()
+}
+
 async fn direct_peer(room: &Room) -> Option<RoomMember> {
     let service_members = room.service_members().unwrap_or_default();
     let targets: Vec<OwnedUserId> = room
@@ -548,6 +583,9 @@ async fn direct_peer(room: &Room) -> Option<RoomMember> {
     let [target] = targets.as_slice() else {
         return None;
     };
+    if !is_one_to_one(room) && chosen_partner(room).await.as_ref() != Some(target) {
+        return None;
+    }
     room.get_member_no_sync(target)
         .await
         .ok()
@@ -646,6 +684,21 @@ mod tests {
             None
         );
         assert_eq!(bridge_view(r#"{"type":"m.bridge","content":{}}"#), None);
+    }
+
+    #[test]
+    fn a_bridge_without_a_protocol_image_shows_none() {
+        let event = serde_json::json!({"type": "m.bridge", "content": {
+            "protocol": {"id": "discord", "avatar_url": "https://example.org/logo.png"},
+            "network": {"id": "1234", "avatar_url": "mxc://example.org/guild"}
+        }});
+        assert_eq!(
+            bridge_view(&event.to_string()),
+            Some(BridgeView {
+                network: "discord".to_owned(),
+                avatar_url: None,
+            })
+        );
     }
 
     #[test]

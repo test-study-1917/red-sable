@@ -27,6 +27,7 @@ domain! {
     sync_status,
     server_features,
     delayed_events_supported,
+    qr_grant_supported,
     set_search_options,
     set_network_conditions,
     set_app_in_foreground,
@@ -126,7 +127,7 @@ impl Handler for ResetLocalCacheParams {
 
     #[cfg(target_family = "wasm")]
     fn run(self, _core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
-        std::future::ready(Err(RpcError::Unsupported))
+        std::future::ready(Err(crate::protocol::RpcCode::Unsupported.into()))
     }
 }
 
@@ -338,6 +339,18 @@ impl Handler for DelayedEventsSupportedParams {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct QrGrantSupportedParams {}
+
+impl Handler for QrGrantSupportedParams {
+    type Ok = bool;
+
+    async fn run(self, core: &Arc<Core>) -> Result<bool, RpcError> {
+        core.qr_grant_supported().await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "wire type mirroring the protocol"
@@ -367,7 +380,6 @@ impl Handler for SetSearchOptionsParams {
             core.search_sharing.reset_session();
         }
         core.search_network.set_unmetered_only(self.unmetered_only);
-        core.refresh_search_peers();
         core.search_crawl.lock().await.tuning = self.tuning.clamped();
         core.search_crawler_enabled
             .store(self.crawler, Ordering::Relaxed);
@@ -377,6 +389,9 @@ impl Handler for SetSearchOptionsParams {
             .lock()
             .await
             .set_disk_budget_mb(self.disk_budget_mb);
+
+        core.refresh_search_peers().await;
+
         Ok(())
     }
 }
@@ -407,9 +422,9 @@ pub struct SetAppInForegroundParams {
 impl Handler for SetAppInForegroundParams {
     type Ok = ();
 
-    fn run(self, core: &Arc<Core>) -> impl Future<Output = Result<(), RpcError>> {
-        core.update_app_in_foreground(self.foreground);
-        std::future::ready(Ok(()))
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.update_app_in_foreground(self.foreground).await;
+        Ok(())
     }
 }
 

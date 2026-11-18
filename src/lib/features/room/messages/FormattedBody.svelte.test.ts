@@ -62,27 +62,30 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('opens Matrix links through the room-level handler', async () => {
-  const onMatrixLink = vi.fn();
-  const onDocumentClick = vi.fn();
-  document.addEventListener('click', onDocumentClick);
-  render(FormattedBody, {
-    props: {
-      html: '<a href="https://matrix.to/#/!room:example.org/$event">Message</a>',
-      onMatrixLink,
-    },
-  });
-  await tick();
+test.each(['link.sable.moe', 'matrix.to'])(
+  'opens %s links through the room-level handler',
+  async (host) => {
+    const onMatrixLink = vi.fn();
+    const onDocumentClick = vi.fn();
+    document.addEventListener('click', onDocumentClick);
+    render(FormattedBody, {
+      props: {
+        html: `<a href="https://${host}/#/!room:example.org/$event">Message</a>`,
+        onMatrixLink,
+      },
+    });
+    await tick();
 
-  await user.click(link());
+    await user.click(link());
 
-  expect(onMatrixLink).toHaveBeenCalledWith(
-    { kind: 'event', room_id: '!room:example.org', event_id: '$event' },
-    expect.any(HTMLAnchorElement)
-  );
-  expect(onDocumentClick).not.toHaveBeenCalled();
-  document.removeEventListener('click', onDocumentClick);
-});
+    expect(onMatrixLink).toHaveBeenCalledWith(
+      { kind: 'event', room_id: '!room:example.org', event_id: '$event' },
+      expect.any(HTMLAnchorElement)
+    );
+    expect(onDocumentClick).not.toHaveBeenCalled();
+    document.removeEventListener('click', onDocumentClick);
+  }
+);
 
 test.each([
   '<a href="matrix:u/ana:example.org">Ana</a>',
@@ -618,7 +621,7 @@ test('shows a room abbreviation definition in a tooltip on hover', async () => {
   );
 });
 
-test('names a custom emoji by its shortcode, not its alt text, on hover', async () => {
+test('names a custom emoji by its shortcode and describes it by its alt text on hover', async () => {
   core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
   render(FormattedBody, {
     props: {
@@ -630,7 +633,24 @@ test('names a custom emoji by its shortcode, not its alt text, on hover', async 
   await user.hover(screen.getByRole('img', { name: '😈' }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  expect(document.querySelector('.tooltip')?.textContent.trim()).toBe(':pulexFoxPrideMonth:');
+  expect(document.querySelector('.emote-card-name')?.textContent).toBe(':pulexFoxPrideMonth:');
+  expect(document.querySelector('.emote-card-description')?.textContent).toBe('😈');
+});
+
+test('leaves out the description when an emoji alt text is just its shortcode', async () => {
+  core.fetchMedia.mockResolvedValue(new Uint8Array(new ArrayBuffer(1)));
+  render(FormattedBody, {
+    props: {
+      html: '<img data-mx-emoticon src="mxc://example.org/emoji" alt=":wave:" title=":wave:" height="32">',
+    },
+  });
+  await tick();
+
+  await user.hover(screen.getByRole('img', { name: ':wave:' }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(document.querySelector('.emote-card-name')?.textContent).toBe(':wave:');
+  expect(document.querySelector('.emote-card-description')).toBeNull();
 });
 
 test('shows the target of a link whose text differs from it on hover', async () => {

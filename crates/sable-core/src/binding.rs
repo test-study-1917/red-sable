@@ -2,6 +2,8 @@
 
 use crate::protocol::{CoreEvent, RpcError};
 
+pub use tracing_error::ErrorLayer;
+
 /// Most events a single crossing into JS carries.
 pub const EVENT_BATCH_LIMIT: usize = 256;
 
@@ -9,7 +11,7 @@ pub const DEFAULT_LOG_FILTER: &str = "info,matrix_sdk::http_client=off,matrix_sd
 
 /// The one SDK warning worth an issue: it carries the decryption failures that
 /// UTD reports are investigated from.
-const REPORTED_SDK_WARNING: &str = "matrix_sdk_crypto::olm::account";
+pub const REPORTED_SDK_WARNING: &str = "matrix_sdk_crypto::olm::account";
 
 /// Prefixes a log line the policy reports, so a shell that only sees text can
 /// tell it apart. Keep in step with `REPORTED_MARK` in `wasm-log.ts`.
@@ -26,7 +28,8 @@ fn is_own_target(target: &str) -> bool {
 pub fn is_reported_event(metadata: &tracing::Metadata<'_>) -> bool {
     let level = *metadata.level();
     let target = metadata.target();
-    (level == tracing::Level::ERROR && is_own_target(target))
+    let failure = metadata.fields().field("log_id").is_some();
+    (level == tracing::Level::ERROR && is_own_target(target) && !failure)
         || (level <= tracing::Level::WARN && metadata.fields().field("reported").is_some())
         || (level == tracing::Level::WARN && target.starts_with(REPORTED_SDK_WARNING))
 }
@@ -68,7 +71,7 @@ mod tests {
     use tracing_subscriber::{Layer, layer::SubscriberExt};
 
     use super::{encode_event_batch, is_reported_event, rpc_error_json};
-    use crate::protocol::{CoreEvent, RpcError};
+    use crate::protocol::{CoreEvent, RpcCode};
 
     struct Verdict(&'static AtomicBool);
 
@@ -98,6 +101,13 @@ mod tests {
         ));
         assert!(!reported(
             || tracing::error!(target: "tauri_plugin_updater", "failed")
+        ));
+    }
+
+    #[test]
+    fn a_core_failure_is_left_to_its_event() {
+        assert!(!reported(
+            || tracing::error!(target: "sable_core::errors", log_id = "e1", "failed")
         ));
     }
 
@@ -156,7 +166,7 @@ mod tests {
     #[test]
     fn an_rpc_error_keeps_its_code() {
         let json: serde_json::Value =
-            serde_json::from_str(&rpc_error_json(&RpcError::Unavailable)).unwrap();
+            serde_json::from_str(&rpc_error_json(&RpcCode::Unavailable.into())).unwrap();
 
         assert_eq!(json["code"], "unavailable");
     }

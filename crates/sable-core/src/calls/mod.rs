@@ -19,6 +19,8 @@ mod invite_delivery_tests;
 mod notify_sdk_tests;
 
 pub(crate) use notify::{is_call_event_type, is_call_membership_event_type};
+mod room_memberships;
+pub(crate) use room_memberships::{RoomMembership, RoomMemberships};
 mod runtime;
 mod termination;
 pub(crate) use runtime::State as CallRuntimeState;
@@ -28,11 +30,13 @@ pub(crate) mod sticky;
 use crate::api::calls::DeclineParams;
 use crate::api::calls::SetScreenSharingParams;
 use crate::api::calls::SupportParams;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{oneshot, watch};
 
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
-use matrix_sdk::executor::{JoinHandleExt, spawn};
+use matrix_sdk::executor::{JoinHandle, JoinHandleExt, spawn};
 use matrix_sdk::ruma::api::client::delayed_events::update_delayed_event::UpdateAction;
 use matrix_sdk::ruma::api::client::rtc::RtcTransport;
 use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
@@ -51,8 +55,8 @@ use crate::ResultExt;
 use crate::api::calls::JoinOk;
 use crate::delayed_events::{self, DelayedEvent, DelayedEventsSupport};
 use crate::protocol::{
-    CallCompatibilityView, CallMemberView, CallMode, CallSessionId, CallSupportView, RpcError,
-    RtcTransportSource,
+    CallCompatibilityView, CallMemberView, CallMode, CallSessionId, CallSupportView, RpcCode,
+    RpcError, RtcTransportSource,
 };
 use crate::{CallSession, Core};
 
@@ -139,6 +143,84 @@ enum Postponed {
 
 const APPLICATION_SUFFIX: &str = "m.call";
 
+#[derive(Default)]
+pub(crate) struct CallSessions {
+    active: HashMap<CallSessionId, CallSession>,
+    signaling: Vec<PendingSignal>,
+}
+
+// Reserve owned work before releasing the account's call registry lock, so
+// retirement sees both a pending join and a removed call's pending retract.
+type SignalTask = Arc<parking_lot::Mutex<Option<JoinHandle<()>>>>;
+
+struct PendingSignal {
+    done: watch::Receiver<bool>,
+    _task: SignalTask,
+}
+
+struct SignalClaim {
+    done: watch::Sender<bool>,
+    task: SignalTask,
+}
+
+struct CallTeardown {
+    call: CallSession,
+    signal: SignalClaim,
+}
+
+impl CallSessions {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active.is_empty()
+    }
+
+    fn insert(&mut self, session: CallSessionId, call: CallSession) {
+        self.active.insert(session, call);
+    }
+
+    fn get(&self, session: &CallSessionId) -> Option<&CallSession> {
+        self.active.get(session)
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, session: &CallSessionId) -> bool {
+        self.active.contains_key(session)
+    }
+
+    fn take_for_teardown(&mut self, session: CallSessionId) -> Option<CallTeardown> {
+        let call = self.active.remove(&session)?;
+        Some(self.prepare_teardown(call))
+    }
+
+    fn prepare_teardown(&mut self, call: CallSession) -> CallTeardown {
+        CallTeardown {
+            call,
+            signal: self.reserve_signal(),
+        }
+    }
+
+    fn reserve_signal(&mut self) -> SignalClaim {
+        self.signaling
+            .retain(|pending| !*pending.done.borrow() && pending.done.has_changed().is_ok());
+        let (finished, done) = watch::channel(false);
+        let task = SignalTask::default();
+        self.signaling.push(PendingSignal {
+            done,
+            _task: task.clone(),
+        });
+        SignalClaim {
+            done: finished,
+            task,
+        }
+    }
+}
+
+struct CallTerminationClaim {
+    generation: u64,
+    session: CallSessionId,
+    teardown: CallTeardown,
+    ended: termination::Ended,
+}
+
 fn pick_focus(
     advertised: &[String],
     discovered: &[String],
@@ -161,6 +243,7 @@ fn livekit_service_urls(transports: Vec<RtcTransport>) -> Vec<String> {
         .into_iter()
         .filter_map(|transport| match transport {
             RtcTransport::LiveKit(livekit) => livekit.service_url,
+            RtcTransport::LegacyLiveKit(livekit) => livekit.service_url,
             _ => None,
         })
         .filter(|url| !url.trim().is_empty())
@@ -446,15 +529,34 @@ fn left_membership() -> CallMemberEventContent {
     CallMemberEventContent::new_empty(None)
 }
 
-pub(crate) async fn screen_sharers(room: &Room) -> Vec<OwnedUserId> {
-    let mut members = membership::active_members(room).await;
+#[derive(Default, PartialEq, Eq)]
+pub(crate) struct VoiceRoomRoster {
+    pub(crate) participants: Vec<OwnedUserId>,
+    pub(crate) screen_sharers: Vec<OwnedUserId>,
+}
+
+pub(crate) fn affects_voice_roster(update: &matrix_sdk_base::sticky::StickyEventsUpdate) -> bool {
+    update
+        .added
+        .iter()
+        .chain(&update.updated)
+        .map(|event| &event.key)
+        .chain(update.removed.iter().map(|(key, _)| key))
+        .any(|key| membership::is_rtc_member_type(&key.event_type.to_string()))
+}
+
+async fn sticky_room_members(room: &Room) -> Vec<CallMember> {
+    let events = sticky::live_events(room);
+    if events.is_empty() {
+        return Vec::new();
+    }
     let now = crate::now_ms();
     let encrypted = !matches!(
         room.latest_encryption_state().await,
         Ok(matrix_sdk::EncryptionState::NotEncrypted)
     );
     let mut sticky = membership::StickyMemberships::default();
-    for event in sticky::live_events(room) {
+    for event in events {
         event.apply(&mut sticky, encrypted, now);
     }
     let mut sticky_members = sticky.members(now);
@@ -465,11 +567,8 @@ pub(crate) async fn screen_sharers(room: &Room) -> Vec<OwnedUserId> {
     {
         sticky_members.retain(|member| member.wire != membership::RtcWire::Stable);
     }
-    members.extend(sticky_members);
-    members.retain(|member| member.screen_sharing);
-    members.sort_by_key(|member| member.joined_ts);
-    let mut users = Vec::new();
-    for member in members {
+    let mut verified_sticky = Vec::new();
+    for member in sticky_members {
         if member.wire == membership::RtcWire::Stable
             && !room
                 .get_member(&member.user_id)
@@ -477,17 +576,41 @@ pub(crate) async fn screen_sharers(room: &Room) -> Vec<OwnedUserId> {
                 .ok()
                 .flatten()
                 .is_some_and(|user| {
-                    user.membership()
-                        == &matrix_sdk::ruma::events::room::member::MembershipState::Join
+                    user.membership() == &ruma::events::room::member::MembershipState::Join
                 })
         {
             continue;
         }
-        if !users.contains(&member.user_id) {
-            users.push(member.user_id);
-        }
+        verified_sticky.push(member);
     }
-    users
+    verified_sticky
+}
+
+pub(crate) async fn voice_room_roster(room: &Room) -> VoiceRoomRoster {
+    let mut members = membership::active_members(room).await;
+    let verified_sticky = sticky_room_members(room).await;
+    runtime::merge_sticky(&mut members, verified_sticky);
+    members.sort_by(|a, b| (a.joined_ts, &a.identity).cmp(&(b.joined_ts, &b.identity)));
+    let mut sdk_only = room.active_room_call_participants();
+    let mut roster = VoiceRoomRoster::default();
+    for member in members {
+        if member.screen_sharing && !roster.screen_sharers.contains(&member.user_id) {
+            roster.screen_sharers.push(member.user_id.clone());
+        }
+        // Keep SDK memberships with unsupported foci, without listing devices that
+        // also published a sticky membership twice.
+        if let Some(index) = sdk_only.iter().position(|id| *id == member.user_id)
+            && member
+                .device_id
+                .as_deref()
+                .is_some_and(|device| room.is_device_in_active_room_call(&member.user_id, device))
+        {
+            sdk_only.remove(index);
+        }
+        roster.participants.push(member.user_id);
+    }
+    roster.participants.extend(sdk_only);
+    roster
 }
 
 fn member_views(members: &[CallMember]) -> Vec<CallMemberView> {
@@ -561,7 +684,7 @@ impl Core {
         let user_id = room
             .client()
             .user_id()
-            .ok_or(RpcError::NotLoggedIn)?
+            .ok_or(RpcCode::NotLoggedIn)?
             .to_owned();
 
         let members = membership::active_members(&room).await;
@@ -648,7 +771,7 @@ impl Core {
         delay_id: Option<String>,
     ) {
         if let Some(delay_id) = delay_id
-            && self.fire_hangup(delay_id).await.is_ok()
+            && self.fire_hangup(&room.client(), delay_id).await.is_ok()
         {
             return;
         }
@@ -728,7 +851,7 @@ impl Core {
             {
                 tracing::warn!(?error, "could not invite the room to the call");
             }
-        } else if own.mode == crate::protocol::CallMode::Matrix2 {
+        } else if own.mode == CallMode::Matrix2 {
             tracing::warn!("call invitation not sent: no open call slot or sticky event support");
         } else {
             let kind = if direct {
@@ -883,37 +1006,51 @@ impl Core {
 
     fn provision_error(&self, service_url: &str, error: &ProvisionError) -> RpcError {
         match error {
-            ProvisionError::NotLoggedIn => RpcError::NotLoggedIn,
+            ProvisionError::NotLoggedIn => RpcCode::NotLoggedIn.into(),
             ProvisionError::Unreachable | ProvisionError::OpenIdUnavailable => {
                 tracing::warn!(service_url, "{error}");
-                RpcError::Unavailable
+                RpcCode::Unavailable.into()
             }
-            ProvisionError::Refused(_) | ProvisionError::MalformedResponse => {
-                self.failed("join_call_provision", format!("{service_url}: {error}"))
-            }
+            ProvisionError::Refused(_) | ProvisionError::MalformedResponse => self.failed_report(
+                "join_call_provision",
+                crate::errors::CoreError::new(error).wrap(service_url),
+            ),
         }
     }
 
     pub async fn end_all_calls(&self) {
-        let calls: Vec<CallSession> = self
-            .call_sessions
-            .lock()
-            .await
-            .drain()
-            .map(|(_, call)| call)
-            .collect();
+        self.end_calls(false).await;
+    }
 
-        for mut call in calls {
-            drop(call.updates.take());
-            drop(call.postpone.take());
-            drop(call.termination_keys.take());
-            call.termination_cancel.send_replace(true);
-            call._handlers.clear();
-            call.state.lock().await.termination.pending.clear();
-            let result = self.hang_up(&call).await;
-            if let Err(error) = result {
-                tracing::warn!(?error, room_id = %call.room_id, "could not hang up on session end");
+    pub(crate) async fn retire_calls(&self) {
+        self.end_calls(true).await;
+    }
+
+    async fn end_calls(&self, retire_account: bool) {
+        let (calls, signaling) = {
+            let mut sessions = self.call_sessions.lock().await;
+            if retire_account {
+                self.call_memberships.retire(self.lifecycle.current());
             }
+            let calls = std::mem::take(&mut sessions.active)
+                .into_values()
+                .map(|call| sessions.prepare_teardown(call))
+                .collect::<Vec<_>>();
+            let signaling = sessions
+                .signaling
+                .iter()
+                .map(|pending| pending.done.clone())
+                .collect::<Vec<_>>();
+            (calls, signaling)
+        };
+        for teardown in calls {
+            teardown.call.termination_cancel.send_replace(true);
+            let _ = self.retract_call(teardown).await;
+        }
+        // Finish in-flight joins (including any abort) and claimed leaves
+        // before releasing the outgoing SDK login or its stores.
+        for mut completion in signaling {
+            let _ = completion.wait_for(|retracted| *retracted).await;
         }
     }
 
@@ -921,23 +1058,29 @@ impl Core {
         self: &Arc<Self>,
         session: CallSessionId,
     ) -> Result<(), RpcError> {
-        let mut call = self
-            .call_sessions
-            .lock()
+        self.leave_call_for_account(self.lifecycle.current(), session)
             .await
-            .remove(&session)
-            .ok_or(RpcError::UnknownCall)?;
+    }
 
-        drop(call.updates.take());
-        drop(call.postpone.take());
-        drop(call.termination_keys.take());
-        call.termination_cancel.send_replace(true);
-        call._handlers.clear();
-        call.state.lock().await.termination.pending.clear();
-        let result = self.hang_up(&call).await;
-        // A call kept sync running past `Suspended`; stop it before the audio session ends.
-        self.apply_app_activity(false).await;
-        result
+    async fn leave_call_for_account(
+        self: &Arc<Self>,
+        generation: u64,
+        session: CallSessionId,
+    ) -> Result<(), RpcError> {
+        let teardown = {
+            let mut calls = self.call_sessions.lock().await;
+            if !self.call_account_is_current(generation) {
+                return Err(RpcCode::NotLoggedIn.into());
+            }
+            calls
+                .take_for_teardown(session)
+                .ok_or(RpcCode::UnknownCall)?
+        };
+        let (reply, finished) = oneshot::channel();
+        self.start_call_teardown(generation, teardown, Some(reply));
+        finished
+            .await
+            .map_err(|error| self.failed("leave_call", error))?
     }
 
     /// Send the control event directly through the SDK; the attempt is scoped
@@ -946,11 +1089,13 @@ impl Core {
         self: &Arc<Self>,
         session: CallSessionId,
     ) -> Result<(), RpcError> {
-        use std::sync::atomic::Ordering;
-        let generation = self.session_generation.load(Ordering::SeqCst);
-        let (room_id, shared, attempt, sender, mut cancel) = {
+        let generation = self.lifecycle.current();
+        let (room, shared, attempt, sender, mut cancel) = {
             let calls = self.call_sessions.lock().await;
-            let call = calls.get(&session).ok_or(RpcError::UnknownCall)?;
+            if !self.call_account_is_current(generation) {
+                return Err(RpcCode::NotLoggedIn.into());
+            }
+            let call = calls.get(&session).ok_or(RpcCode::UnknownCall)?;
             let mut state = call.state.lock().await;
             if state.termination.ended.is_some() {
                 return Ok(());
@@ -959,28 +1104,19 @@ impl Core {
             let attempt = state
                 .termination
                 .begin_attempt(&sender, crate::now_ms())
-                .ok_or(RpcError::CallTerminationInProgress)?;
+                .ok_or(RpcCode::CallTerminationInProgress)?;
             (
-                call.room_id.clone(),
+                call.room.clone(),
                 call.state.clone(),
                 attempt,
                 sender,
                 call.termination_cancel.subscribe(),
             )
         };
-        let room = match self.room(&room_id).await {
-            Ok(room) => room,
-            Err(error) => {
-                if let Some(attempt) = shared.lock().await.termination.attempt.as_mut() {
-                    attempt.sending = false;
-                }
-                return Err(error);
-            }
-        };
         // If leave or logout won before the HTTP request began, do not send.
         let still_active = {
             let calls = self.call_sessions.lock().await;
-            self.session_generation.load(Ordering::SeqCst) == generation
+            self.call_account_is_current(generation)
                 && calls
                     .get(&session)
                     .is_some_and(|call| Arc::ptr_eq(&call.state, &shared))
@@ -989,7 +1125,7 @@ impl Core {
             return if shared.lock().await.termination.ended.is_some() {
                 Ok(())
             } else {
-                Err(RpcError::UnknownCall)
+                Err(RpcCode::UnknownCall.into())
             };
         }
         let send = room
@@ -1011,36 +1147,30 @@ impl Core {
             return if shared.lock().await.termination.ended.is_some() {
                 Ok(())
             } else {
-                Err(RpcError::UnknownCall)
+                Err(RpcCode::UnknownCall.into())
             };
         };
-        if self.session_generation.load(Ordering::SeqCst) != generation {
-            return Err(RpcError::NotLoggedIn);
+        if !self.is_current(generation) {
+            return Err(RpcCode::NotLoggedIn.into());
         }
         match result {
             Ok(sent) => {
-                let claimed = {
-                    let mut calls = self.call_sessions.lock().await;
-                    if self.session_generation.load(Ordering::SeqCst) != generation {
-                        return Err(RpcError::NotLoggedIn);
-                    }
-                    let mut state = shared.lock().await;
-                    let ended = if let Some(ended) = state.termination.ended.clone() {
-                        ended
-                    } else {
+                let claim = self
+                    .claim_call_termination(generation, session, &shared, |termination| {
+                        if termination.ended.is_some() {
+                            return None;
+                        }
                         let ended = termination::Ended {
                             terminated_by: sender,
                             event_id: sent.response.event_id.to_string(),
                             local: true,
                         };
-                        state.termination.ended = Some(ended.clone());
-                        ended
-                    };
-                    calls.remove(&session).map(|call| (call, ended))
-                };
-                if let Some((call, ended)) = claimed {
-                    self.complete_call_termination(generation, session, call, ended)
-                        .await;
+                        termination.ended = Some(ended.clone());
+                        Some(ended)
+                    })
+                    .await?;
+                if let Some(claim) = claim {
+                    self.complete_call_termination(claim);
                 }
                 Ok(())
             }
@@ -1053,100 +1183,132 @@ impl Core {
                     attempt.sending = false;
                 }
                 tracing::warn!(?error, "could not confirm call termination event was sent");
-                Err(RpcError::Unavailable)
+                Err(RpcCode::Unavailable.into())
             }
         }
     }
 
-    /// The first caller to remove the session owns signaling teardown. The UI
-    /// gets its normal-end event before any network cleanup can block it.
-    async fn complete_call_termination(
-        self: &Arc<Self>,
+    /// Shares the calls → state lock order with join activation. Transfer the
+    /// room lease to the cleanup claim before removing the active session.
+    async fn claim_call_termination(
+        &self,
         generation: u64,
         session: CallSessionId,
-        mut call: CallSession,
-        ended: termination::Ended,
-    ) {
-        // Media can stop immediately, but a new join must not publish into
-        // the same membership state key until the old leave has completed.
-        let (cleanup_done, done) = tokio::sync::watch::channel(false);
-        {
-            let mut cleanups = self.call_cleanups.lock().await;
-            cleanups.retain(|_, cleanup| {
-                cleanup.generation == generation
-                    && !*cleanup.done.borrow()
-                    && cleanup.done.has_changed().is_ok()
-            });
-            cleanups.insert(
-                call.room_id.clone(),
-                crate::CallCleanup { generation, done },
+        state: &Arc<tokio::sync::Mutex<runtime::State>>,
+        end: impl FnOnce(&mut termination::Reader) -> Option<termination::Ended>,
+    ) -> Result<Option<CallTerminationClaim>, RpcCode> {
+        let mut calls = self.call_sessions.lock().await;
+        let mut state = state.lock().await;
+        if !self.call_account_is_current(generation) {
+            return Err(RpcCode::NotLoggedIn);
+        }
+        // A joining call is not in the map yet, but join must still see an
+        // admitted end before it can activate the session.
+        let Some(ended) = end(&mut state.termination) else {
+            return Ok(None);
+        };
+        let Some(teardown) = calls.take_for_teardown(session) else {
+            return Ok(None);
+        };
+        state.termination.pending.clear();
+        Ok(Some(CallTerminationClaim {
+            generation,
+            session,
+            teardown,
+            ended,
+        }))
+    }
+
+    fn complete_call_termination(self: &Arc<Self>, claim: CallTerminationClaim) {
+        let CallTerminationClaim {
+            generation,
+            session,
+            teardown,
+            ended,
+        } = claim;
+        if self.call_account_is_current(generation) {
+            self.emit_if_current(
+                generation,
+                crate::protocol::CoreEvent::CallTerminated {
+                    session,
+                    room_id: teardown.call.room.room_id().to_owned(),
+                    terminated_by: ended.terminated_by,
+                    event_id: ended.event_id,
+                    local: ended.local,
+                },
             );
         }
+        self.start_call_teardown(generation, teardown, None);
+    }
+
+    fn start_call_teardown(
+        self: &Arc<Self>,
+        generation: u64,
+        teardown: CallTeardown,
+        reply: Option<oneshot::Sender<Result<(), RpcError>>>,
+    ) {
+        teardown.call.termination_cancel.send_replace(true);
+        let client = teardown.call.room.client();
+        let core = self.clone();
+        let task_slot = teardown.signal.task.clone();
+        *task_slot.lock() = Some(spawn(async move {
+            // The key watcher can be the caller. Stop it from this task.
+            let result = core.retract_call(teardown).await;
+            core.refresh_after_call(generation, &client).await;
+            if let Some(reply) = reply {
+                let _ = reply.send(result);
+            }
+        }));
+    }
+
+    async fn retract_call(
+        &self,
+        CallTeardown { mut call, signal }: CallTeardown,
+    ) -> Result<(), RpcError> {
         drop(call.updates.take());
         drop(call.postpone.take());
         drop(call.termination_keys.take());
         call._handlers.clear();
         call.state.lock().await.termination.pending.clear();
-        self.emit_if_current(
-            generation,
-            crate::protocol::CoreEvent::CallTerminated {
-                session,
-                room_id: call.room_id.clone(),
-                terminated_by: ended.terminated_by,
-                event_id: ended.event_id,
-                local: ended.local,
-            },
-        );
-        call.termination_cancel.send_replace(true);
-        let core = self.clone();
-        self.track_session_task(spawn(async move {
-            if let Err(error) = core.hang_up(&call).await {
-                tracing::warn!(?error, room_id = %call.room_id, "call terminated but signaling cleanup failed");
-            }
-            core.apply_app_activity(false).await;
-            cleanup_done.send_replace(true);
-        }).abort_on_drop());
+        let result = self.hang_up(&call).await;
+        if let Err(error) = &result {
+            tracing::warn!(?error, room_id = %call.room.room_id(), "could not retract call signaling");
+        }
+        drop(call); // release the room lease only after the retract
+        signal.done.send_replace(true);
+        result
     }
 
-    async fn wait_for_call_cleanup(&self, room_id: &OwnedRoomId, generation: u64) {
-        let pending = self
-            .call_cleanups
-            .lock()
-            .await
-            .get(room_id)
-            .and_then(|cleanup| (cleanup.generation == generation).then(|| cleanup.done.clone()));
-        if let Some(mut done) = pending {
-            // Dropping a session task on logout closes the channel as well.
-            // Do not hold the registry lock while waiting for network cleanup.
-            let _ = done.wait_for(|finished| *finished).await;
-            let mut cleanups = self.call_cleanups.lock().await;
-            if cleanups
-                .get(room_id)
-                .is_some_and(|cleanup| cleanup.done.same_channel(&done))
-            {
-                cleanups.remove(room_id);
-            }
+    pub(crate) fn call_account_is_current(&self, generation: u64) -> bool {
+        self.is_current(generation) && !self.call_memberships.is_retired(generation)
+    }
+
+    async fn refresh_after_call(self: &Arc<Self>, generation: u64, client: &Client) {
+        if !self.call_account_is_current(generation) {
+            return;
         }
+        self.refresh_call_presence(client, generation).await;
+        // The call may have kept sync running while the app was suspended.
+        self.apply_app_activity_for_account(generation).await;
     }
 
     pub(crate) async fn set_call_screen_sharing(
         &self,
         SetScreenSharingParams { session, active }: SetScreenSharingParams,
     ) -> Result<(), RpcError> {
-        let (room_id, state) = {
+        let (room, state, delay) = {
             let calls = self.call_sessions.lock().await;
-            let call = calls.get(&session).ok_or(RpcError::UnknownCall)?;
-            (call.room_id.clone(), call.state.clone())
+            let call = calls.get(&session).ok_or(RpcCode::UnknownCall)?;
+            (call.room.clone(), call.state.clone(), call.delay_id.clone())
         };
-        let room = self.room(&room_id).await?;
-        runtime::set_screen_sharing(&room, &state, active)
+        runtime::set_screen_sharing(&room, &state, &delay, active)
             .await
             .or_failed(self, "set_call_screen_sharing")?;
         Ok(())
     }
 
-    async fn fire_hangup(&self, delay_id: String) -> Result<(), RpcError> {
-        delayed_events::update(&self.client().await?, delay_id, UpdateAction::Send)
+    async fn fire_hangup(&self, client: &Client, delay_id: String) -> Result<(), RpcError> {
+        delayed_events::update(client, delay_id, UpdateAction::Send)
             .await
             .or_failed(self, "leave_call")
     }
@@ -1156,9 +1318,9 @@ impl Core {
             let state = call.state.lock().await;
             (state.left_because_slot_closed(), state.own_member())
         };
-        if let Ok(room) = self.room(&call.room_id).await {
-            self.withdraw_call_invite(&room, &own, slot_closed).await;
-        }
+        self.withdraw_call_invite(&call.room, &own, slot_closed)
+            .await;
+        let client = call.room.client();
         let delay_id = {
             let mut delay = call.delay_id.lock().await;
             delay.active = false;
@@ -1170,7 +1332,6 @@ impl Core {
         if call.sticky_member.is_some() {
             let result = self.send_left_membership(call, slot_closed).await;
             if result.is_ok()
-                && let Ok(client) = self.client().await
                 && let Err(error) =
                     delayed_events::update(&client, delay_id, UpdateAction::Cancel).await
             {
@@ -1178,7 +1339,7 @@ impl Core {
             }
             return result;
         }
-        match self.fire_hangup(delay_id).await {
+        match self.fire_hangup(&client, delay_id).await {
             Ok(result) => Ok(result),
             Err(_) => self.send_left_membership(call, false).await,
         }
@@ -1190,7 +1351,6 @@ impl Core {
         slot_closed: bool,
     ) -> Result<(), RpcError> {
         if let Some(member_id) = &call.sticky_member {
-            let room = self.room(&call.room_id).await?;
             let wire = call.state.lock().await.wire();
             let code = if slot_closed {
                 sticky::LeaveCode::SlotClosed
@@ -1198,7 +1358,7 @@ impl Core {
                 sticky::LeaveCode::Leave
             };
             sticky::send_wire(
-                &room,
+                &call.room,
                 sticky::LeaveOut::for_wire(Some(member_id.clone()), code, wire),
                 wire,
             )
@@ -1206,8 +1366,7 @@ impl Core {
             .or_failed(self, "leave_call")?;
             return Ok(());
         }
-        self.room(&call.room_id)
-            .await?
+        call.room
             .send_state_event_for_key(&call.state_key, left_membership())
             .await
             .or_failed(self, "leave_call")?;
@@ -1215,17 +1374,14 @@ impl Core {
         Ok(())
     }
 
-    async fn schedule_hangup(
-        &self,
-        room_id: &OwnedRoomId,
-        state_key: &CallMemberStateKey,
-    ) -> Option<String> {
-        let support = self.delayed_events_support().await.ok()?;
+    async fn schedule_hangup(room: &Room, state_key: &CallMemberStateKey) -> Option<String> {
+        let client = room.client();
+        let support = delayed_events::support(&client).await.ok()?;
         if !support.any() {
             return None;
         }
         let event = DelayedEvent {
-            room_id: room_id.clone(),
+            room_id: room.room_id().to_owned(),
             event_type: StateEventType::CallMember.to_string(),
             state_key: Some(state_key.as_ref().to_owned()),
             content: serde_json::value::to_raw_value(&left_membership()).ok()?,
@@ -1233,7 +1389,7 @@ impl Core {
             sticky_duration_ms: None,
         };
 
-        match delayed_events::send(&self.client().await.ok()?, support, event).await {
+        match delayed_events::send(&client, support, event).await {
             Ok(delay_id) => Some(delay_id),
             Err(error) => {
                 tracing::warn!(
@@ -1245,17 +1401,13 @@ impl Core {
         }
     }
 
-    async fn postpone_hangup(&self, delay_id: &str) -> Postponed {
+    async fn postpone_hangup(client: &Client, delay_id: &str) -> Postponed {
         let mut backoff = HANGUP_RETRY_BACKOFF;
         let mut spent = Duration::ZERO;
 
         loop {
-            let Ok(client) = self.client().await else {
-                return Postponed::Unreachable;
-            };
-
             let Err(error) =
-                delayed_events::update(&client, delay_id.to_owned(), UpdateAction::Restart).await
+                delayed_events::update(client, delay_id.to_owned(), UpdateAction::Restart).await
             else {
                 return Postponed::Restarted;
             };
@@ -1279,14 +1431,12 @@ impl Core {
         }
     }
 
-    fn spawn_postpone_loop(self: &Arc<Self>, delay_id: String) -> crate::Task {
-        let core = self.clone();
-
+    fn spawn_postpone_loop(client: Client, delay_id: String) -> crate::Task {
         spawn(async move {
             loop {
                 matrix_sdk::sleep::sleep(HANGUP_POSTPONE_INTERVAL).await;
 
-                if core.postpone_hangup(&delay_id).await != Postponed::Restarted {
+                if Self::postpone_hangup(&client, &delay_id).await != Postponed::Restarted {
                     return;
                 }
             }
@@ -1295,11 +1445,10 @@ impl Core {
     }
 
     fn spawn_managed_postpone_loop(
-        self: &Arc<Self>,
+        client: Client,
         delay: Arc<tokio::sync::Mutex<DelayState>>,
         wake: Arc<tokio::sync::Notify>,
     ) -> crate::Task {
-        let core = self.clone();
         spawn(async move {
             loop {
                 matrix_sdk::sleep::sleep(HANGUP_POSTPONE_INTERVAL).await;
@@ -1311,7 +1460,7 @@ impl Core {
                     delay.id.clone()
                 };
                 let Some(id) = id else { continue };
-                if core.postpone_hangup(&id).await == Postponed::Gone {
+                if Self::postpone_hangup(&client, &id).await == Postponed::Gone {
                     let mut delay = delay.lock().await;
                     if delay.id.as_deref() == Some(id.as_str()) {
                         delay.id = None;
@@ -1330,7 +1479,24 @@ mod tests {
     use matrix_sdk::ruma::{device_id, owned_user_id, user_id};
 
     use super::membership::CallMember;
-    use super::{can_join_call, member_views, membership_state_key, pick_focus};
+    use super::{
+        can_join_call, livekit_service_urls, member_views, membership_state_key, pick_focus,
+    };
+
+    #[test]
+    fn test_both_livekit_transport_types_name_their_jwt_service() {
+        let transports = serde_json::from_value(serde_json::json!([
+            {"type": "livekit", "livekit_service_url": "https://legacy.example"},
+            {"type": "m.livekit", "url": "wss://sfu.example", "livekit_service_url": "https://current.example"},
+            {"type": "m.livekit", "url": "wss://sfu-only.example"},
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            livekit_service_urls(transports),
+            ["https://legacy.example", "https://current.example"]
+        );
+    }
 
     #[test]
     fn test_sticky_membership_can_join_without_legacy_state_permission() {
@@ -1429,7 +1595,7 @@ mod tests {
 
     #[test]
     fn stable_transport_discovery_reads_the_stable_response() {
-        let transport: matrix_sdk::ruma::api::client::rtc::RtcTransport = serde_json::from_value(
+        let transport: ruma::api::client::rtc::RtcTransport = serde_json::from_value(
             serde_json::json!({"type":"m.livekit", "url":"wss://focus.example"}),
         )
         .unwrap();

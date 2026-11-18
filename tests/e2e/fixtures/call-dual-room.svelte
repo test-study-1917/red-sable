@@ -9,6 +9,7 @@
   import { Bookmarks, provideBookmarks } from '#lib/rooms/bookmarks.svelte.js';
   import { PresenceStore, providePresenceStore } from '#lib/rooms/presence.svelte.js';
   import { EventItems, provideEventItems } from '#lib/features/room/messages/event-items.svelte.js';
+  import { OpenRoomSearch, provideOpenRoomSearch } from '#lib/features/room/room-panels.svelte.js';
   import RoomView from '#lib/features/room/RoomView.svelte';
   import { activeRoomTimeline } from '#lib/rooms/timeline.svelte.js';
   import { setPreference } from '#lib/settings/preferences.svelte.js';
@@ -128,6 +129,7 @@
     });
   });
   provideCoreClient(core);
+  provideOpenRoomSearch(new OpenRoomSearch());
   const rooms = new RoomList(core);
   rooms.rooms = [room];
   provideRoomList(rooms);

@@ -30,7 +30,7 @@ use crate::outgoing::{gif_content, location_content, message_content, reply_to, 
 use crate::protocol::{
     AttachmentInfoView, ComposerContent, ComposerPill, GestureView, ImageSourcePackReferenceView,
     ImageSourcePackView, MessageKind, PackImageInfoView, PerMessageProfileView,
-    ReactionShortcodeView, RpcError, ScheduledMessageView, SubscriptionId, UrlPreviewView,
+    ReactionShortcodeView, RpcCode, RpcError, ScheduledMessageView, SubscriptionId, UrlPreviewView,
 };
 use crate::{Core, ResultExt, view};
 
@@ -64,6 +64,8 @@ domain! {
     send_gesture,
     url_preview,
     reaction_shortcodes,
+    reaction_event_ids,
+    redact_reaction,
     frequent_reactions,
     remember_emoji,
     set_typing,
@@ -302,7 +304,7 @@ impl Handler for SendStickerParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let url = OwnedMxcUri::from(self.url);
         if url.parts().is_err() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         let source = image_source_pack_extra(url.as_str(), self.source_pack);
 
@@ -379,7 +381,7 @@ impl Handler for SendGifParams {
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let url = OwnedMxcUri::from(self.url);
         if url.parts().is_err() {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
 
         let mut info = ImageInfo::new();
@@ -594,6 +596,7 @@ impl Handler for BulkRedactParams {
             &self.senders,
             self.after_ts,
             &self.event_types,
+            false,
             self.reason.as_deref(),
         )
         .await
@@ -712,7 +715,7 @@ impl Handler for SendLocationParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         if view::geo_coordinates(&self.geo_uri).is_none() {
-            return Err(RpcError::InvalidLocation);
+            return Err(RpcCode::InvalidLocation.into());
         }
 
         let room_id = self.room_id;
@@ -991,9 +994,9 @@ impl Handler for CreatePollParams {
             self.undisclosed,
             self.max_selections,
         )
-        .ok_or(RpcError::InvalidPoll)?;
+        .ok_or(RpcCode::InvalidPoll)?;
         let content =
-            matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent::from(
+            ruma::events::poll::unstable_start::UnstablePollStartEventContent::from(
                 content,
             );
 
@@ -1030,7 +1033,7 @@ impl Handler for VotePollParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let content =
-            matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
+            ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
                 self.answers,
                 self.event_id,
             );
@@ -1065,7 +1068,7 @@ impl Handler for EndPollParams {
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
         let content =
-            matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
+            ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
                 "The poll has closed.",
                 self.event_id,
             );
@@ -1116,7 +1119,7 @@ pub struct UrlPreviewParams {
     #[serde(default)]
     pub service: Option<String>,
     #[serde(default)]
-    pub klipy_api_key: Option<String>,
+    pub tunnel: bool,
 }
 
 impl Handler for UrlPreviewParams {
@@ -1125,22 +1128,14 @@ impl Handler for UrlPreviewParams {
     async fn run(self, core: &Arc<Core>) -> Result<Option<UrlPreviewView>, RpcError> {
         let url = self.url;
         if self.client {
-            #[cfg(not(target_family = "wasm"))]
-            return crate::link_previews::scrape_locally(
-                &url,
-                &sable_link_preview::ScrapeOptions {
-                    klipy_api_key: self.klipy_api_key,
-                },
-            )
-            .await;
-            #[cfg(target_family = "wasm")]
-            {
-                let Some(base) = self.service else {
-                    return Ok(None);
-                };
-                let data = crate::link_previews::soliditas_preview(&base, &url).await?;
-                return Ok(data.and_then(|data| url_preview(url, &data)));
+            let Some(base) = self.service else {
+                return Ok(None);
+            };
+            if self.tunnel {
+                return core.tunnel_preview(&base, &url).await;
             }
+            let data = crate::link_previews::soliditas_preview(&base, &url).await?;
+            return Ok(data.and_then(|data| url_preview(url, &data)));
         }
 
         let sent = core
@@ -1212,6 +1207,58 @@ impl Handler for ReactionShortcodesParams {
     async fn run(self, core: &Arc<Core>) -> Result<Vec<ReactionShortcodeView>, RpcError> {
         core.reaction_shortcodes(&self.room_id, &self.event_id)
             .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct ReactionEventIdsParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub event_id: OwnedEventId,
+    pub key: String,
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub sender: OwnedUserId,
+}
+
+impl Handler for ReactionEventIdsParams {
+    type Ok = Vec<String>;
+
+    async fn run(self, core: &Arc<Core>) -> Result<Vec<String>, RpcError> {
+        let ids = core
+            .reaction_event_ids(&self.room_id, &self.event_id, &self.key, &self.sender)
+            .await?;
+        Ok(ids.into_iter().map(String::from).collect())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct RedactReactionParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub event_id: OwnedEventId,
+    pub key: String,
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub sender: OwnedUserId,
+}
+
+impl Handler for RedactReactionParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        let room = core.room(&self.room_id).await?;
+        for id in core
+            .reaction_event_ids(&self.room_id, &self.event_id, &self.key, &self.sender)
+            .await?
+        {
+            room.redact(&id, None, None)
+                .await
+                .or_failed(core, "redact_reaction")?;
+        }
+        Ok(())
     }
 }
 

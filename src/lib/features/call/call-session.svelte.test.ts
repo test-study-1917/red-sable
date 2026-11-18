@@ -3,11 +3,8 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { CoreEvent } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { CoreError } from '#src/transport';
-import {
-  preferences,
-  setPreference,
-  type CallInputMode,
-} from '#lib/settings/preferences.svelte.js';
+import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+import { type CallInputMode } from '#lib/settings/definitions.js';
 
 const screenAudio = vi.hoisted(() => ({ supported: vi.fn(() => false) }));
 vi.mock('#lib/platform/screen-audio.js', async (original) => ({
@@ -297,6 +294,22 @@ test('a call tears down after a successful join reports disconnected', async () 
   const retry = new CallSession(client, { createTransport: () => transport });
   await retry.join('!other:example.org', { microphone: true, camera: false });
   expect(retry.lifecycle).toBe('active');
+});
+
+test('a call server blocked by the local network fails with its own message', async () => {
+  const { client, transport } = harness();
+  vi.mocked(client.rpc.calls.join).mockResolvedValueOnce({
+    ...(await client.rpc.calls.join({} as never)),
+    url: 'wss://192.168.1.20:7880',
+  });
+  transport.connect = vi.fn(() => Promise.reject(new Error('connect')));
+  globalThis.fetch = vi.fn<() => Promise<Response>>().mockRejectedValue(new TypeError('blocked'));
+  const session = new CallSession(client, { createTransport: () => transport });
+
+  await session.join('!room:example.org', { microphone: true, camera: false });
+
+  expect(session.failure).toBe('local-network-blocked');
+  expect(transport.connect).toHaveBeenCalledOnce();
 });
 
 test('a connect promise does not make the session active while transport is still connecting', async () => {

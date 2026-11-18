@@ -106,14 +106,18 @@ the shipped file refers to it with `"$schema": "./config.schema.json"`.
   to an empty list.
 - `pushNotificationDetails` requires all three of `pushNotifyUrl`,
   `vapidPublicKey` and `webPushAppID`. Without them, the push configuration is
-  ignored. The other fields are optional and configure native or UnifiedPush
-  clients. See the [Sygnal guide](sygnal-setup.md).
+  ignored. `pushNotifyUrl` must be a gateway that delivers web push, such as
+  Sygnal with a `webpush` app. A UnifiedPush gateway like ntfy's rejects browser
+  pushers, and the homeserver then deletes them. The other fields are optional
+  and configure native or UnifiedPush clients. See the [Sygnal guide](sygnal-setup.md).
 - `embeds.serviceUrl` enables the embed service when it is an HTTP(S) URL.
 - `supporterAwards` requires an HTTP(S) service URL and at least one 43-character
   unpadded base64 or base64url Ed25519 public key, indexed by key ID.
 - `gifs.provider` accepts `klipy`, `tenor` or `giphy`, defaulting to `tenor`.
   GIF search also needs `proxyUrl` (a Matrix server name, without a scheme) and
-  the API key for the selected provider.
+  the API key for the selected provider. Homeservers fetch picked GIFs from the
+  proxy over federation. The `reuploadGifs` setting uploads them to the user's
+  homeserver instead, and then `proxyUrl` is optional.
 - `calls.livekitServiceUrl` provides a fallback LiveKit service URL.
 - `searchSharing.stunServers` lists the STUN servers used to share search history between
   devices. It defaults to `stun:stun.sable.moe:3478`. An empty list keeps transfers on the
@@ -137,7 +141,8 @@ Omit any of them to keep Sable's behaviour.
     "appName": "Acme Chat",
     "logoUrl": "/branding/logo.svg",
     "faviconUrl": "/branding/favicon.png",
-    "themeUrl": "/branding/theme.css"
+    "themeUrl": "/branding/theme.css",
+    "darkThemeUrl": "/branding/theme-dark.css"
   },
   "links": {
     "help": "https://help.example.org",
@@ -162,12 +167,15 @@ Omit any of them to keep Sable's behaviour.
 - `branding.appName` replaces "Sable" in the interface, page titles and
   notifications. Text about the Sable project itself, such as donations and
   the default theme name, keeps the Sable name.
-- `branding.logoUrl`, `faviconUrl` and `themeUrl` accept a path on the same
+- `branding.logoUrl`, `faviconUrl`, `themeUrl`, `lightThemeUrl` and `darkThemeUrl` accept a path on the same
   site or an HTTP(S) URL. Serve the files next to `config.json`, for example by
   mounting a directory at `/app/branding`.
 - `branding.themeUrl` points at a theme file in the same format users import as
   a custom theme. It is the base theme, so users' own themes and quick CSS still
   apply on top. It loads after startup, so the default theme can show briefly.
+- `branding.lightThemeUrl` and `branding.darkThemeUrl` set the base theme for
+  light and dark mode. Each falls back to `themeUrl`. Account branding that sets
+  any of the three theme URLs replaces all three deployment theme URLs.
 - `links.help`, `links.privacy` and `links.terms` appear in the sign-in footer.
   `links.privacy` also replaces the telemetry policy link and the `/privacy`
   page. `links.supportRoom` replaces the support room on the home page.

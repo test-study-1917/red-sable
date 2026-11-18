@@ -5,7 +5,11 @@ import { page } from '$app/state';
 
 import type { RoomListItemView } from '#src/generated/protocol';
 
-import { findRoomByPathId, roomPathParamFromId } from '#lib/rooms/room-list.svelte.js';
+import {
+  findRoomByPathId,
+  roomPathParam,
+  roomPathParamFromId,
+} from '#lib/rooms/room-list.svelte.js';
 import { isEditableTarget } from '#lib/ui/shortcuts/binding.js';
 import { matchesAppLayout } from '#lib/ui/app-layout.svelte.js';
 import { focusRegion } from '#lib/ui/shortcuts/focus-regions.js';
@@ -69,6 +73,10 @@ const TREE_REGIONS = '[data-focus-region="rooms"], [data-focus-region="spaces"]'
 
 const ROOM_PATH =
   /^\/(?:(?:home|rooms|direct)\/[^/]+|space\/[^/]+\/(?!lobby$|create-room$|create-space$)[^/]+)$/;
+
+const LIST_PATH = /^\/(?:home|rooms|direct|space\/[^/]+)$/;
+
+export const MOBILE_TAB_PATHS = new Set(['/navigate', '/inbox', '/profile', '/alerts']);
 
 const COMPOSER_REGION = '[data-focus-region="composer"]';
 const HEADING_ATTEMPTS = 10;
@@ -145,10 +153,26 @@ export function goToPage(href: string): void {
     setMobileDrawerOpen(false);
     return;
   }
+  if (mobile) {
+    const onTab = MOBILE_TAB_PATHS.has(page.url.pathname);
+    if (MOBILE_TAB_PATHS.has(target)) {
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved href
+      void goto(href, {
+        replace: onTab,
+        state: { tabBack: onTab ? page.state.tabBack : true },
+        persistState: true,
+      });
+      return;
+    }
+    if (LIST_PATH.test(target) && (onTab || LIST_PATH.test(page.url.pathname))) {
+      if (onTab && page.state.tabBack) history.back();
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved href
+      else void goto(href, { replace: true, state: {}, persistState: true });
+      return;
+    }
+  }
   const roomSwitch = isRoomSwitch(href);
-  const fromList =
-    page.state.mobileDrawer === 'open' ||
-    /^\/(?:home|rooms|direct|space\/[^/]+)$/.test(page.url.pathname);
+  const fromList = page.state.mobileDrawer === 'open' || LIST_PATH.test(page.url.pathname);
   if (roomSwitch || (mobile && ROOM_PATH.test(target) && fromList)) {
     // The list entry must hold the open room, or Back reloads the previous one under the drawer.
     // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved href
@@ -202,4 +226,14 @@ export function searchInRoom(room: RoomListItemView | undefined, roomId: string)
   goto(target).catch((error: unknown) => {
     console.debug('[sable room] search navigation failed', error);
   });
+}
+
+export function createRoomPath(
+  rooms: readonly RoomListItemView[],
+  space: RoomListItemView | null,
+  canAddChildren: boolean
+): string {
+  return space === null || !canAddChildren
+    ? resolve('create-room')
+    : resolve('/(app)/space/[spaceId]/create-room', { spaceId: roomPathParam(space, rooms) });
 }

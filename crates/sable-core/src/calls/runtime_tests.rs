@@ -30,7 +30,7 @@ pub(in crate::calls) fn member(mode: CallMode, created_ts: u64, foci: &[&str]) -
         foci: foci.iter().map(ToString::to_string).collect(),
         screen_sharing: false,
         wire: super::membership::RtcWire::Deployed,
-        focus_servers: std::collections::HashMap::default(),
+        focus_servers: HashMap::default(),
     }
 }
 
@@ -630,14 +630,14 @@ async fn sdk_redaction_removes_sticky_membership_and_wakes_the_call() {
         Raw::new(&json!({
             "type":"m.room.redaction", "event_id":"$redaction", "sender":"@moderator:example.org",
             "origin_server_ts":200, "redacts":"$member", "content":{"redacts":"$member"}
-        })).unwrap().cast_unchecked::<matrix_sdk::ruma::events::AnySyncTimelineEvent>()
+        })).unwrap().cast_unchecked::<ruma::events::AnySyncTimelineEvent>()
     )).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
         .await
         .unwrap();
     assert_eq!(
         state.lock().await.sticky.members(200),
-        [] as [crate::calls::membership::CallMember; 0]
+        Vec::<CallMember>::new()
     );
 }
 
@@ -689,26 +689,16 @@ async fn schedule_hangup_does_not_write_when_delayed_events_are_unsupported() {
         .ok(event_id!("$left"))
         .mount()
         .await;
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client: client.clone(),
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let room = server
+        .sync_joined_room(&client, room_id!("!call:example.org"))
+        .await;
     let state_key = super::super::membership_state_key(
         client.user_id().unwrap(),
         client.device_id().unwrap(),
         "",
     );
 
-    assert!(
-        core.schedule_hangup(&owned_room_id!("!call:example.org"), &state_key)
-            .await
-            .is_none()
-    );
+    assert!(Core::schedule_hangup(&room, &state_key).await.is_none());
 
     let requests = server.server().received_requests().await.unwrap();
     assert!(!requests.iter().any(|request| {
@@ -719,7 +709,7 @@ async fn schedule_hangup_does_not_write_when_delayed_events_are_unsupported() {
     }));
 }
 
-async fn delayed_leave_fixture() -> (MatrixMockServer, Arc<Core>, matrix_sdk::Room) {
+async fn delayed_leave_fixture() -> (MatrixMockServer, matrix_sdk::Room) {
     let server = MatrixMockServer::new().await;
     server
         .mock_versions()
@@ -732,16 +722,7 @@ async fn delayed_leave_fixture() -> (MatrixMockServer, Arc<Core>, matrix_sdk::Ro
     let room = server
         .sync_joined_room(&client, room_id!("!call:example.org"))
         .await;
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
-    (server, core, room)
+    (server, room)
 }
 
 #[tokio::test]
@@ -749,7 +730,7 @@ async fn a_delayed_leave_the_server_already_sent_is_reported_gone() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 
-    let (server, core, _room) = delayed_leave_fixture().await;
+    let (server, room) = delayed_leave_fixture().await;
     Mock::given(method("POST"))
         .and(path(
             "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/fired",
@@ -761,7 +742,7 @@ async fn a_delayed_leave_the_server_already_sent_is_reported_gone() {
         .await;
 
     assert_eq!(
-        core.postpone_hangup("fired").await,
+        Core::postpone_hangup(&room.client(), "fired").await,
         super::super::Postponed::Gone
     );
 }
@@ -771,7 +752,7 @@ async fn renewal_checks_that_the_delayed_leave_is_still_pending() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 
-    let (server, core, _room) = delayed_leave_fixture().await;
+    let (server, room) = delayed_leave_fixture().await;
     Mock::given(method("POST"))
         .and(path(
             "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/fired",
@@ -788,7 +769,7 @@ async fn renewal_checks_that_the_delayed_leave_is_still_pending() {
         lost: false,
     });
     assert_eq!(
-        super::protect_membership_renewal(&core, &delay).await,
+        super::protect_membership_renewal(&room.client(), &delay).await,
         super::super::Postponed::Gone
     );
     let delay = delay.lock().await;
@@ -801,7 +782,7 @@ async fn a_lost_delayed_leave_is_scheduled_again_once() {
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, ResponseTemplate};
 
-    let (server, core, room) = delayed_leave_fixture().await;
+    let (server, room) = delayed_leave_fixture().await;
     Mock::given(method("PUT"))
         .and(path_regex(
             r"/rooms/.*/send/org\.matrix\.msc4143\.rtc\.member/.*",
@@ -820,8 +801,8 @@ async fn a_lost_delayed_leave_is_scheduled_again_once() {
         lost: true,
     });
 
-    super::restore_hangup(&core, &room, &own, &delay).await;
-    super::restore_hangup(&core, &room, &own, &delay).await;
+    super::restore_hangup(&room, &own, &delay).await;
+    super::restore_hangup(&room, &own, &delay).await;
 
     let delay = delay.lock().await;
     assert_eq!(delay.id.as_deref(), Some("new"));
@@ -833,7 +814,7 @@ async fn refreshing_a_delayed_leave_cancels_the_old_event_and_respects_hangup() 
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, ResponseTemplate};
 
-    let (server, core, room) = delayed_leave_fixture().await;
+    let (server, room) = delayed_leave_fixture().await;
     Mock::given(method("POST"))
         .and(path(
             "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/old",
@@ -855,11 +836,44 @@ async fn refreshing_a_delayed_leave_cancels_the_old_event_and_respects_hangup() 
     let mut own = member(CallMode::Matrix2, 1, &[]);
     own.member_id = Some("member".to_owned());
     let delay = super::super::DelayState::shared(Some("old".to_owned()));
-    super::refresh_encrypted_hangup(core.clone(), room.clone(), own.clone(), delay.clone()).await;
+    super::refresh_encrypted_hangup(room.clone(), own.clone(), delay.clone()).await;
     assert_eq!(delay.lock().await.id.as_deref(), Some("new"));
     delay.lock().await.active = false;
-    super::refresh_encrypted_hangup(core, room, own, delay.clone()).await;
+    super::refresh_encrypted_hangup(room, own, delay.clone()).await;
     assert_eq!(delay.lock().await.id.as_deref(), Some("new"));
+}
+
+#[tokio::test]
+async fn a_screen_share_update_after_hangup_does_not_republish_the_membership() {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (server, room) = delayed_leave_fixture().await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"/rooms/.*/state/.*call\.member/.*"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"event_id":"$member"})),
+        )
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let state = Mutex::new(State::new(
+        member(CallMode::Legacy, 1, &["https://focus.example.org"]),
+        Vec::new(),
+        super::StickyMemberships::default(),
+        &room.room_id().to_owned(),
+        false,
+        None,
+        false,
+    ));
+    let delay = super::super::DelayState::shared(None);
+    super::set_screen_sharing(&room, &state, &delay, true)
+        .await
+        .unwrap();
+    delay.lock().await.active = false;
+    super::set_screen_sharing(&room, &state, &delay, false)
+        .await
+        .unwrap();
 }
 
 async fn legacy_move_fixture(
@@ -942,7 +956,6 @@ async fn legacy_move_fixture(
 #[tokio::test]
 async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
     use matrix_sdk_ui::sync_service::State as SyncState;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     let (server, sfu, room, _, _, _) = legacy_move_fixture(true).await;
@@ -982,7 +995,7 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
     core.apply_app_activity(false).await;
     core.leave_call(first.session).await.unwrap();
     assert!(matches!(sync_service.state().get(), SyncState::Idle));
-    assert!(core.sync_suspended.load(Ordering::SeqCst));
+    assert!(core.activity.sync_suspended());
 
     let second = core
         .join_call(
@@ -995,8 +1008,8 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
         .unwrap();
 
     assert!(matches!(sync_service.state().get(), SyncState::Running));
-    assert!(!core.sync_suspended.load(Ordering::SeqCst));
-    assert!(!core.app_active.load(Ordering::Relaxed));
+    assert!(!core.activity.sync_suspended());
+    assert!(!core.activity.app_active());
 
     core.update_network_conditions(false, true).await;
     sync_service.stop().await;
@@ -1005,6 +1018,261 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
 
     core.leave_call(second.session).await.unwrap();
     assert!(matches!(sync_service.state().get(), SyncState::Idle));
+}
+
+#[tokio::test]
+async fn a_prepared_join_publishes_only_after_the_old_membership_is_retracted() {
+    use std::time::Duration;
+
+    let (server, sfu, room, _, _, _) = legacy_move_fixture(true).await;
+    server
+        .mock_sliding_sync()
+        .with_delay(Duration::from_secs(1))
+        .ok_json(serde_json::json!({"pos": "p", "lists": {}, "rooms": {}}))
+        .mount()
+        .await;
+    server
+        .mock_room_send()
+        .ok(event_id!("$invite"))
+        .mount()
+        .await;
+    let client = room.client();
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    *core.session.write().await = Some(Session {
+        account_id: "test".to_owned(),
+        client,
+        sync_service: sync_service.clone(),
+        homeserver: server.server().uri(),
+        oauth: false,
+    });
+    let room_id = room.room_id().to_owned();
+    let first = core
+        .join_call(
+            room_id.clone(),
+            Some(sfu.uri()),
+            Some(CallMode::Legacy),
+            None,
+        )
+        .await
+        .unwrap();
+    let prepared = super::prepare_join(
+        &core,
+        room_id,
+        Some(sfu.uri()),
+        Some(CallMode::Legacy),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut publishing = std::pin::pin!(prepared.publish(&core));
+    assert!(futures_util::poll!(&mut publishing).is_pending());
+
+    let state = core
+        .call_sessions
+        .lock()
+        .await
+        .get(&first.session)
+        .unwrap()
+        .state
+        .clone();
+    let claim = core
+        .claim_call_termination(core.lifecycle.current(), first.session, &state, |_| {
+            Some(super::super::termination::Ended {
+                terminated_by: "@alice:example.org".to_owned(),
+                event_id: "$end".to_owned(),
+                local: true,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // Keep the real hang-up task paused before touching the homeserver.
+    let pause = state.lock().await;
+    core.complete_call_termination(claim);
+    assert!(futures_util::poll!(&mut publishing).is_pending());
+    drop(pause);
+    let second = tokio::time::timeout(Duration::from_secs(5), publishing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.session, second.session);
+
+    let writes: Vec<serde_json::Value> = server
+        .server()
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT" && request.url.path().contains("/state/")
+        })
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(writes.len(), 3, "join → retract → rejoin: {writes:?}");
+    let left = serde_json::to_value(super::super::left_membership()).unwrap();
+    assert_ne!(writes.first(), Some(&left));
+    assert_eq!(writes.get(1), Some(&left));
+    assert_ne!(writes.last(), Some(&left));
+    core.leave_call(second.session).await.unwrap();
+    sync_service.stop().await;
+}
+
+#[tokio::test]
+async fn account_retirement_waits_for_a_membership_put_and_its_abort() {
+    use std::time::Duration;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    let (server, sfu, room, _, _, _) = legacy_move_fixture(true).await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let publishing = started.clone();
+    let left = serde_json::to_value(super::super::left_membership()).unwrap();
+    let left_body = left.clone();
+    Mock::given(method("PUT"))
+        .and(path_regex(r"/rooms/.*/state/.*"))
+        .respond_with(move |request: &wiremock::Request| {
+            let mut response = ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"event_id":"$membership"}));
+            if serde_json::from_slice::<serde_json::Value>(&request.body).unwrap() != left_body {
+                publishing.notify_one();
+                response = response.set_delay(Duration::from_millis(250));
+            }
+            response
+        })
+        .with_priority(1)
+        .expect(2)
+        .mount(server.server())
+        .await;
+    let client = room.client();
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    *core.session.write().await = Some(Session {
+        account_id: "test".to_owned(),
+        client,
+        sync_service,
+        homeserver: server.server().uri(),
+        oauth: false,
+    });
+    let room_id = room.room_id().to_owned();
+    let worker = core.clone();
+    let joining = tokio::spawn(async move {
+        worker
+            .join_call(room_id, Some(sfu.uri()), Some(CallMode::Legacy), None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    assert!(core.call_sessions.lock().await.is_empty());
+    let mut retiring = std::pin::pin!(core.retire_calls());
+    assert!(futures_util::poll!(&mut retiring).is_pending());
+    tokio::time::timeout(Duration::from_secs(5), retiring)
+        .await
+        .unwrap();
+    assert!(matches!(
+        joining.await.unwrap().map_err(|error| error.code),
+        Err(crate::protocol::RpcCode::NotLoggedIn)
+    ));
+    let writes: Vec<serde_json::Value> = server
+        .server()
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT" && request.url.path().contains("/state/")
+        })
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(
+        writes.len(),
+        2,
+        "the old client publishes and retracts once"
+    );
+    assert_ne!(writes.first(), Some(&left));
+    assert_eq!(writes.last(), Some(&left));
+}
+
+#[tokio::test]
+async fn cancelling_a_join_during_handoff_retracts_before_the_next_join() {
+    use std::time::Duration;
+
+    let (server, sfu, room, _, _, _) = legacy_move_fixture(true).await;
+    server
+        .mock_room_send()
+        .ok(event_id!("$invite"))
+        .mount()
+        .await;
+    server
+        .mock_sliding_sync()
+        .with_delay(Duration::from_secs(1))
+        .ok_json(serde_json::json!({"pos":"p", "lists":{}, "rooms":{}}))
+        .mount()
+        .await;
+    let client = room.client();
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    *core.session.write().await = Some(Session {
+        account_id: "test".to_owned(),
+        client,
+        sync_service: sync_service.clone(),
+        homeserver: server.server().uri(),
+        oauth: false,
+    });
+    // The join can publish and activate, but cannot return its grant while
+    // app activity is held. Cancelling here must still retract the membership.
+    let activity = core.activity.transition().await;
+    let worker = core.clone();
+    let room_id = room.room_id().to_owned();
+    let url = sfu.uri();
+    let joining = tokio::spawn(async move {
+        worker
+            .join_call(room_id, Some(url), Some(CallMode::Legacy), None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while core.call_sessions.lock().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!joining.is_finished());
+    joining.abort();
+    assert!(joining.await.unwrap_err().is_cancelled());
+    drop(activity);
+
+    let joined = tokio::time::timeout(
+        Duration::from_secs(5),
+        core.join_call(
+            room.room_id().to_owned(),
+            Some(sfu.uri()),
+            Some(CallMode::Legacy),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let writes: Vec<serde_json::Value> = server
+        .server()
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT" && request.url.path().contains("/state/")
+        })
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    assert_eq!(writes.len(), 3, "cancelled join → retract → next join");
+    let left = serde_json::to_value(super::super::left_membership()).unwrap();
+    assert_eq!(writes.get(1), Some(&left));
+    core.leave_call(joined.session).await.unwrap();
+    sync_service.stop().await;
 }
 
 #[tokio::test]

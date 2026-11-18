@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import type { CoreClient } from '#lib/core/client.svelte.js';
-import { CoreError } from '#src/transport';
+import { CoreError, transportFailure } from '#src/transport';
 import { SableWidgetDriver } from './widget-driver.js';
 
 test('returns the created IDs for messages, state events and redactions', async () => {
@@ -189,15 +189,15 @@ test('maps the relations read onto the widget result and the direction onto the 
   });
 });
 
-test('navigates with the matrix.to fragment and refuses anything else', async () => {
+test.each(['link.sable.moe', 'matrix.to'])('navigates with the %s fragment', async (host) => {
   const navigate = vi.fn().mockResolvedValue(undefined);
   const driver = driverWith({}, navigate);
 
-  await driver.navigate('https://matrix.to/#/!room%3Aexample.org?via=example.org');
+  await driver.navigate(`https://${host}/#/!room%3Aexample.org?via=example.org`);
   expect(navigate).toHaveBeenCalledWith('!room%3Aexample.org?via=example.org');
 
   await expect(driver.navigate('https://example.org/#/!room')).rejects.toThrow(
-    'Invalid matrix.to URI'
+    'Invalid Matrix URI'
   );
   expect(navigate).toHaveBeenCalledTimes(1);
 });
@@ -313,7 +313,7 @@ test('expresses core refusals as Matrix API errors', () => {
   expect(driver.processError(new CoreError({ code: 'denied' }))).toMatchObject({
     matrix_api_error: { http_status: 403, response: { errcode: 'M_FORBIDDEN' } },
   });
-  expect(driver.processError(new CoreError({ code: 'failed', log_id: 'e1' }))).toBeUndefined();
+  expect(driver.processError(new CoreError(transportFailure('e1')))).toBeUndefined();
   expect(driver.processError(new Error('boom'))).toBeUndefined();
 });
 

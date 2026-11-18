@@ -1,9 +1,15 @@
 import { on } from 'svelte/events';
 import { onDestroy, type Snippet } from 'svelte';
 
-import type { MemberView, PerMessageProfileView, TimelineItemView } from '#src/generated/protocol';
+import type {
+  MemberView,
+  PerMessageProfileView,
+  TimelineItemView,
+  UrlPreviewView,
+} from '#src/generated/protocol';
 
 import { copyText } from '#lib/platform/clipboard.js';
+import { shareLink, sharesLinks } from '#lib/platform/files.js';
 import { i18n } from '#lib/i18n.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 import { useCoreClient } from '#lib/core/context.js';
@@ -12,12 +18,13 @@ import { LongPress, touchContextMenu } from '#lib/ui/long-press.svelte.js';
 import { DoubleTap } from '#lib/ui/double-tap.js';
 import { hapticFeedback } from '#lib/platform/haptics.js';
 import { usePersonaStore } from '#lib/personas/personas.svelte.js';
-import { preferences, type TimelineLayout } from '#lib/settings/preferences.svelte.js';
+import { preferences } from '#lib/settings/preferences.svelte.js';
+import { type TimelineLayout } from '#lib/settings/definitions.js';
 import { useBookmarks } from '#lib/rooms/bookmarks.svelte.js';
 import { useRoomCosmetics, type SenderCosmetics } from '#lib/rooms/room-cosmetics.svelte.js';
 import type { MatrixLink } from '#lib/rooms/matrix-link.js';
 
-import { senderDisplayColors } from '../members/members.js';
+import { useSenderColors } from '../members/members.js';
 import { hasSenderRoles, useSenderRoles } from '../members/sender-roles.js';
 import { MessageSwipe } from '../messages/message-swipe.svelte.js';
 import { useMessageMenu } from '../messages/message-menu-open.svelte.js';
@@ -38,6 +45,16 @@ import {
 } from '../messages/quote-focus.svelte.js';
 import { markQuote } from '../messages/selected-quote.js';
 import { selectedQuote, selectedText, withSelectedText } from './timeline-item-selection';
+
+function canSelectText(target: EventTarget | null): boolean {
+  // Links keep the app's long-press Copy/Share menu; ordinary text can use
+  // native selection handles before the quote actions appear.
+  return (
+    target instanceof Element &&
+    target.closest('.formatted-body') !== null &&
+    target.closest('a[href]') === null
+  );
+}
 
 export interface TimelineItemProps extends MessageCallbacks {
   item: TimelineItemView;
@@ -97,6 +114,7 @@ export interface TimelineRowOptions extends MessageCallbacks {
   overrideCosmetics: SenderCosmetics | null;
   replySender: string | null;
   hasLinkPreviews: boolean;
+  linkPreviews: readonly UrlPreviewView[];
   onMenuOpenChange?: (open: boolean) => void;
   onSwipeMembers?: () => void;
   onCancelSend?: (transactionId: string) => void;
@@ -119,6 +137,7 @@ export class TimelineRow {
   readonly #doubleTap: DoubleTap;
   readonly #roomCosmetics = useRoomCosmetics();
   readonly #senderRoles = hasSenderRoles() ? useSenderRoles() : null;
+  readonly #senderColors = useSenderColors();
   readonly #options: () => TimelineRowOptions;
 
   constructor(options: () => TimelineRowOptions) {
@@ -162,14 +181,15 @@ export class TimelineRow {
     });
     this.press = new LongPress({
       enabled: () => this.actionable || this.canCancelSend,
-      onPress: () => {
+      onPress: (event) => {
         const { item } = this.#options();
         this.menu.set(item.id, false);
         const selected = selectedText(this.element);
-        const actions = this.selectionActions(selected);
+        const quote = selectedQuote(this.element);
+        const link = this.#linkActions(event);
         this.dialogs.open(item, {
           kind: 'sheet',
-          actions: () => actions,
+          actions: () => ({ ...this.selectionActions(selected, quote), ...link }),
         });
       },
     });
@@ -239,14 +259,12 @@ export class TimelineRow {
   });
   readonly senderColors = $derived.by(() => {
     const { item } = this.#options();
-    return senderDisplayColors(
-      item.sender ?? '',
-      this.profile,
-      item.per_message_profile,
-      item.is_own,
-      this.senderCosmetics,
-      this.senderRole?.color ?? null
-    );
+    return this.#senderColors(item.sender, this.profile, {
+      persona: item.per_message_profile,
+      isOwn: item.is_own,
+      cosmetics: this.senderCosmetics,
+      roleColor: this.senderRole?.color,
+    });
   });
   readonly stalled = $derived.by(() => {
     const { send_state } = this.#options().item;
@@ -353,12 +371,7 @@ export class TimelineRow {
 
   pointerDown = (event: PointerEvent): void => {
     this.#pointerHeld = true;
-    if (
-      event.pointerType !== 'mouse' &&
-      event.target instanceof Element &&
-      event.target.closest('.formatted-body')
-    )
-      this.press.cancel();
+    if (event.pointerType !== 'mouse' && canSelectText(event.target)) this.press.cancel();
     else this.press.start(event);
     this.#doubleTap.down(event);
     if (event.pointerType === 'mouse') this.engagement.hold();
@@ -378,12 +391,7 @@ export class TimelineRow {
 
   openContextMenu = (event: MouseEvent): void => {
     // On touch, let the platform establish a text selection before offering quote actions.
-    if (
-      touchContextMenu(event) &&
-      event.target instanceof Element &&
-      event.target.closest('.formatted-body')
-    )
-      return;
+    if (touchContextMenu(event) && canSelectText(event.target)) return;
     const { item } = this.#options();
     if (this.press.touch || touchContextMenu(event)) {
       event.preventDefault();
@@ -401,22 +409,34 @@ export class TimelineRow {
     }
     event.preventDefault();
     this.#anchor = cursorAnchor(event);
+    const selected = selectedText(this.element);
+    const quote = selectedQuote(this.element);
+    const link = this.#linkActions(event);
+    this.menu.open(item.id, { x: event.clientX, y: event.clientY }, () => ({
+      ...this.selectionActions(selected, quote),
+      ...link,
+    }));
+  };
+
+  #linkActions(event: Event): Pick<MessageActions, 'onCopyHref' | 'onShareHref'> {
     const link =
       event.target instanceof Element
         ? event.target.closest<HTMLAnchorElement>('a[href]')?.href
         : null;
-    const selected = selectedText(this.element);
-    const quote = selectedQuote(this.element);
-    this.menu.open(item.id, { x: event.clientX, y: event.clientY }, () => ({
-      ...this.selectionActions(selected, quote),
-      onCopyHref:
-        link && this.actionable
-          ? () => {
-              void copyText(link)
-                .then(() => toasts.info(i18n.t('timeline.linkCopied')))
-                .catch(() => toasts.error(i18n.t('errors.copyFailed')));
-            }
-          : undefined,
-    }));
-  };
+    if (!link || !this.actionable) return {};
+    return {
+      onCopyHref: () => {
+        void copyText(link)
+          .then(() => toasts.info(i18n.t('timeline.linkCopied')))
+          .catch(() => toasts.error(i18n.t('errors.copyFailed')));
+      },
+      onShareHref: sharesLinks()
+        ? () => {
+            void shareLink(link).catch((error: unknown) => {
+              console.debug('[sable timeline] share dismissed', error);
+            });
+          }
+        : undefined,
+    };
+  }
 }

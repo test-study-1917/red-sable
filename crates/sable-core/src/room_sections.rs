@@ -1,16 +1,19 @@
 //! The sidebar's sections, favourites, space trees and badges, built from the room list rows.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use icu_normalizer::DecomposingNormalizerBorrowed;
 use icu_normalizer::properties::CanonicalCombiningClassMapBorrowed;
 use matrix_sdk::ruma::OwnedRoomId;
+use sable_model::space_graph::{SpaceGraph, SpaceNode};
 
 use crate::api::rooms::RoomKind;
 use crate::protocol::{
     BadgeModeView, NotificationModeView, RoomBadgeView, RoomListItemView, RoomListOptionsView,
-    RoomSectionView, RoomSectionsUpdate, RoomSortView, RoomStateView, RoomTag, RoomUnreadView,
-    SpaceTreeNodeView,
+    RoomSectionView, RoomSectionsUpdate, RoomSortView, RoomSpacesView, RoomStateView, RoomTag,
+    RoomUnreadView, SpaceTreeNodeView,
 };
 
 pub(crate) const HOME: &str = "home";
@@ -24,10 +27,19 @@ pub(crate) struct RoomSections {
     sections: BTreeMap<String, RoomSectionView>,
     badges: Vec<RoomBadgeView>,
     quiet_rooms: Vec<OwnedRoomId>,
+    app_badge: u32,
+    room_spaces: Arc<Vec<RoomSpacesView>>,
+    space_inputs: Option<u64>,
 }
 
 impl RoomSections {
+    #[cfg(test)]
     pub(crate) fn build(rows: &[Row], options: &RoomListOptionsView) -> Self {
+        Self::rebuild(rows, options, &Self::default())
+    }
+
+    /// Reuses `previous`'s room spaces while nothing they are walked from changed.
+    pub(crate) fn rebuild(rows: &[Row], options: &RoomListOptionsView, previous: &Self) -> Self {
         let lists = Lists::new(rows, options);
         let mut sections = BTreeMap::new();
         for section in [lists.home(), lists.unspaced(), lists.direct()] {
@@ -54,11 +66,29 @@ impl RoomSections {
                 })
             })
             .collect();
+        let app_badge = rows
+            .iter()
+            .filter(|row| joined(row) && !is_space(row))
+            .map(|row| {
+                let counts = lists.badge(row);
+                counts.notifying.max(counts.highlight)
+            })
+            .fold(0, u32::saturating_add);
+
+        let space_inputs = Some(space_inputs(rows));
+        let room_spaces = if space_inputs == previous.space_inputs {
+            Arc::clone(&previous.room_spaces)
+        } else {
+            Arc::new(lists.graph.room_spaces())
+        };
 
         Self {
             sections,
             badges,
             quiet_rooms,
+            app_badge,
+            room_spaces,
+            space_inputs,
         }
     }
 
@@ -77,6 +107,10 @@ impl RoomSections {
             .collect();
         let badges = (self.badges != next.badges).then(|| next.badges.clone());
         let quiet_rooms = (self.quiet_rooms != next.quiet_rooms).then(|| next.quiet_rooms.clone());
+        let app_badge = (self.app_badge != next.app_badge).then_some(next.app_badge);
+        let room_spaces = (!Arc::ptr_eq(&self.room_spaces, &next.room_spaces)
+            && self.room_spaces != next.room_spaces)
+            .then(|| next.room_spaces.to_vec());
         *self = next;
 
         let update = RoomSectionsUpdate {
@@ -84,6 +118,8 @@ impl RoomSections {
             removed,
             badges,
             quiet_rooms,
+            app_badge,
+            room_spaces,
         };
         (update != RoomSectionsUpdate::default()).then_some(update)
     }
@@ -95,6 +131,21 @@ const fn joined(row: &Row) -> bool {
 
 const fn invited(row: &Row) -> bool {
     matches!(row.state, RoomStateView::Invited)
+}
+
+fn space_inputs(rows: &[Row]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for row in rows {
+        row.room_id.hash(&mut hasher);
+        row.display_name.hash(&mut hasher);
+        (is_space(row), joined(row), row.is_tombstoned).hash(&mut hasher);
+        for edge in &row.space_children {
+            edge.room_id.hash(&mut hasher);
+            edge.via.hash(&mut hasher);
+        }
+        row.space_children.len().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn is_space(row: &Row) -> bool {
@@ -160,6 +211,7 @@ struct Lists<'a> {
     position: HashMap<&'a str, usize>,
     quiet: HashSet<&'a str>,
     claimed: HashSet<&'a str>,
+    graph: SpaceGraph<'a>,
 }
 
 impl<'a> Lists<'a> {
@@ -190,6 +242,19 @@ impl<'a> Lists<'a> {
             .map(|edge| edge.room_id.as_str())
             .collect();
 
+        let graph = SpaceGraph::new(
+            rows.iter()
+                .map(|row| SpaceNode {
+                    room_id: row.room_id.as_str(),
+                    display_name: &row.display_name,
+                    is_space: is_space(row),
+                    joined: joined(row),
+                    tombstoned: row.is_tombstoned,
+                    children: &row.space_children,
+                })
+                .collect(),
+        );
+
         Self {
             options,
             rows,
@@ -197,6 +262,7 @@ impl<'a> Lists<'a> {
             position,
             quiet,
             claimed,
+            graph,
         }
     }
 
@@ -409,9 +475,12 @@ impl<'a> Lists<'a> {
     }
 
     fn space_totals(&self, space: &Row) -> (RoomUnreadView, Vec<OwnedRoomId>, Vec<OwnedRoomId>) {
-        let mut visited = HashSet::new();
-        let mut descendants = Vec::new();
-        self.collect_descendants(space.room_id.as_str(), &mut visited, &mut descendants);
+        let descendants: Vec<&Row> = self
+            .graph
+            .joined_space_rooms(space.room_id.as_str())
+            .into_iter()
+            .filter_map(|room_id| self.by_id.get(room_id).copied())
+            .collect();
 
         let mut unread = RoomUnreadView::default();
         let mut unread_rooms = Vec::new();
@@ -424,34 +493,6 @@ impl<'a> Lists<'a> {
         }
         let descendants = descendants.iter().map(|row| row.room_id.clone()).collect();
         (unread, unread_rooms, descendants)
-    }
-
-    fn collect_descendants(
-        &self,
-        space_id: &'a str,
-        visited: &mut HashSet<&'a str>,
-        found: &mut Vec<&'a Row>,
-    ) {
-        if !visited.insert(space_id) {
-            return;
-        }
-        let Some(space) = self.by_id.get(space_id).filter(|row| joined(row)) else {
-            return;
-        };
-        for edge in &space.space_children {
-            let Some(child) = self
-                .by_id
-                .get(edge.room_id.as_str())
-                .filter(|row| joined(row))
-            else {
-                continue;
-            };
-            if is_space(child) {
-                self.collect_descendants(child.room_id.as_str(), visited, found);
-            } else if visited.insert(child.room_id.as_str()) {
-                found.push(child);
-            }
-        }
     }
 }
 

@@ -6,7 +6,9 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Duration;
 
-use sable_core::notifications::{ColdPush, PushImage, PushMedia, PushSession, push_sender_name};
+use sable_core::notifications::{
+    ColdPush, PushImage, PushMedia, PushSession, push_preview, push_sender_name,
+};
 use sable_core::protocol::{PushEventView, PushFetchView};
 use sable_core::session::AccountRegistry;
 use sable_core::store::{FileSessionStore, SessionStore};
@@ -19,10 +21,7 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(20);
 const OPTIONAL_TIMEOUT: Duration = Duration::from_secs(3);
 const FINISH_RESERVE: Duration = Duration::from_secs(1);
 
-async fn optional_work<T: Default>(
-    deadline: Instant,
-    operation: impl std::future::Future<Output = T>,
-) -> T {
+async fn optional_work<T: Default>(deadline: Instant, operation: impl Future<Output = T>) -> T {
     let now = Instant::now();
     if deadline <= now {
         return T::default();
@@ -375,17 +374,6 @@ struct PayloadUser {
 }
 
 #[derive(Deserialize)]
-struct ClearEvent<'a> {
-    #[serde(borrow)]
-    content: ClearContent<'a>,
-}
-
-#[derive(Deserialize)]
-struct ClearContent<'a> {
-    body: &'a str,
-}
-
-#[derive(Deserialize)]
 struct InviteEvent {
     #[serde(rename = "type")]
     kind: String,
@@ -432,9 +420,8 @@ fn message_text(settings: &Policy, event: Option<&Value>, encrypted: bool) -> St
         return ENCRYPTED_BODY.to_owned();
     }
     event
-        .and_then(|event| ClearEvent::deserialize(event).ok())
-        .map_or(fallback, |event| event.content.body)
-        .to_owned()
+        .and_then(|event| push_preview(event.get("content")?))
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 async fn signed_in(root: &Path, user: &str) -> Option<(String, String)> {
@@ -643,11 +630,11 @@ struct Alert<'a> {
 }
 
 impl Alert<'_> {
-    async fn sender_name(&self, sender_id: Option<&str>) -> String {
+    async fn sender_name(&self, sender_id: Option<&str>, content: Option<&Value>) -> String {
         let display_name = self.target.sender_display_name.as_deref();
         match &self.session {
-            Some(session) => session.sender_name(sender_id, display_name).await,
-            None => push_sender_name(sender_id, display_name),
+            Some(session) => session.sender_name(sender_id, display_name, content).await,
+            None => push_sender_name(sender_id, display_name, content),
         }
     }
 
@@ -704,7 +691,7 @@ impl Alert<'_> {
             .take()
             .filter(|sender| !sender.is_empty());
         self.stage.set("sender_name");
-        let sender = self.sender_name(sender_id.as_deref()).await;
+        let sender = self.sender_name(sender_id.as_deref(), None).await;
         if let Some(ring) = self.ring_payload(&sender) {
             return finish(Rendered::Ring(RingPushOut {
                 ring,
@@ -719,23 +706,27 @@ impl Alert<'_> {
         if !current.enabled {
             return Flow::Break((None, None));
         }
-        let message = self.message(&current, &sender, &room_name);
         let previews = current.content && (!self.encrypted || current.encrypted_content);
         let content = self
             .event
             .as_ref()
             .and_then(|event| event.get("content"))
             .filter(|_| previews);
+        let sender = match content {
+            Some(_) => self.sender_name(sender_id.as_deref(), content).await,
+            None => sender,
+        };
+        let invite = self.event.as_ref().is_some_and(is_invite);
         let session = self.session.take();
         let active_elsewhere = match &session {
-            Some(session) if !message.invite && current.quiet_when_active_elsewhere => {
+            Some(session) if !invite && current.quiet_when_active_elsewhere => {
                 self.stage.set("active_elsewhere");
                 optional_work(self.optional_deadline, Box::pin(session.active_elsewhere())).await
             }
             _ => false,
         };
         let media = match (sender_id.as_deref(), &session) {
-            (Some(sender), Some(session)) if !message.invite => {
+            (Some(sender), Some(session)) if !invite => {
                 self.stage.set("media");
                 optional_work(
                     self.optional_deadline,
@@ -749,6 +740,8 @@ impl Alert<'_> {
             }
             _ => PushMedia::default(),
         };
+        let room_name = media.room_name.unwrap_or(room_name);
+        let message = self.message(&current, &sender, &room_name);
         let members = session.as_ref().and_then(PushSession::joined_members);
         drop(session);
         let Account {
@@ -974,8 +967,7 @@ fn render_response(
     if let Some(issue) = issue {
         let response = response.get_or_insert_with(|| serde_json::json!({}));
         let object = response.as_object_mut()?;
-        let mut diagnostic =
-            serde_json::Map::from_iter([("issue".to_owned(), issue.as_str().into())]);
+        let mut diagnostic = Map::from_iter([("issue".to_owned(), issue.as_str().into())]);
         diagnostic.insert("reporting".to_owned(), reporting.into());
         if let Issue::Timeout(stage) = issue {
             diagnostic.insert("stage".to_owned(), stage.into());
@@ -1292,7 +1284,7 @@ mod tests {
         assert_eq!(
             ring(
                 &event("m.rtc.notification", "ring"),
-                &push_sender_name(Some("@bob:example.org"), Some("\u{200b}\u{2800}"))
+                &push_sender_name(Some("@bob:example.org"), Some("\u{200b}\u{2800}"), None)
             ),
             Some(json!({ "caller_name": "@bob:example.org", "expires_at": 32.0 }))
         );
@@ -1378,6 +1370,15 @@ mod tests {
                 .and_then(|value| value.get("body").cloned())
         };
         assert_eq!(body(&payload).await, Some(json!("private")));
+        let profiled = json!({"user_id":"@alice:example.org","notification":{
+            "room_id":"!room:example.org","type":"m.room.message","sender":"@bob:example.org",
+            "content":{"body":"Cat: hi","com.beeper.per_message_profile":{
+                "id":"cat","displayname":"Cat","has_fallback":true}}
+        }});
+        let shown = rendered(&root, &profiled).await.unwrap();
+        assert_eq!(shown["sender"], "Cat");
+        assert_eq!(shown["text"], "hi");
+        assert_eq!(shown["body"], "Cat: hi");
         let unfetchable =
             json!({"user_id":"@alice:example.org","room_id":"!room:example.org","event_id":"$e"});
         assert_eq!(body(&unfetchable).await, Some(json!("New message")));
@@ -1473,7 +1474,7 @@ mod tests {
     }
 
     fn shape_push(notification: Value) -> Value {
-        Value::Object(serde_json::Map::from_iter([
+        Value::Object(Map::from_iter([
             ("user_id".to_owned(), "@alice:example.org".into()),
             ("notification".to_owned(), notification),
         ]))

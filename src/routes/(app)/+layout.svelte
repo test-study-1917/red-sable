@@ -5,7 +5,11 @@
   import { page } from '$app/state';
   import AppShell from '#lib/features/sidebar/AppShell.svelte';
   import SettingsPanel from '#lib/features/settings/SettingsPanel.svelte';
-  import { followSettingsLink } from '#lib/features/settings/settings-navigation.js';
+  import {
+    defaultSettingsSection,
+    followSettingsLink,
+    showSettingsOver,
+  } from '#lib/features/settings/settings-navigation.js';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { useCoreClient } from '#lib/core/context.js';
   import {
@@ -17,6 +21,7 @@
   import { roomSectionPath } from '#lib/rooms/permalink.js';
   import { HOME_SECTION, rememberLastRoom } from '#lib/rooms/last-room.js';
   import { provideSpaceSidebar, SpaceSidebar } from '#lib/spaces/sidebar-layout.svelte.js';
+  import { OpenRoomSearch, provideOpenRoomSearch } from '#lib/features/room/room-panels.svelte.js';
   import { PersonaStore, providePersonaStore } from '#lib/personas/personas.svelte.js';
   import { Bookmarks, provideBookmarks } from '#lib/rooms/bookmarks.svelte.js';
   import { EventItems, provideEventItems } from '#lib/features/room/messages/event-items.svelte.js';
@@ -27,12 +32,14 @@
   import {
     backToRoomList,
     contextSearchPath,
+    createRoomPath,
     trackRouteFocus,
   } from '#lib/features/room/room-navigation.js';
   import { MESSAGE_SEARCH_FIELD_ID } from '#lib/features/search/message-search.svelte.js';
   import { InviteActions } from '#lib/rooms/invites.svelte.js';
   import { dismissedInvites } from '#lib/rooms/dismissed-invites.svelte.js';
   import { presenceSharing } from '#lib/rooms/presence-sharing.svelte.js';
+  import { presenceOverride } from '#lib/rooms/presence-override.svelte.js';
   import { dmSpaces } from '#lib/rooms/dm-spaces.svelte.js';
   import { spaceNotifications } from '#lib/rooms/space-notifications.svelte.js';
   import { profileOverrides } from '#lib/profile/profile-overrides.svelte.js';
@@ -76,7 +83,7 @@
   import idleFavicon from '#lib/assets/favicon.png';
   import unreadFavicon from '#lib/assets/res/svg/unread.svg';
   import highlightFavicon from '#lib/assets/res/svg/highlight.svg';
-  import { startSystemBarSync } from '#lib/platform/system-bars.js';
+  import { setKeepScreenOn, startSystemBarSync } from '#lib/platform/system-bars.js';
   import { installAndroidBack } from '#lib/platform/android-back.js';
   import {
     preferences,
@@ -84,6 +91,7 @@
     setPreference,
   } from '#lib/settings/preferences.svelte.js';
   import { accountSync } from '#lib/settings/account-sync.svelte.js';
+  import { selectSettingsAccount } from '#lib/settings/account-settings.js';
   import {
     draftsDocumentFor,
     scheduledDocumentFor,
@@ -96,6 +104,7 @@
     unregisterNativePush,
   } from '#lib/features/notifications/native-push.js';
   import { pushOverride } from '#lib/notifications/push-config.js';
+  import { parseWorkerMessage } from '#lib/notifications/worker-message.js';
   import { unregisterVoipPusher } from '#lib/features/notifications/voip-push.js';
   import {
     callNotificationAction,
@@ -141,6 +150,7 @@
   import { clearPushFailure, recordPushFailure } from '#lib/features/notifications/push-failure.js';
   import CommandPalette from '#lib/ui/shortcuts/CommandPalette.svelte';
   import ToastRegion from '#lib/ui/ToastRegion.svelte';
+  import InAppBanners from '#lib/features/notifications/InAppBanners.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import ShareTargetSheet from '#lib/features/share/ShareTargetSheet.svelte';
   import { ShareInbox, watchSharedContent } from '#lib/features/share/share-inbox.svelte.js';
@@ -149,12 +159,14 @@
   import { registerGlobalShortcuts } from '#lib/ui/shortcuts/global-shortcuts.js';
   import { registerDesktopCallShortcuts } from '#lib/features/call/desktop-shortcuts.svelte.js';
   import { paletteState, shortcutsHelpState } from '#lib/ui/shortcuts/palette-state.svelte.js';
+  import FindOrJoinDialog from '#lib/features/room/discovery/FindOrJoinDialog.svelte';
   import { unreadRoomAtOffset, unreadRoomsByPriority } from '#lib/ui/shortcuts/room-jump.js';
   import { markRoomsRead } from '#lib/features/sidebar/nav-rooms.js';
   import { hasUnread } from '#lib/rooms/unread.js';
   import { roomAtOffset } from '#lib/features/sidebar/visible-rooms.svelte.js';
   import { playSound, type NotificationSound } from '#lib/features/notifications/sound.js';
   import MediaViewerHost from '#lib/ui/media/MediaViewerHost.svelte';
+  import ZooAlertControls from '#lib/features/sidebar/ZooAlertControls.svelte';
 
   interface Props {
     children: Snippet;
@@ -175,6 +187,8 @@
   });
   const spaceSidebar = new SpaceSidebar();
   provideSpaceSidebar(spaceSidebar);
+  const openRoomSearch = new OpenRoomSearch();
+  provideOpenRoomSearch(openRoomSearch);
   providePersonaStore(new PersonaStore(core));
   const bookmarks = new Bookmarks(core.rpc.account);
   provideBookmarks(bookmarks);
@@ -211,8 +225,18 @@
   provideCallSession(callSession);
   onMount(() => registerDesktopCallShortcuts(callSession));
   $effect(() => {
+    if (!callSession.active) return;
+    setKeepScreenOn(true);
+    return () => setKeepScreenOn(false);
+  });
+  $effect(() => {
     const inputMode = preferences.callInputMode;
     untrack(() => callSession.setInputMode(inputMode));
+  });
+  $effect.pre(() => {
+    const accountId = core.session?.account_id;
+    if (accountId) selectSettingsAccount(accountId);
+    else if (core.status === 'signed-out') selectSettingsAccount(null);
   });
   $effect(() => {
     void core.accountRevision;
@@ -435,12 +459,9 @@
   let unreadTotal = $derived(
     countedRooms.reduce((total, room) => total + roomList.notificationsFor(room).highlight, 0)
   );
-  let notifyingTotal = $derived(
-    countedRooms.reduce((total, room) => total + (roomList.badgeUnreadFor(room).notifying ?? 0), 0)
-  );
 
   $effect(() => {
-    void setUnreadBadge(notifyingTotal);
+    void setUnreadBadge(roomList.appBadge);
   });
 
   let answeredCallRoom = $state<string | null>(null);
@@ -538,6 +559,7 @@
         encrypted_content: preferences.notificationEncryptedContent,
         sounds: preferences.notificationSounds,
         notify_once: preferences.notifyOnce,
+        in_app_banners: preferences.inAppBanners,
       })
       .catch((error: unknown) => {
         console.warn('[sable notifications] notification settings not applied', error);
@@ -552,6 +574,7 @@
       clearOnRead: preferences.clearNotificationsOnRead,
       privateReceipts: readReceiptIsPrivate(),
       quietWhenActiveElsewhere,
+      inAppBanners: preferences.inAppBanners,
     }).catch((error: unknown) => {
       console.debug('[sable notifications] native content policy not applied', error);
     });
@@ -562,6 +585,7 @@
       notifyOnce: preferences.notifyOnce,
       clearOnRead: preferences.clearNotificationsOnRead,
       quietWhenActiveElsewhere,
+      inAppBanners: preferences.inAppBanners,
     });
   });
 
@@ -646,8 +670,10 @@
     void core.accountRevision;
     if (core.status !== 'ready') return;
 
-    const message = preferences.presenceStatusMessage.trim();
-    const presence = preferences.sendPresence ? preferences.presence : 'offline';
+    const revised = presenceOverride.supported;
+    const message = revised ? '' : preferences.presenceStatusMessage.trim();
+    const picked = revised ? 'online' : preferences.presence;
+    const presence = preferences.sendPresence ? picked : 'offline';
     const away = presence === 'online' && (!active || idle);
     const status = preferences.sendPresence && message ? message : null;
     const timer = setTimeout(() => {
@@ -770,9 +796,7 @@
     return on(navigator.serviceWorker, 'message', (event) => {
       const message = event as MessageEvent;
       const port = message.ports[0];
-      if ((message.data as { type?: unknown } | undefined)?.type !== 'sable:push-event' || !port) {
-        return;
-      }
+      if (parseWorkerMessage(message.data)?.type !== 'sable:push-event' || !port) return;
       void answerPushEvent(core, message.data).then((fetched) => {
         port.postMessage(fetched);
       });
@@ -805,19 +829,14 @@
     });
     const stopGranted = onPermissionGranted(resync);
     const stopMessages = on(navigator.serviceWorker, 'message', (event) => {
-      const message = (event as MessageEvent).data as
-        | { type?: string; appId?: string; ackToken?: string }
-        | undefined;
-
+      const message = parseWorkerMessage((event as MessageEvent).data);
       if (message?.type === 'sable:push-resubscribe') resync();
       if (message?.type === 'sable:webpush-ack') {
-        if (message.appId && message.ackToken) {
-          void core.rpc.push
-            .ackWebPusher({ app_id: message.appId, ack_token: message.ackToken })
-            .catch((error: unknown) => {
-              console.debug('[sable notifications] web push not acknowledged', error);
-            });
-        }
+        void core.rpc.push
+          .ackWebPusher({ app_id: message.appId, ack_token: message.ackToken })
+          .catch((error: unknown) => {
+            console.debug('[sable notifications] web push not acknowledged', error);
+          });
       }
     });
     return () => {
@@ -837,15 +856,7 @@
     if (!hostsServiceWorker()) return;
 
     return on(navigator.serviceWorker, 'message', (event) => {
-      const message = (event as MessageEvent).data as
-        | {
-            type?: string;
-            roomId?: string;
-            userId?: string;
-            eventId?: string | null;
-            outcome?: 'answer' | 'decline' | 'accept';
-          }
-        | undefined;
+      const message = parseWorkerMessage((event as MessageEvent).data);
       if (message?.type === 'sable:open-invites') {
         void selectNotificationAccount(core, message.userId ?? '')
           .then(() => goto(resolve('/(app)/inbox')))
@@ -854,27 +865,17 @@
           });
         return;
       }
-      if (
-        message?.type === 'sable:invite-action' &&
-        message.roomId !== undefined &&
-        message.userId !== undefined &&
-        (message.outcome === 'accept' || message.outcome === 'decline')
-      ) {
+      if (message?.type === 'sable:invite-action') {
         const { roomId, userId, outcome } = message;
         void answerInvite(userId, roomId, outcome).catch((error: unknown) => {
           console.debug('[sable notifications] invite not answered', error);
         });
         return;
       }
-      if (
-        message?.type === 'sable:call-action' &&
-        message.roomId !== undefined &&
-        message.userId !== undefined &&
-        (message.outcome === 'answer' || message.outcome === 'decline')
-      ) {
+      if (message?.type === 'sable:call-action') {
         const outcome = message.outcome;
         void openFromNotification(
-          { userId: message.userId, roomId: message.roomId, eventId: message.eventId ?? null },
+          { userId: message.userId, roomId: message.roomId, eventId: message.eventId },
           (roomId, eventId) => {
             answerFromNotification(roomId, eventId, outcome);
           }
@@ -883,12 +884,8 @@
         });
         return;
       }
-      if (message?.type === 'sable:open-room' && message.roomId !== undefined) {
-        pushedRoom = {
-          roomId: message.roomId,
-          userId: message.userId ?? null,
-          eventId: message.eventId ?? null,
-        };
+      if (message?.type === 'sable:open-room') {
+        pushedRoom = { roomId: message.roomId, userId: message.userId, eventId: message.eventId };
       }
     });
   });
@@ -919,9 +916,7 @@
 
     const off = on(navigator.serviceWorker, 'message', (event) => {
       const workerMessage = event as MessageEvent;
-      const message = workerMessage.data as
-        | { type?: string; serverUserId?: string | null; text?: string; files?: File[] }
-        | undefined;
+      const message = parseWorkerMessage(workerMessage.data);
       if (message?.type === 'sable:server-user') {
         workerMessage.ports[0]?.postMessage(boundServerIdentity());
       } else if (
@@ -930,12 +925,12 @@
           (message.serverUserId && message.serverUserId === boundServerIdentity()))
       ) {
         if (!import.meta.env.VITE_SABLE_SERVER_URL) {
-          shareInbox.accept(message.text ?? '', message.files ?? []);
+          shareInbox.accept(message.text, message.files);
         } else {
           void currentServerUser()
             .then((identity) => {
               if (identity === message.serverUserId && identity === boundServerIdentity()) {
-                shareInbox.accept(message.text ?? '', message.files ?? []);
+                shareInbox.accept(message.text, message.files);
               }
             })
             .catch((error: unknown) => {
@@ -1007,6 +1002,7 @@
       presence.start(core);
       dismissedInvites.start(core);
       presenceSharing.start(core);
+      presenceOverride.start(core);
       dmSpaces.start(core);
       spaceNotifications.start(core);
       mediaPreviewSettings.start(core);
@@ -1020,6 +1016,7 @@
       presence.stop();
       dismissedInvites.stop();
       presenceSharing.stop();
+      presenceOverride.stop();
       dmSpaces.stop();
       spaceNotifications.stop();
       mediaPreviewSettings.stop();
@@ -1029,7 +1026,7 @@
   });
 
   $effect(() => {
-    if (roomList.settled) spaceNotifications.apply(roomList.rooms);
+    if (roomList.settled) spaceNotifications.apply(roomList);
   });
 
   const LEFT_CONVERSATIONS_SETTLE_MS = 2_000;
@@ -1169,6 +1166,7 @@
           paletteState.open = true;
         },
         'app.searchMessages': () => {
+          if (openRoomSearch.run()) return;
           if (page.url.pathname.startsWith(resolve('search'))) {
             document.getElementById(MESSAGE_SEARCH_FIELD_ID)?.focus();
             return;
@@ -1180,7 +1178,18 @@
           void goto(resolve('bookmarks'));
         },
         'app.createRoom': () => {
-          void goto(resolve('create-room'));
+          const space = findRoomByPathId(roomList.rooms, page.params.spaceId) ?? null;
+          void (
+            space === null
+              ? Promise.resolve(false)
+              : core.rpc.members
+                  .permissions({ room_id: space.room_id })
+                  .then((permissions) => permissions.can_manage_children)
+                  .catch(() => false)
+          ).then((canAddChildren) => {
+            // eslint-disable-next-line svelte/no-navigation-without-resolve -- createRoomPath() resolves the route itself
+            void goto(createRoomPath(roomList.rooms, space, canAddChildren));
+          });
         },
         'app.showShortcuts': () => {
           shortcutsHelpState.open = true;
@@ -1199,7 +1208,8 @@
             void callSession.setTalking(false);
           },
         },
-        'call.toggleDeafen': () => {
+        'call.toggleDeafen': (event) => {
+          if (event.repeat || callSession.desktopShortcutStatus === 'portal') return;
           if (callSession.active) callSession.setDeafened(!callSession.deafened);
         },
         'call.toggleCamera': () => {
@@ -1216,7 +1226,8 @@
           if (callSession.active) void callSession.leave();
         },
         'app.openSettings': () => {
-          void goto(resolve('/(app)/settings'));
+          if (appLayout.current) showSettingsOver(defaultSettingsSection());
+          else void goto(resolve('/(app)/settings'));
         },
         'navigation.previousRoom': () => {
           const target = roomAtOffset(openRoomId, -1);
@@ -1358,9 +1369,14 @@
       />
     {/if}
     <CommandPalette bind:open={paletteState.open} />
+    <FindOrJoinDialog />
     <ShortcutsHelpDialog bind:open={shortcutsHelpState.open} />
     <ShareTargetSheet inbox={shareInbox} />
     <ToastRegion dismissLabel={i18n.t('common.dismiss')} />
+    <InAppBanners />
+    {#if preferences.showAlertZoo}
+      <ZooAlertControls />
+    {/if}
   {/key}
 {:else if core.status === 'error'}
   <main class="app-status" aria-labelledby="app-status-title">
@@ -1406,7 +1422,7 @@
     clip-path: none;
     color: var(--bg-on-container);
     height: auto;
-    left: calc(var(--space-300) + var(--safe-left));
+    inset-inline-start: calc(var(--space-300) + var(--safe-inline-start));
     overflow: visible;
     padding: var(--space-300) var(--space-400);
     position: fixed;

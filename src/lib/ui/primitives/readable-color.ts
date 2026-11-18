@@ -1,3 +1,4 @@
+import { clamp } from '#lib/clamp.js';
 import {
   convertOklabToRgb,
   convertRgbToOklab,
@@ -8,7 +9,8 @@ import {
 import type { Rgb as ColorRgb } from 'culori';
 
 import '#lib/culori.js';
-import { preferences, type NameColorCorrection } from '#lib/settings/preferences.svelte.js';
+import { preferences } from '#lib/settings/preferences.svelte.js';
+import { type NameColorCorrection } from '#lib/settings/definitions.js';
 
 type Rgb = [number, number, number];
 type Lab = [number, number, number];
@@ -38,7 +40,7 @@ function toHex(rgb: Rgb): string {
 }
 
 function rounded(rgb: Rgb): Rgb {
-  return rgb.map((channel) => Math.round(Math.min(1, Math.max(0, channel)) * 255) / 255) as Rgb;
+  return rgb.map((channel) => Math.round(clamp(channel, 0, 1) * 255) / 255) as Rgb;
 }
 
 function ratio(first: Rgb, second: Rgb): number {

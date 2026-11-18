@@ -290,7 +290,7 @@ export const settingsPanels: Record<string, SettingsPanelDefinition[]> = {
     {
       id: 'link-device',
       section: 'account-devices',
-      supported: (context) => context.oauth,
+      supported: (context) => context.oauth && context.qrGrant,
       targets: targets([
         ['account-devices', 'settings.signedInDevices'],
         ['link-device', 'qrLogin.titleGrant', 'qrLogin.linkDeviceHint'],
@@ -305,7 +305,7 @@ export const settingsPanels: Record<string, SettingsPanelDefinition[]> = {
     {
       id: 'sync-encryption',
       section: 'sync',
-      supported: () => preferences.settingsSync && preferences.syncDrafts,
+      supported: settingsSync,
       targets: targets([['sync-encryption', 'settings.syncEncryptionTitle']]),
     },
     {

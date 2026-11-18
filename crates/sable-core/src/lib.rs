@@ -4,6 +4,7 @@ mod account_data;
 mod account_documents;
 mod account_lock;
 mod accounts;
+mod activity;
 pub mod api;
 mod attachments;
 mod auth;
@@ -26,6 +27,7 @@ pub mod image_packs;
 mod inbox;
 mod invites;
 mod key_backup;
+mod lifecycle;
 mod link_previews;
 pub mod matrix_html;
 mod media;
@@ -58,6 +60,7 @@ mod registration;
 mod room_keys;
 mod room_list_batch;
 mod room_list_rows;
+mod room_rules;
 mod room_sections;
 mod room_settings;
 mod room_widgets;
@@ -85,6 +88,7 @@ mod thread_receipts;
 mod timeline_overlay;
 mod timelines;
 pub mod tls;
+mod tunnel;
 mod utd;
 mod verification;
 pub mod view;
@@ -93,8 +97,39 @@ pub mod webpush;
 
 pub use matrix_sdk::{Client as MatrixClient, reqwest, ruma};
 
-/// User-Agent for native HTTP requests.
-pub const USER_AGENT: &str = concat!("Sable/", env!("SABLE_APP_VERSION"));
+// MAS names OAuth devices from the `(model; os)` segment and falls back to "Unknown device".
+macro_rules! user_agent {
+    ($platform:literal) => {
+        concat!(
+            "Sable/",
+            env!("SABLE_APP_VERSION"),
+            " (",
+            $platform,
+            "; ",
+            $platform,
+            ")"
+        )
+    };
+}
+
+#[cfg(target_os = "android")]
+pub const USER_AGENT: &str = user_agent!("Android");
+#[cfg(target_os = "ios")]
+pub const USER_AGENT: &str = user_agent!("iOS");
+#[cfg(target_os = "macos")]
+pub const USER_AGENT: &str = user_agent!("macOS");
+#[cfg(target_os = "windows")]
+pub const USER_AGENT: &str = user_agent!("Windows");
+#[cfg(target_family = "wasm")]
+pub const USER_AGENT: &str = user_agent!("Web");
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "windows",
+    target_family = "wasm"
+)))]
+pub const USER_AGENT: &str = user_agent!("Linux");
 
 mod widgets;
 
@@ -112,11 +147,11 @@ use matrix_sdk::ruma::events::{AnyGlobalAccountDataEventContent, GlobalAccountDa
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, RoomId};
 use matrix_sdk_ui::timeline::Timeline;
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use url::Url;
 
-use protocol::{CoreEvent, RpcError, SubscriptionId};
-use session::{AccountRegistry, Session};
+use protocol::{CoreEvent, RpcCode, RpcError, SubscriptionId};
+use session::AccountRegistry;
 use store::SessionStore;
 
 pub(crate) type Task = AbortOnDrop<()>;
@@ -137,21 +172,17 @@ pub struct Core {
     next_subscription: AtomicU32,
     next_log_id: AtomicU64,
     next_registration_attempt: AtomicU64,
-    session_generation: AtomicU64,
-    account_locked: AtomicBool,
-    session_attempt_generation: AtomicU64,
-    session_activation_lock: Mutex<()>,
+    lifecycle: lifecycle::Lifecycle,
     session_store_lock: Mutex<()>,
     credential_writers: Mutex<HashMap<String, u64>>,
     next_credential_writer: AtomicU64,
+    next_login_attempt: AtomicU64,
     account_clients: Mutex<HashMap<String, matrix_sdk::Client>>,
     session_handlers: parking_lot::Mutex<Vec<matrix_sdk::event_handler::EventHandlerDropGuard>>,
-    probed_pinned_rooms: parking_lot::Mutex<
-        HashMap<matrix_sdk::ruma::OwnedRoomId, Vec<matrix_sdk::ruma::OwnedEventId>>,
-    >,
+    probed_pinned_rooms: parking_lot::Mutex<HashMap<OwnedRoomId, Vec<OwnedEventId>>>,
     pinned_caches: parking_lot::Mutex<
         HashMap<
-            matrix_sdk::ruma::OwnedRoomId,
+            OwnedRoomId,
             (
                 matrix_sdk::event_cache::PinnedEventsCache,
                 Arc<matrix_sdk::event_cache::EventCacheDropHandles>,
@@ -163,19 +194,18 @@ pub struct Core {
     nicknames_stale: tokio::sync::Notify,
     room_list_options: watch::Sender<protocol::RoomListOptionsView>,
     dm_spaces_changed: watch::Sender<()>,
-    cosmetics_fetches: parking_lot::Mutex<HashMap<matrix_sdk::ruma::OwnedRoomId, Arc<Mutex<()>>>>,
+    cosmetics_fetches: parking_lot::Mutex<HashMap<OwnedRoomId, Arc<Mutex<()>>>>,
     probed_state: parking_lot::Mutex<probed_state::ProbedState>,
     recent_state: parking_lot::Mutex<probed_state::RecentState>,
     media_health: parking_lot::Mutex<media_health::MediaHealth>,
     media_downloads: tokio::sync::Semaphore,
+    tunnel: tunnel::Tunnel,
     key_backup_downloads: tokio::sync::Semaphore,
     key_backup_download: parking_lot::Mutex<Option<protocol::KeyBackupDownloadView>>,
     notification_routes: Mutex<HashMap<String, watchers::NotificationRoute>>,
-    session_swap_lock: Mutex<()>,
-    restore_lock: Mutex<()>,
     accounts: Mutex<Option<AccountRegistry>>,
     discovered_homeservers: Mutex<HashMap<String, Url>>,
-    session: RwLock<Option<Session>>,
+    session: lifecycle::SessionSlot,
     pending_login: Mutex<Option<PendingLogin>>,
     pending_registration: Mutex<Option<registration::PendingRegistration>>,
     qr_flow: Mutex<Option<qr_login::QrFlow>>,
@@ -188,8 +218,11 @@ pub struct Core {
     room_subscriptions: Mutex<std::collections::BTreeSet<OwnedRoomId>>,
     warm_rooms: parking_lot::Mutex<std::collections::VecDeque<OwnedRoomId>>,
     account_data_lock: Mutex<()>,
+    /// Until sync echoes the acceptance, the room would read as unaccepted.
+    accepted_rules: parking_lot::Mutex<HashMap<(ruma::OwnedUserId, OwnedRoomId), i64>>,
     inbox: Mutex<inbox::InboxCache>,
     inbox_flush: Mutex<()>,
+    inbox_changed: tokio::sync::Notify,
     account_data_types: Mutex<std::collections::BTreeSet<String>>,
     pack_cache: Mutex<image_packs::PackCache>,
     calendars: Mutex<HashMap<OwnedRoomId, calendar::RoomCalendar>>,
@@ -202,20 +235,16 @@ pub struct Core {
     notify_once: AtomicBool,
     private_receipts: AtomicBool,
     widget_feed: AtomicBool,
+    scalar_tokens: parking_lot::Mutex<HashMap<(ruma::OwnedUserId, String), String>>,
     notifications_enabled: AtomicBool,
+    in_app_banners: AtomicBool,
     search_crawler_enabled: AtomicBool,
     search_sharing: search::SearchSharing,
     rtc: rtc::RtcSessions,
     search_network: search::CrawlNetwork,
-    search_foreground: AtomicBool,
-    app_active: AtomicBool,
-    app_activity_revision: AtomicU64,
-    app_wake: tokio::sync::Notify,
-    sync_suspended: AtomicBool,
-    network_available: AtomicBool,
+    app_in_foreground: AtomicBool,
     shut_down: AtomicBool,
-    activity_lock: Mutex<()>,
-    stores_open: watch::Sender<bool>,
+    activity: activity::Activity,
     server_search_enabled: AtomicBool,
     read_room: parking_lot::Mutex<Option<OwnedRoomId>>,
     search_index: Mutex<search::MessageIndex>,
@@ -224,27 +253,23 @@ pub struct Core {
     search_crawl: Mutex<search::CrawlProgress>,
     server_search: Mutex<search::ServerSearch>,
     foreground_paginations: AtomicU32,
-    call_sessions: Mutex<HashMap<protocol::CallSessionId, CallSession>>,
-    call_cleanups: Mutex<HashMap<OwnedRoomId, CallCleanup>>,
+    call_sessions: Mutex<calls::CallSessions>,
+    call_memberships: calls::RoomMemberships,
     desired_presence: parking_lot::Mutex<protocol::PresenceView>,
 }
 
-struct CallCleanup {
-    generation: u64,
-    done: watch::Receiver<bool>,
-}
-
 struct CallSession {
-    room_id: OwnedRoomId,
+    room: matrix_sdk::Room,
     state_key: CallMemberStateKey,
     delay_id: Arc<Mutex<calls::DelayState>>,
     postpone: Option<Task>,
     updates: Option<Task>,
     termination_keys: Option<Task>,
-    termination_cancel: tokio::sync::watch::Sender<bool>,
-    state: Arc<tokio::sync::Mutex<calls::CallRuntimeState>>,
+    termination_cancel: watch::Sender<bool>,
+    state: Arc<Mutex<calls::CallRuntimeState>>,
     sticky_member: Option<String>,
     _handlers: Vec<matrix_sdk::event_handler::EventHandlerDropGuard>,
+    _membership: calls::RoomMembership,
 }
 
 pub(crate) struct ForegroundPagination {
@@ -273,6 +298,7 @@ enum LoginMethod {
 }
 
 struct PendingLogin {
+    attempt: u64,
     method: LoginMethod,
     account_id: String,
     account_store_id: String,
@@ -297,9 +323,7 @@ enum SubscriptionKind {
 }
 
 pub(crate) fn now_ms() -> u64 {
-    matrix_sdk::ruma::MilliSecondsSinceUnixEpoch::now()
-        .get()
-        .into()
+    ruma::MilliSecondsSinceUnixEpoch::now().get().into()
 }
 
 impl Core {
@@ -322,6 +346,8 @@ impl Core {
         sessions: Box<dyn SessionStore>,
         persistent_event_cache: bool,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<CoreEvent>) {
+        #[cfg(not(target_family = "wasm"))]
+        tls::install_crypto_provider();
         let (events, rx) = mpsc::unbounded_channel();
         let core = Arc::new(Self {
             store_id: store_id.into(),
@@ -329,40 +355,34 @@ impl Core {
             sessions,
             events,
             notification_content: AtomicBool::new(false),
-            account_locked: AtomicBool::new(false),
             notification_encrypted_content: AtomicBool::new(false),
             notification_sounds: AtomicBool::new(true),
             notify_once: AtomicBool::new(true),
             private_receipts: AtomicBool::new(true),
             widget_feed: AtomicBool::new(false),
+            scalar_tokens: parking_lot::Mutex::new(HashMap::new()),
             notifications_enabled: AtomicBool::new(true),
+            in_app_banners: AtomicBool::new(false),
             search_crawler_enabled: AtomicBool::new(true),
             search_sharing: search::SearchSharing::default(),
             rtc: rtc::RtcSessions::default(),
             search_network: search::CrawlNetwork::default(),
-            search_foreground: AtomicBool::new(true),
-            app_active: AtomicBool::new(true),
-            app_activity_revision: AtomicU64::new(0),
-            app_wake: tokio::sync::Notify::new(),
-            sync_suspended: AtomicBool::new(false),
-            network_available: AtomicBool::new(true),
+            app_in_foreground: AtomicBool::new(true),
             shut_down: AtomicBool::new(false),
-            activity_lock: Mutex::new(()),
-            stores_open: watch::Sender::new(true),
+            activity: activity::Activity::new(),
             server_search_enabled: AtomicBool::new(true),
             read_room: parking_lot::Mutex::new(None),
             next_subscription: AtomicU32::new(1),
             foreground_paginations: AtomicU32::new(0),
             next_log_id: AtomicU64::new(1),
             next_registration_attempt: AtomicU64::new(1),
-            session_generation: AtomicU64::new(1),
             key_backup_downloads: tokio::sync::Semaphore::new(1),
             key_backup_download: parking_lot::Mutex::new(None),
-            session_attempt_generation: AtomicU64::new(1),
-            session_activation_lock: Mutex::new(()),
+            lifecycle: lifecycle::Lifecycle::new(),
             session_store_lock: Mutex::new(()),
             credential_writers: Mutex::new(HashMap::new()),
             next_credential_writer: AtomicU64::new(1),
+            next_login_attempt: AtomicU64::new(1),
             account_clients: Mutex::new(HashMap::new()),
             session_handlers: parking_lot::Mutex::new(Vec::new()),
             probed_pinned_rooms: parking_lot::Mutex::new(HashMap::new()),
@@ -377,12 +397,11 @@ impl Core {
             recent_state: parking_lot::Mutex::new(probed_state::RecentState::default()),
             media_health: parking_lot::Mutex::new(media_health::MediaHealth::default()),
             media_downloads: tokio::sync::Semaphore::new(media::MAX_MEDIA_DOWNLOADS),
+            tunnel: tunnel::Tunnel::new(),
             notification_routes: Mutex::new(HashMap::new()),
-            session_swap_lock: Mutex::new(()),
-            restore_lock: Mutex::new(()),
             accounts: Mutex::new(None),
             discovered_homeservers: Mutex::new(HashMap::new()),
-            session: RwLock::new(None),
+            session: lifecycle::SessionSlot::new(),
             pending_login: Mutex::new(None),
             pending_registration: Mutex::new(None),
             qr_flow: Mutex::new(None),
@@ -393,8 +412,10 @@ impl Core {
             room_subscriptions: Mutex::new(std::collections::BTreeSet::new()),
             warm_rooms: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             account_data_lock: Mutex::new(()),
+            accepted_rules: parking_lot::Mutex::new(HashMap::new()),
             inbox: Mutex::new(inbox::InboxCache::default()),
             inbox_flush: Mutex::new(()),
+            inbox_changed: tokio::sync::Notify::new(),
             account_data_types: Mutex::new(std::collections::BTreeSet::new()),
             pack_cache: Mutex::new(image_packs::PackCache::default()),
             calendars: Mutex::new(HashMap::new()),
@@ -408,8 +429,8 @@ impl Core {
             retiring_search: parking_lot::Mutex::new(HashMap::new()),
             search_crawl: Mutex::new(search::CrawlProgress::default()),
             server_search: Mutex::new(search::ServerSearch::default()),
-            call_sessions: Mutex::new(HashMap::new()),
-            call_cleanups: Mutex::new(HashMap::new()),
+            call_sessions: Mutex::default(),
+            call_memberships: calls::RoomMemberships::default(),
             desired_presence: parking_lot::Mutex::new(protocol::PresenceView::Online),
         });
         #[cfg(not(target_family = "wasm"))]
@@ -461,6 +482,12 @@ impl Core {
     #[must_use]
     pub fn notifications_enabled(&self) -> bool {
         self.notifications_enabled.load(Ordering::Relaxed)
+    }
+
+    /// The open app shows this alert as an in-app banner, so the OS must not post it too.
+    #[must_use]
+    pub fn shows_banner(&self, view: &protocol::NotificationView) -> bool {
+        self.in_app_banners.load(Ordering::Relaxed) && self.is_app_active() && view.wants_banner()
     }
 
     pub(crate) fn set_read_room(&self, room_id: Option<OwnedRoomId>) {
@@ -529,10 +556,6 @@ impl Core {
             .push(client.event_handler_drop_guard(handle));
     }
 
-    pub(crate) fn is_current(&self, generation: u64) -> bool {
-        self.session_generation.load(Ordering::SeqCst) == generation
-    }
-
     pub(crate) fn emit_if_current(&self, generation: u64, event: CoreEvent) {
         if self.is_current(generation) {
             self.emit(event);
@@ -543,180 +566,15 @@ impl Core {
         self.foreground_paginations.load(Ordering::Relaxed)
     }
 
-    pub fn set_app_active(&self, active: bool) -> u64 {
-        self.app_active.store(active, Ordering::Relaxed);
-        let revision = self.app_activity_revision.fetch_add(1, Ordering::SeqCst) + 1;
-        if active {
-            self.app_wake.notify_waiters();
-        }
-        revision
-    }
-
-    pub async fn update_app_active(self: &Arc<Self>, active: bool) {
-        self.set_app_active(active);
-        self.apply_activity(active, None).await;
-    }
-
-    pub(crate) async fn apply_app_activity(self: &Arc<Self>, active: bool) {
-        self.apply_activity(active, None).await;
-    }
-
-    pub async fn apply_app_activity_if_current(self: &Arc<Self>, active: bool, revision: u64) {
-        self.apply_activity(active, Some(revision)).await;
-    }
-
-    async fn apply_activity(self: &Arc<Self>, active: bool, revision: Option<u64>) {
-        if self.app_active.load(Ordering::Relaxed) != active {
-            return;
-        }
-        let _serial = self.activity_lock.lock().await;
-        if revision
-            .is_some_and(|revision| self.app_activity_revision.load(Ordering::SeqCst) != revision)
-        {
-            return;
-        }
-        if self.app_active.load(Ordering::Relaxed) != active {
-            return;
-        }
-        let should_sync = active || !self.call_sessions.lock().await.is_empty();
-        #[cfg(target_os = "ios")]
-        if should_sync && self.sync_suspended.load(Ordering::SeqCst) {
-            self.reopen_stores().await;
-        }
-        self.sync_suspended.store(!should_sync, Ordering::SeqCst);
-        let Ok(sync_service) = self.sync_service().await else {
-            return;
-        };
-        if should_sync {
-            // Starting a running service is a no-op, but from `Offline` it retries at once.
-            self.set_sync_presence(presence::state(self.desired_presence()))
-                .await;
-            if self.sync_allowed() {
-                sync_service.start().await;
-            }
-            self.retry_cached_decryption().await;
-        } else {
-            if let Ok(client) = self.client().await {
-                self.flush_inbox(&client).await;
-            }
-            // Background push fetches must not report the user online.
-            self.set_sync_presence(matrix_sdk::ruma::presence::PresenceState::Offline)
-                .await;
-            sync_service.stop().await;
-            #[cfg(target_os = "ios")]
-            self.close_stores().await;
-        }
-    }
-
-    pub async fn update_network_conditions(self: &Arc<Self>, available: bool, unmetered: bool) {
-        let was_available = self.network_available.swap(available, Ordering::SeqCst);
-        self.search_network.set_unmetered(unmetered);
-        self.refresh_search_peers();
-        if available && !was_available && !self.sync_paused() {
-            self.apply_activity(self.app_active.load(Ordering::Relaxed), None)
-                .await;
-        }
-    }
-
-    async fn set_sync_presence(&self, presence: matrix_sdk::ruma::presence::PresenceState) {
-        if let Ok(client) = self.client().await
-            && let Err(error) = client.set_presence(presence, None, false).await
-        {
-            tracing::debug!("sync presence not applied: {error}");
-        }
-    }
-
-    #[cfg(target_os = "ios")]
-    async fn store_clients(&self) -> Vec<matrix_sdk::Client> {
-        let mut clients: Vec<_> = self
-            .account_clients
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect();
-        clients.extend(self.client().await.ok());
-        if let Some(pending) = self.pending_login.lock().await.as_ref() {
-            clients.push(pending.client.clone());
-        }
-        clients.extend(
-            self.pending_registration
-                .lock()
-                .await
-                .as_ref()
-                .map(registration::PendingRegistration::client),
-        );
-        clients
-    }
-
-    #[cfg(target_os = "ios")]
-    async fn close_stores(&self) {
-        self.stores_open.send_replace(false);
-        for client in self.store_clients().await {
-            if let Err(error) = client.pause().await {
-                tracing::warn!("closing the stores before suspension failed: {error}");
-            }
-        }
-    }
-
-    #[cfg(target_os = "ios")]
-    async fn reopen_stores(&self) {
-        for client in self.store_clients().await {
-            if let Err(error) = client.resume().await {
-                tracing::warn!("reopening the stores after suspension failed: {error}");
-            }
-        }
-        self.stores_open.send_replace(true);
-    }
-
-    pub(crate) async fn wait_for_stores(&self) {
-        let _ = self.stores_open.subscribe().wait_for(|open| *open).await;
-    }
-
-    /// Only short local reads belong here; network work would delay iOS suspension. Never call it
-    /// from a sync event handler: suspension holds the lock while it waits for sync to stop.
-    pub(crate) async fn with_open_stores<T>(&self, read: impl AsyncFnOnce() -> T) -> T {
-        loop {
-            self.wait_for_stores().await;
-            let _activity = self.activity_lock.lock().await;
-            if *self.stores_open.borrow() {
-                return read().await;
-            }
-        }
-    }
-
-    /// Drops `work` once the stores close, so it must be started again after they reopen.
-    pub(crate) async fn until_stores_close<T>(
-        &self,
-        work: impl std::future::Future<Output = T>,
-    ) -> Option<T> {
-        let mut open = self.stores_open.subscribe();
-        tokio::select! {
-            biased;
-            _ = open.wait_for(|open| !*open) => None,
-            output = work => Some(output),
-        }
-    }
-
-    pub(crate) async fn wait_until_active(&self) {
-        loop {
-            let woken = self.app_wake.notified();
-            if self.app_active.load(Ordering::Relaxed) {
-                return;
-            }
-            woken.await;
-        }
-    }
-
-    pub fn update_app_in_foreground(&self, foreground: bool) {
-        self.search_foreground.store(foreground, Ordering::Relaxed);
-        self.refresh_search_peers();
+    pub async fn update_app_in_foreground(&self, foreground: bool) {
+        self.app_in_foreground.store(foreground, Ordering::Relaxed);
+        self.refresh_search_peers().await;
     }
 
     pub(crate) fn search_crawl_active(&self) -> bool {
         !self.search_sharing.discovering()
-            && self.app_active.load(Ordering::Relaxed)
-            && self.search_foreground.load(Ordering::Relaxed)
+            && self.activity.app_active()
+            && self.app_in_foreground.load(Ordering::Relaxed)
             && self.search_network.allows_crawl()
     }
 
@@ -806,21 +664,43 @@ impl Core {
     }
 
     pub(crate) async fn allocate_account(&self) -> Result<(String, String), RpcError> {
+        self.accounts().await?;
+        let _guard = self.session_store_lock.lock().await;
         let mut accounts = self.accounts.lock().await;
-        if accounts.is_none() {
-            drop(accounts);
-            self.accounts().await?;
-            accounts = self.accounts.lock().await;
-        }
-        let Some(accounts) = accounts.as_mut() else {
+        let Some(registry) = accounts.as_mut() else {
             return Err(self.failed("allocate_account", "account registry is not initialized"));
         };
-        Ok(accounts.allocate_account(&self.store_id))
+        let mut updated = registry.clone();
+        // An abandoned sign-in leaves its device's crypto store behind, which another device
+        // cannot open.
+        #[cfg_attr(
+            target_family = "wasm",
+            expect(unused_mut, reason = "IndexedDB stores are not probed")
+        )]
+        let mut allocated = updated.allocate_account(&self.store_id);
+        #[cfg(not(target_family = "wasm"))]
+        while tokio::fs::try_exists(&allocated.1)
+            .await
+            .or_failed(self, "allocate_account_store")?
+        {
+            allocated = updated.allocate_account(&self.store_id);
+        }
+        self.write_registry(&updated)
+            .await
+            .or_failed(self, "allocate_account_save")?;
+        *registry = updated;
+        Ok(allocated)
     }
 
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "awaited at some 200 call sites, which a sync signature would all touch"
+    )]
     pub(crate) async fn client(&self) -> Result<matrix_sdk::Client, RpcError> {
-        let guard = self.session.read().await;
-        Ok(guard.as_ref().ok_or(RpcError::NotLoggedIn)?.client.clone())
+        self.session
+            .current(|session| session.client.clone())
+            .ok_or_else(|| RpcCode::NotLoggedIn.into())
     }
 
     pub(crate) async fn account_data_types(&self) -> Result<Vec<String>, RpcError> {
@@ -830,7 +710,7 @@ impl Core {
             self.with_open_stores(async || account_data::stored_types(&client).await)
                 .await,
         );
-        match account_data::server_types(&client, presence::state(self.desired_presence())).await {
+        match account_data::server_types(&client, self.sync_presence().await).await {
             Ok(listed) => {
                 for event_type in listed {
                     if !types.contains(&event_type) {
@@ -922,6 +802,65 @@ impl Core {
         Ok(())
     }
 
+    /// Reads `event_types` in order from the server and hands the first one
+    /// found to `update`, which returns what to write or `None` to leave it.
+    /// The write goes to the first type. Returns the document as it stands.
+    /// A fetch failure or a document that is not a JSON object is an error
+    /// and nothing is written.
+    pub(crate) async fn update_account_data(
+        &self,
+        event_types: &[&str],
+        label: &str,
+        update: impl AsyncFnOnce(
+            Option<serde_json::Value>,
+        ) -> Result<Option<serde_json::Value>, RpcError>,
+    ) -> Result<Option<serde_json::Value>, RpcError> {
+        let _guard = self.account_data_lock.lock().await;
+        self.update_account_data_locked(event_types, label, update)
+            .await
+    }
+
+    /// For callers that already hold `account_data_lock`.
+    pub(crate) async fn update_account_data_locked(
+        &self,
+        event_types: &[&str],
+        label: &str,
+        update: impl AsyncFnOnce(
+            Option<serde_json::Value>,
+        ) -> Result<Option<serde_json::Value>, RpcError>,
+    ) -> Result<Option<serde_json::Value>, RpcError> {
+        let current = self.account_object(event_types, label).await?;
+        let Some(content) = update(current.clone()).await? else {
+            return Ok(current);
+        };
+        let target = event_types
+            .first()
+            .ok_or_else(|| self.failed(label, "no account data type to write"))?;
+        self.set_account_data(target, &content).await?;
+        Ok(Some(content))
+    }
+
+    /// `None` when the server holds none of `event_types`.
+    pub(crate) async fn account_object(
+        &self,
+        event_types: &[&str],
+        label: &str,
+    ) -> Result<Option<serde_json::Value>, RpcError> {
+        for event_type in event_types {
+            let Some(raw) = self
+                .global_account_data((*event_type).into(), label)
+                .await?
+            else {
+                continue;
+            };
+            return match raw.deserialize_as::<serde_json::Value>() {
+                Ok(content @ serde_json::Value::Object(_)) => Ok(Some(content)),
+                _ => Err(self.failed(label, format_args!("{event_type} is not a JSON object"))),
+            };
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn push_rules(&self) -> Result<Arc<push_rules::PushRules>, RpcError> {
         let client = self.client().await?;
         let mut cached = self.push_rules.lock().await;
@@ -942,22 +881,24 @@ impl Core {
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "awaited at some 200 call sites, which a sync signature would all touch"
+    )]
     pub(crate) async fn sync_service(
         &self,
     ) -> Result<Arc<matrix_sdk_ui::sync_service::SyncService>, RpcError> {
-        let guard = self.session.read().await;
-        Ok(guard
-            .as_ref()
-            .ok_or(RpcError::NotLoggedIn)?
-            .sync_service
-            .clone())
+        self.session
+            .current(|session| session.sync_service.clone())
+            .ok_or_else(|| RpcCode::NotLoggedIn.into())
     }
 
     pub(crate) async fn room(&self, room_id: &OwnedRoomId) -> Result<matrix_sdk::Room, RpcError> {
         self.client()
             .await?
             .get_room(room_id)
-            .ok_or(RpcError::UnknownRoom)
+            .ok_or_else(|| RpcCode::UnknownRoom.into())
     }
 }
 
@@ -970,7 +911,7 @@ mod tests {
     async fn to_device_work_runs_in_order_without_blocking_the_caller() {
         let (core, _events) = Core::new(
             "to-device-inbox",
-            Box::new(crate::store::MemorySessionStore::default()),
+            Box::new(store::MemorySessionStore::default()),
         );
         let (release, released) = tokio::sync::oneshot::channel::<()>();
         let (done, mut finished) = mpsc::unbounded_channel();
@@ -1001,18 +942,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionStore for FailingClearSessionStore {
-        async fn load(&self) -> Result<Option<Vec<u8>>, crate::store::StoreError> {
+        async fn load(&self) -> Result<Option<Vec<u8>>, store::StoreError> {
             Ok(None)
         }
 
-        async fn save(&self, _bytes: Vec<u8>) -> Result<(), crate::store::StoreError> {
+        async fn save(&self, _bytes: Vec<u8>) -> Result<(), store::StoreError> {
             Ok(())
         }
 
-        async fn clear(&self) -> Result<(), crate::store::StoreError> {
-            Err(crate::store::StoreError::Message(
-                "storage unavailable".to_owned(),
-            ))
+        async fn clear(&self) -> Result<(), store::StoreError> {
+            Err(store::StoreError::Message("storage unavailable".to_owned()))
         }
     }
 
@@ -1022,23 +961,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionStore for TestSessionStore {
-        async fn load(&self) -> Result<Option<Vec<u8>>, crate::store::StoreError> {
+        async fn load(&self) -> Result<Option<Vec<u8>>, store::StoreError> {
             Ok(self.bytes.lock().await.clone())
         }
 
-        async fn save(&self, bytes: Vec<u8>) -> Result<(), crate::store::StoreError> {
+        async fn save(&self, bytes: Vec<u8>) -> Result<(), store::StoreError> {
             *self.bytes.lock().await = Some(bytes);
             Ok(())
         }
 
-        async fn clear(&self) -> Result<(), crate::store::StoreError> {
+        async fn clear(&self) -> Result<(), store::StoreError> {
             *self.bytes.lock().await = None;
             Ok(())
         }
     }
 
-    #[test]
-    fn app_activity_gates_the_search_crawler() {
+    #[tokio::test]
+    async fn app_activity_gates_the_search_crawler() {
         let (core, _rx) = Core::new("test", Box::new(store::MemorySessionStore::default()));
         core.search_network.set_unmetered(true);
         assert!(core.search_crawl_active());
@@ -1048,17 +987,46 @@ mod tests {
 
         core.set_app_active(true);
         assert!(core.search_crawl_active());
-        core.update_app_in_foreground(false);
+        core.update_app_in_foreground(false).await;
         assert!(!core.search_crawl_active());
+    }
+
+    #[tokio::test]
+    async fn a_closing_page_takes_only_its_own_subscriptions() {
+        fn subscription() -> Subscription {
+            Subscription {
+                tasks: Vec::new(),
+                timeline: None,
+                overlay: None,
+                thread_root: None,
+                kind: SubscriptionKind::Other,
+            }
+        }
+
+        let (core, _rx) = Core::new("test", Box::new(store::MemorySessionStore::default()));
+        let old = core.allocate_subscription();
+        core.subscriptions.lock().await.insert(old, subscription());
+        let dropping = core.drop_open_subscriptions();
+
+        let new = core.allocate_subscription();
+        core.subscriptions.lock().await.insert(new, subscription());
+        dropping.await;
+
+        let open = core.subscriptions.lock().await;
+        assert!(!open.contains_key(&old));
+        assert!(open.contains_key(&new));
     }
 
     #[tokio::test]
     async fn commands_before_login_are_rejected() {
         let (core, _rx) = Core::new("test", Box::new(store::MemorySessionStore::default()));
         assert!(matches!(
-            core.run(crate::api::timeline::SubscribeRoomListParams::default())
+            core.run(api::timeline::SubscribeRoomListParams::default())
                 .await,
-            Err(RpcError::NotLoggedIn)
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
         ));
     }
 
@@ -1067,7 +1035,10 @@ mod tests {
         let (core, _rx) = Core::new("test", Box::new(FailingClearSessionStore));
         assert!(matches!(
             core.clear_persisted_session().await,
-            Err(RpcError::Failed { .. })
+            Err(RpcError {
+                code: RpcCode::Failed { .. },
+                ..
+            })
         ));
     }
 
@@ -1090,7 +1061,7 @@ mod tests {
 
         assert!(core.handle_session_change(
             &matrix_sdk::SessionChange::UnknownToken(
-                matrix_sdk::ruma::api::error::UnknownTokenErrorData::new(),
+                ruma::api::error::UnknownTokenErrorData::new(),
             ),
             1,
         ));
@@ -1111,7 +1082,7 @@ mod tests {
             .unwrap();
         changes
             .send(matrix_sdk::SessionChange::UnknownToken(
-                matrix_sdk::ruma::api::error::UnknownTokenErrorData::new(),
+                ruma::api::error::UnknownTokenErrorData::new(),
             ))
             .unwrap();
         core.watch_session_changes(receiver, 1);
@@ -1130,7 +1101,7 @@ mod tests {
         let (core, mut events) = Core::new("test", Box::new(store::MemorySessionStore::default()));
         let (changes, receiver) = tokio::sync::broadcast::channel(1);
 
-        let mut data = matrix_sdk::ruma::api::error::UnknownTokenErrorData::new();
+        let mut data = ruma::api::error::UnknownTokenErrorData::new();
         data.soft_logout = true;
         changes
             .send(matrix_sdk::SessionChange::UnknownToken(data))
@@ -1171,6 +1142,29 @@ mod tests {
             revoked.kind,
             ErrorKind::UnknownToken(data) if !data.soft_logout
         ));
+    }
+
+    #[tokio::test]
+    async fn an_allocated_account_skips_a_leftover_store_and_saves_the_counter() {
+        let base = tempfile::tempdir().unwrap();
+        let base_store = base.path().join("store");
+        let bytes = Arc::new(Mutex::new(None));
+        let (core, _events) = Core::new(
+            base_store.to_str().unwrap(),
+            Box::new(TestSessionStore {
+                bytes: bytes.clone(),
+            }),
+        );
+        let leftover = session::account_store_id(base_store.to_str().unwrap(), "a1");
+        std::fs::create_dir_all(std::path::Path::new(&leftover).join("store")).unwrap();
+
+        let (account_id, _) = core.allocate_account().await.unwrap();
+
+        assert_eq!(account_id, "a2");
+        assert!(std::path::Path::new(&leftover).join("store").exists());
+        let stored: serde_json::Value =
+            serde_json::from_slice(bytes.lock().await.as_deref().unwrap()).unwrap();
+        assert_eq!(stored["next_account_id"], 3);
     }
 
     #[tokio::test]
@@ -1248,11 +1242,14 @@ mod tests {
 
         assert!(matches!(core.restore().await, Ok(None)));
         assert!(matches!(
-            core.switch_account(crate::api::session::SwitchAccountParams {
+            core.switch_account(api::session::SwitchAccountParams {
                 account_id: "a1".to_owned()
             })
             .await,
-            Err(RpcError::NotLoggedIn)
+            Err(RpcError {
+                code: RpcCode::NotLoggedIn,
+                ..
+            })
         ));
     }
 
@@ -1335,7 +1332,7 @@ mod tests {
         let tokens = accounts.accounts[0].session.credentials.tokens();
         assert_eq!(tokens.access_token, "embedded");
 
-        let logins = crate::credentials::LoginTokens::new(base.path());
+        let logins = credentials::LoginTokens::new(base.path());
         assert_eq!(
             logins.read("a1", "DEVICEID").unwrap().unwrap().access_token,
             "embedded"
@@ -1347,7 +1344,7 @@ mod tests {
     #[tokio::test]
     async fn a_login_file_wins_over_tokens_a_registry_still_holds() {
         let base = tempfile::tempdir().unwrap();
-        crate::credentials::LoginTokens::new(base.path())
+        credentials::LoginTokens::new(base.path())
             .save(
                 "a1",
                 "DEVICEID",
@@ -1376,20 +1373,26 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod sdk_timeline_tests;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod sdk_spoiler_tests;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod sdk_notification_tests;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod sdk_helpers_tests;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod live_member_tests;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
+#[cfg(not(target_family = "wasm"))]
 mod sdk_verification_tests;

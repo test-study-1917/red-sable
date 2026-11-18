@@ -13,7 +13,7 @@ import YoutubeLogoIcon from 'phosphor-svelte/lib/YoutubeLogoIcon';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 import { mediaPreviewSettings } from '../media-previews.svelte.js';
 import { preferences } from '../preferences.svelte';
-import type { MediaAutoLoad } from '../preferences.svelte';
+import type { MediaAutoLoad } from '../definitions';
 import type { SettingsCategory } from '../registry';
 
 export const mediaCategory: SettingsCategory = {
@@ -49,6 +49,7 @@ export const mediaCategory: SettingsCategory = {
       section: 'playback',
       icon: FilmStripIcon,
       name: 'settings.autoplayGifs',
+      description: 'settings.autoplayGifsHint',
       terms: ['settings.terms.autoplayGifs'],
       type: 'boolean',
     },

@@ -11,21 +11,25 @@
     UrlPreviewView,
   } from '#src/generated/protocol';
 
+  import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
-  import MediaContent from '#lib/ui/MediaContent.svelte';
   import MediaImage from '#lib/ui/MediaImage.svelte';
+  import VideoPlayer from '#lib/ui/VideoPlayer.svelte';
   import { formatMessageTimestamp } from '#lib/ui/date-time.js';
   import Button from '#lib/ui/primitives/Button.svelte';
 
   import { GIF_PLAYBACK } from './link-preview.js';
+  import { scrapedPostVideo } from './link-preview-cache';
 
   interface Props {
     url: string;
     preview: UrlPreviewView;
     mediaHidden: boolean;
+    tunnel: boolean;
   }
 
-  let { url, preview, mediaHidden }: Props = $props();
+  let { url, preview, mediaHidden, tunnel }: Props = $props();
+  const core = useCoreClient();
   let post = $derived(preview.post);
   const revealed = new SvelteSet<'post' | 'quote'>();
 
@@ -52,11 +56,11 @@
   </span>
 {/snippet}
 
-{#snippet media(items: PostMediaView[])}
+{#snippet media(items: PostMediaView[], key: 'post' | 'quote')}
   {#if items.length > 0 && !mediaHidden}
     <div class={['post-media', { grid: items.length > 1 }]}>
       {#each items as item, index (index)}
-        {#if item.kind === 'image'}
+        {#if item.kind === 'image' && item.source}
           <MediaImage
             source={item.source}
             alt={item.alt ?? ''}
@@ -67,14 +71,17 @@
             mime={item.mime}
             href={url}
           />
-        {:else}
-          <MediaContent
+        {:else if item.kind !== 'image'}
+          {@const video = items.slice(0, index).filter((media) => media.kind !== 'image').length}
+          <VideoPlayer
             source={item.source}
+            resolveSource={() =>
+              scrapedPostVideo(core.rpc.messages, url, key === 'quote', video, tunnel)}
             mime={item.mime ?? 'video/mp4'}
             filename={url}
-            kind="video"
             width={item.width}
             height={item.height}
+            thumbnail={item.poster}
             playback={item.kind === 'gif' ? GIF_PLAYBACK : null}
           />
         {/if}
@@ -92,7 +99,7 @@
     </Button>
   {:else}
     {#if note.text}<p class="post-text">{note.text}</p>{/if}
-    {@render media(note.media)}
+    {@render media(note.media, key)}
   {/if}
 {/snippet}
 
@@ -157,7 +164,7 @@
     flex-direction: column;
     gap: var(--space-200);
     margin-top: var(--space-100);
-    max-width: var(--timeline-media-max);
+    max-width: min(var(--timeline-media-max), 100%);
     overflow: hidden;
     padding: var(--space-200) var(--space-250);
   }

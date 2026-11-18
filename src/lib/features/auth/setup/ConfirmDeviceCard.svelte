@@ -33,6 +33,8 @@
   let understood = $state(false);
   let prompted = $state(false);
   let completing = false;
+  let card = $state<HTMLElement>();
+  let shownView: typeof view = 'choices';
 
   const status = $derived(core.encryption);
   const verified = $derived(status?.verification === 'verified');
@@ -63,6 +65,15 @@
       }
     }
     prompted = true;
+  });
+
+  $effect(() => {
+    if (view === shownView) return;
+    shownView = view;
+    if (card?.contains(document.activeElement)) return;
+    const heading = card?.querySelector<HTMLElement>('#confirm-device-title');
+    heading?.setAttribute('tabindex', '-1');
+    heading?.focus({ preventScroll: true });
   });
 
   function leaveView(): void {
@@ -99,12 +110,12 @@
 
 {#snippet backButton()}
   <Button class="confirm-device-back" variant="ghost" size="small" onclick={leaveView}>
-    <ArrowLeftIcon aria-hidden="true" />
+    <ArrowLeftIcon class="mirror-rtl" aria-hidden="true" />
     {i18n.t('common.back')}
   </Button>
 {/snippet}
 
-<div class="confirm-device-card auth-card-surface">
+<div class="confirm-device-card auth-card-surface" bind:this={card}>
   {#if !prompted}
     <AuthField labelId="confirm-device-title" label={i18n.t('setup.confirmTitle')}>
       <AuthInfoBox><Spinner small />{i18n.t('setup.checking')}</AuthInfoBox>
@@ -244,7 +255,11 @@
         {i18n.t(resetOnly ? 'setup.confirmDescriptionResetOnly' : 'setup.confirmDescription')}
       </AuthInfoBox>
     </AuthField>
-    <AuthStatusSlot message={verification.error} />
+    <AuthStatusSlot
+      loading={verification.requesting}
+      loadingMessage={i18n.t('settings.waiting')}
+      message={verification.error}
+    />
     <div class="confirm-device-actions">
       {#if canUseAnotherDevice}
         <Button

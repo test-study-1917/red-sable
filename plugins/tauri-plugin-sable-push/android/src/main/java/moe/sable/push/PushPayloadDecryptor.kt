@@ -24,16 +24,20 @@ internal object PushPayloadDecryptor {
 
     private var loaded: Boolean? = null
 
-    private external fun nativePreviewBody(body: String, formatted: String): String?
+    private external fun nativePreviewBody(content: String): String?
+
+    private val PROFILE_KEYS = listOf("com.beeper.per_message_profile", "m.per_message_profile")
 
     fun previewBody(context: Context, content: JSONObject?): String? {
         val body = (content?.opt("body") as? String)?.takeIf { it.isNotEmpty() } ?: return null
         val formatted = (content.opt("formatted_body") as? String)?.takeIf { it.isNotBlank() }
-        if (content.optString("format") != "org.matrix.custom.html" || formatted == null) return body
+        val rich = content.optString("format") == "org.matrix.custom.html" && formatted != null
+        if (!rich && PROFILE_KEYS.none(content::has)) return body
         if (!available(context)) return null
-        return runCatching { nativePreviewBody(body, formatted) }
+        return runCatching { nativePreviewBody(content.toString()) }
             .onFailure { Log.i(TAG, "Push preview unavailable: ${it.message}") }
             .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
     }
 
     private external fun nativeMaintainPush(storeDir: String, operation: String): String?
@@ -168,7 +172,7 @@ internal object PushPayloadDecryptor {
         transactionId: String,
         eventId: String,
         privateReceipt: Boolean,
-    ): Boolean
+    ): String?
 
     private external fun nativeMarkRead(
         storeDir: String,
@@ -179,13 +183,16 @@ internal object PushPayloadDecryptor {
         privateReceipt: Boolean,
     ): Boolean
 
-    fun reply(context: Context, action: ConversationAction, deviceId: String, privateReceipt: Boolean): Boolean =
-        available(context) && runCatching {
+    /** The body that was sent, without a profile shorthand, or null when nothing was sent. */
+    fun reply(context: Context, action: ConversationAction, deviceId: String, privateReceipt: Boolean): String? {
+        if (!available(context)) return null
+        return runCatching {
             nativeReply(
                 context.dataDir.absolutePath, action.userId, deviceId, action.roomId,
                 action.text.orEmpty(), action.id, action.eventId, privateReceipt,
             )
-        }.onFailure { Log.i(TAG, "Reply not sent: ${it.message}") }.getOrDefault(false)
+        }.onFailure { Log.i(TAG, "Reply not sent: ${it.message}") }.getOrNull()
+    }
 
     fun markRead(context: Context, action: ConversationAction, deviceId: String, privateReceipt: Boolean): Boolean =
         available(context) && runCatching {

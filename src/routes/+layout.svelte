@@ -13,6 +13,8 @@
   import { createCoreClient } from '#lib/core/client.svelte.js';
   import { provideCoreClient } from '#lib/core/context.js';
   import TooltipProvider from '#lib/ui/primitives/TooltipProvider.svelte';
+  import ExternalLinkConfirm from '#lib/ui/ExternalLinkConfirm.svelte';
+  import ImageCropHost from '#lib/ui/image-crop/ImageCropHost.svelte';
   import TitleBar from '#lib/ui/TitleBar.svelte';
   import SessionRestoreError from '#lib/ui/SessionRestoreError.svelte';
   import ModelLoadError from '#lib/ui/ModelLoadError.svelte';
@@ -20,8 +22,10 @@
   import AccountLocked from '#lib/features/sidebar/AccountLocked.svelte';
   import favicon from '#lib/assets/favicon.png';
   import { appName, faviconUrl } from '#lib/deployment/brand.js';
+  import { setDeploymentThemeKind } from '#lib/deployment/theme.js';
   import { trackKeyboardInset } from '#lib/platform/keyboard.js';
   import { blockEdgeNavigation } from '#lib/platform/edge-navigation.js';
+  import { lockNativeZoom } from '#lib/platform/viewport-zoom.js';
   import { systemDark } from '#lib/platform/system-theme.js';
   import { hostsServiceWorker, registerServiceWorker } from '#lib/platform/service-worker.js';
   import { notificationPermalink } from '#lib/features/notifications/notification-link.js';
@@ -47,7 +51,6 @@
     resolveTheme,
   } from '#lib/settings/theme.js';
   import { shouldReduceMotion } from '#lib/ui/motion.js';
-  import { ALERT_MODULES, provideAlertProviders } from '#lib/features/sidebar/alerts.js';
   import ServerLogin from './ServerLogin.svelte';
   import {
     bindServerNotificationIdentity,
@@ -68,8 +71,6 @@
   let serverAuthenticated = $state(!serverMode);
   let mounted = $state(false);
   provideCoreClient(core);
-  const alertProviders = ALERT_MODULES.map((component) => component.priorityProvider());
-  provideAlertProviders(alertProviders);
   let titlebar = $derived(titleBarKind(preferences.useCustomTitleBar));
 
   onMount(watchThemeFiles);
@@ -101,6 +102,7 @@
       const current = boundServerIdentity();
       if (current) identityChannel.postMessage(current);
     }
+    lockNativeZoom();
     const stopTrackingKeyboard = trackKeyboardInset();
     const stopGuardingClicks = guardTouchClicks();
     const stopBlockingEdgeNavigation = blockEdgeNavigation();
@@ -222,11 +224,14 @@
     const preview = themePreview.current;
     if (preview) {
       applyTheme(preview.kind, systemDark.current);
+      setDeploymentThemeKind(preview.kind);
       applyCustomTheme(preview.css);
       return;
     }
+    const kind = resolveTheme(preferences.theme, systemDark.current);
     applyTheme(preferences.theme, systemDark.current);
-    applyCustomTheme(activeCustomThemeCss(resolveTheme(preferences.theme, systemDark.current)));
+    setDeploymentThemeKind(kind);
+    applyCustomTheme(activeCustomThemeCss(kind));
   });
 
   $effect(() => {
@@ -282,5 +287,7 @@
     {:else}
       {@render children()}
     {/if}
+    <ImageCropHost />
+    <ExternalLinkConfirm />
   </TooltipProvider>
 </IconContext>

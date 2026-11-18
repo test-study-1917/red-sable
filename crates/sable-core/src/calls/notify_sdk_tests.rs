@@ -8,6 +8,7 @@ use wiremock::{
     matchers::{body_json, method, path, path_regex},
 };
 
+use crate::test_support::sticky_update;
 use crate::{Core, api::calls::DeclineParams, session::Session, store::MemorySessionStore};
 
 #[tokio::test]
@@ -80,28 +81,6 @@ async fn core_declines_legacy_notifications_but_rejects_invalid_and_own_events()
     );
 }
 
-async fn sticky_update(room: &matrix_sdk::Room, events: Vec<serde_json::Value>) {
-    use ruma::{api::client::sync::sync_events::v5, serde::Raw};
-    let mut response = v5::Response::new("invites".to_owned());
-    let mut sticky = v5::response::StickyEventsRoom::default();
-    sticky.events = events
-        .iter()
-        .map(|event| Raw::new(event).unwrap().cast_unchecked())
-        .collect();
-    response
-        .extensions
-        .sticky_events
-        .rooms
-        .insert(room.room_id().to_owned(), sticky);
-    room.client()
-        .process_sliding_sync_test_helper(
-            &response,
-            &matrix_sdk_base::RequestedRequiredStates::default(),
-        )
-        .await
-        .unwrap();
-}
-
 async fn incoming_event(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::protocol::CoreEvent>,
     stage: &str,
@@ -143,11 +122,7 @@ async fn deployed_non_sticky_invites_reach_the_call_handler_and_push_validation(
         )
         .await;
     let (core, mut events) = Core::new("fallback", Box::new(MemorySessionStore::default()));
-    core.watch_incoming_calls(
-        &client,
-        core.session_generation
-            .load(std::sync::atomic::Ordering::SeqCst),
-    );
+    core.watch_incoming_calls(&client, core.lifecycle.current());
     let now = crate::now_ms();
     let event = json!({
         "type":"org.matrix.msc4075.rtc.notification", "event_id":"$fallback",
@@ -241,11 +216,7 @@ async fn sticky_only_invites_are_cancelled_by_withdrawals_and_cross_device_actio
         )
         .await;
     let (core, mut events) = Core::new("invites", Box::new(MemorySessionStore::default()));
-    core.watch_incoming_calls(
-        &client,
-        core.session_generation
-            .load(std::sync::atomic::Ordering::SeqCst),
-    );
+    core.watch_incoming_calls(&client, core.lifecycle.current());
     let now = crate::now_ms();
     for (index, action) in ["withdraw", "join", "leave", "decline", "close"]
         .into_iter()

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Core;
 use crate::ResultExt;
-use crate::protocol::{RpcError, SidebarItemView};
+use crate::protocol::{RpcCode, RpcError, SidebarItemView};
 
 /// The sidebar written over whatever else the account data already carries.
 #[derive(Serialize)]
@@ -183,6 +183,7 @@ impl Core {
         &self,
         items: &[SidebarItemView],
     ) -> Result<(), RpcError> {
+        let _guard = self.account_data_lock.lock().await;
         set_sidebar(&self.client().await?, items)
             .await
             .or_failed(self, "set_space_sidebar")
@@ -195,7 +196,7 @@ impl Core {
         url: Option<&str>,
     ) -> Result<(), RpcError> {
         if url.is_some_and(|url| !url.starts_with("mxc://")) {
-            return Err(RpcError::InvalidMedia);
+            return Err(RpcCode::InvalidMedia.into());
         }
         let room = self.room(room_id).await?;
         let content = url.map_or_else(
@@ -451,7 +452,7 @@ mod server_tests {
 
         assert_eq!(
             sidebar(&client).await.expect("layout"),
-            [] as [sable_model::sidebar::SidebarItemView; 0]
+            Vec::<SidebarItemView>::new()
         );
     }
 

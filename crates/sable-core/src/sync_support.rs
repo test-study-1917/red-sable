@@ -7,19 +7,12 @@ use matrix_sdk::{Client, config::RequestConfig};
 use matrix_sdk_ui::sync_service::State;
 use matrix_sdk_ui::sync_service::SyncService;
 
-use crate::{Core, ResultExt, protocol::RpcError};
+use crate::{Core, ResultExt, RpcError, protocol::RpcCode};
 
 #[cfg(target_family = "wasm")]
 pub(crate) const SYNC_STALL: Duration = Duration::from_secs(90);
 
 impl Core {
-    pub(crate) async fn resume_sync(&self, sync_service: &SyncService) {
-        let _serial = self.activity_lock.lock().await;
-        if self.sync_allowed() {
-            sync_service.start().await;
-        }
-    }
-
     /// The wasm HTTP client ignores request timeouts, so a long-poll on a connection that died
     /// during sleep never returns.
     #[cfg(any(target_family = "wasm", test))]
@@ -42,8 +35,10 @@ impl Core {
                     {
                         continue;
                     }
-                    let _serial = core.activity_lock.lock().await;
-                    if matches!(sync_service.state().get(), State::Running) && core.sync_allowed() {
+                    let transition = core.activity.transition().await;
+                    if matches!(sync_service.state().get(), State::Running)
+                        && transition.sync_allowed()
+                    {
                         tracing::warn!("no sync response for {stall:?}, restarting sync");
                         sync_service.stop().await;
                         sync_service.start().await;
@@ -67,16 +62,14 @@ impl Core {
         self.track_session_task(
             spawn(async move {
                 while changes.next().await.is_some() {
-                    let _serial = core.activity_lock.lock().await;
+                    let transition = core.activity.transition().await;
                     if let Some(event_cache) = client.event_cache()
                         && let Err(error) = event_cache.clear_all_rooms().await
                     {
                         tracing::warn!(%error, "clearing the event cache after an ignore change");
                     }
                     sync_service.expire_sessions().await;
-                    if core.sync_allowed() {
-                        sync_service.start().await;
-                    }
+                    transition.start_sync(&sync_service).await;
                 }
             })
             .abort_on_drop(),
@@ -100,7 +93,7 @@ impl Core {
         let versions = client
             .fetch_server_versions(Some(
                 RequestConfig::new()
-                    .timeout(std::time::Duration::from_secs(15))
+                    .timeout(Duration::from_secs(15))
                     .disable_retry(),
             ))
             .await
@@ -113,7 +106,7 @@ impl Core {
         {
             Ok(())
         } else {
-            Err(RpcError::SlidingSyncUnsupported)
+            Err(RpcCode::SlidingSyncUnsupported.into())
         }
     }
 }
@@ -172,7 +165,10 @@ mod tests {
             if supported != Some(true) {
                 assert!(matches!(
                     outcome,
-                    Err(crate::protocol::RpcError::SlidingSyncUnsupported)
+                    Err(crate::protocol::RpcError {
+                        code: crate::protocol::RpcCode::SlidingSyncUnsupported,
+                        ..
+                    })
                 ));
             }
         }
@@ -192,7 +188,10 @@ mod tests {
         );
         assert!(matches!(
             core.require_sliding_sync(&client).await,
-            Err(crate::protocol::RpcError::Unavailable)
+            Err(crate::protocol::RpcError {
+                code: crate::protocol::RpcCode::Unavailable,
+                ..
+            })
         ));
     }
 

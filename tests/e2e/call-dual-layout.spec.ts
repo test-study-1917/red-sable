@@ -6,7 +6,9 @@ const layout = (page: Page) => page.locator('.room-call-layout');
 async function open(page: Page, width = 1440, height = 900) {
   await page.setViewportSize({ width, height });
   await page.goto(entry);
-  await expect(page.getByRole('button', { name: 'Hang up', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Hang up', exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
   await expect(page.locator('.ProseMirror')).toBeVisible();
 }
 async function turn(page: Page) {
@@ -112,12 +114,14 @@ test('actual side panels, threshold hysteresis and temporary fallback preserve p
 }) => {
   await open(page, 1150, 768);
   await expect(layout(page)).toHaveAttribute('data-call-layout', 'side-by-side');
-  await page.getByRole('button', { name: 'Members', exact: true }).click();
+  const members = page.getByRole('button', { name: 'Members', exact: true });
+  await members.click();
   const memberHandle = page.getByRole('slider', { name: 'Members', exact: true });
   await memberHandle.focus();
   for (let i = 0; i < 3; i++) await page.keyboard.press('Shift+ArrowLeft');
   await expect(layout(page)).toHaveAttribute('data-call-layout', 'stacked');
-  await page.getByRole('button', { name: 'Close members', exact: true }).click();
+  await expect(members).toHaveAttribute('aria-pressed', 'true');
+  await members.click();
   await expect(layout(page)).toHaveAttribute('data-call-layout', 'side-by-side');
   for (const [width, expected] of [
     [775, 'stacked'],

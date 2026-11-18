@@ -10,7 +10,7 @@ import {
   CALL_VIDEO_BITRATES,
   CALL_VIDEO_CODECS,
   CALL_VIDEO_RESOLUTIONS,
-} from '../preferences.svelte';
+} from '../definitions';
 import type { SettingOption, SettingsCategory } from '../registry';
 
 const callResolutionOptions: SettingOption[] = CALL_VIDEO_RESOLUTIONS.map((value) =>
@@ -182,6 +182,16 @@ export const callsCategory: SettingsCategory = {
       icon: MicrophoneIcon,
       name: 'settings.autoGainControl',
       type: 'boolean',
+    },
+    {
+      key: 'microphoneVolume',
+      section: 'microphone',
+      icon: MicrophoneIcon,
+      name: 'settings.microphoneVolume',
+      description: 'settings.microphoneVolumeHint',
+      type: 'range',
+      step: 0.05,
+      supported: () => !hasNativeCalls(),
     },
     {
       key: 'incomingCallSound',

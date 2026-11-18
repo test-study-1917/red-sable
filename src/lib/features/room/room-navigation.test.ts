@@ -15,6 +15,7 @@ vi.mock('$app/paths', () => ({
 }));
 vi.mock('#lib/rooms/room-list.svelte.js', () => ({
   roomPathParamFromId: (roomId: string) => `param:${roomId}`,
+  roomPathParam: (room: RoomListItemView) => `param:${room.room_id}`,
   findRoomByPathId: (rooms: readonly RoomListItemView[], pathId: string | undefined) =>
     rooms.find((room) => room.room_id === pathId),
 }));
@@ -22,6 +23,7 @@ vi.mock('#lib/rooms/room-list.svelte.js', () => ({
 import {
   backToRoomList,
   contextSearchPath,
+  createRoomPath,
   goToPage,
   leaveRoomView,
   scopedSearchPath,
@@ -164,6 +166,44 @@ test.each(['/space/space/lobby', '/rooms'])('on a phone, opening %s from a room 
   expect(goto).toHaveBeenLastCalledWith(href, { replace: false, state: {}, persistState: true });
 });
 
+test('on a phone, the first tab pushes over the list and the next ones replace it', () => {
+  visit('/space/space');
+
+  goToPage('/inbox');
+  expect(goto).toHaveBeenLastCalledWith('/inbox', {
+    replace: false,
+    state: { tabBack: true },
+    persistState: true,
+  });
+
+  visit('/inbox');
+  goToPage('/profile');
+  expect(goto).toHaveBeenLastCalledWith('/profile', {
+    replace: true,
+    state: { tabBack: true },
+    persistState: true,
+  });
+});
+
+test('on a phone, the messages tab pops back to the list the tab was opened over', () => {
+  visit('/inbox');
+  page.state.tabBack = true;
+
+  goToPage('/rooms');
+
+  expect(mocks.back).toHaveBeenCalledOnce();
+  expect(goto).not.toHaveBeenCalled();
+});
+
+test.each(['/inbox', '/space/space'])('on a phone, opening a list from %s replaces it', (from) => {
+  visit(from);
+
+  goToPage('/rooms');
+
+  expect(mocks.back).not.toHaveBeenCalled();
+  expect(goto).toHaveBeenLastCalledWith('/rooms', { replace: true, state: {}, persistState: true });
+});
+
 test.each([
   ['/rooms', {}, '/rooms/room'],
   ['/direct', {}, '/direct/room'],
@@ -268,4 +308,12 @@ test('the back arrow reuses the list entry', () => {
 
   expect(mocks.back).toHaveBeenCalledOnce();
   expect(goto).not.toHaveBeenCalled();
+});
+
+test('a room is created inside the open space only where you may add its children', () => {
+  const space = { room_id: '!space:example.org' } as RoomListItemView;
+
+  expect(createRoomPath([space], space, true)).toBe('/space/param:!space:example.org/create-room');
+  expect(createRoomPath([space], space, false)).toBe('create-room');
+  expect(createRoomPath([space], null, true)).toBe('create-room');
 });

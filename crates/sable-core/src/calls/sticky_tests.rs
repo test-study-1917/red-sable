@@ -36,7 +36,7 @@ fn plaintext_membership_is_rejected_in_encrypted_rooms() {
     assert!(event.apply(&mut memberships, true, 100));
     assert_eq!(
         memberships.members(100),
-        [] as [crate::calls::membership::CallMember; 0]
+        Vec::<crate::calls::membership::CallMember>::new()
     );
     let mut memberships = crate::calls::membership::StickyMemberships::default();
     assert!(event.apply(&mut memberships, false, 100));
@@ -318,7 +318,7 @@ async fn test_sticky_sync_applies_redactions_in_encrypted_rooms() {
     }
     assert_eq!(
         memberships.members(200),
-        [] as [crate::calls::membership::CallMember; 0]
+        Vec::<crate::calls::membership::CallMember>::new()
     );
     assert!(!memberships.apply_authenticated(&member, ruma::device_id!("DEVICE"), 200));
 }
@@ -542,9 +542,9 @@ async fn test_delayed_send_refreshes_expired_credentials_and_preserves_sticky_qu
 async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
     let (_server, room) = room().await;
     let now = crate::now_ms();
-    let mut response = ruma::api::client::sync::sync_events::v5::Response::new("1".to_owned());
+    let mut response = ruma::api::client::sync::sync_events::msc4186::Response::new("1".to_owned());
     let mut sticky_room =
-        ruma::api::client::sync::sync_events::v5::response::StickyEventsRoom::default();
+        ruma::api::client::sync::sync_events::msc4186::response::StickyEventsRoom::default();
     sticky_room.events.push(
         ruma::serde::Raw::new(&json!({
             "type": "m.rtc.member", "sender": "@other:example.org", "event_id": "$member",

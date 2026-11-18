@@ -465,6 +465,7 @@ test('sends multiple staged files as one gallery', async () => {
     formattedCaption: null,
     mentions: { user_ids: [], room: false },
     spoilers: [false, false],
+    gifs: [undefined, undefined],
   });
   expect(attachment).not.toHaveBeenCalled();
 });
@@ -675,7 +676,7 @@ test.each([true, false])(
     const message = vi.fn(async () => {});
     const body = 'hey @_one:example.org :wave:';
     const html =
-      'hey <a href="https://matrix.to/#/@one:example.org">@_one:example.org</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">';
+      'hey <a href="matrix:u/one:example.org">@_one:example.org</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">';
     setup({
       roomId: '!room:example.org',
       onSend: message,
@@ -800,7 +801,7 @@ test.each([true, false])(
     expect(attachment).toHaveBeenCalledWith('!room:example.org', file, {
       caption: 'hey Member One :wave:',
       formattedCaption:
-        'hey <a href="https://matrix.to/#/@one:example.org">Member One</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">',
+        'hey <a href="matrix:u/one:example.org">Member One</a> <img data-mx-emoticon="" src="mxc://example.org/wave" alt="wave" title="wave" height="32">',
       mentions: { user_ids: ['@one:example.org'], room: false },
       spoiler: false,
     });
@@ -1010,6 +1011,38 @@ test('finishing an edit keeps focus in the editor', async () => {
   expect(document.activeElement).toBe(editor);
 });
 
+test('on a phone, sending a reply keeps the keyboard up', async () => {
+  vi.stubGlobal('matchMedia', () => ({
+    matches: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  let setContext: ((next: ComposerContext | null) => void) | undefined;
+  draftText('thanks');
+  setup({
+    roomId: '!room:example.org',
+    context: { kind: 'reply', eventId: '$one:example.org', sender: 'Alice', body: 'Hello' },
+    registerContext: (set) => {
+      setContext = set;
+    },
+    onSend: () => {
+      setContext?.(null);
+      return Promise.resolve();
+    },
+  });
+  await flushed();
+  const editor = document.querySelector('[role="combobox"]');
+  if (!(editor instanceof HTMLElement)) throw new Error('editor not found');
+  editor.focus();
+
+  submit();
+  await flushed();
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+
+  expect(document.activeElement).toBe(editor);
+  vi.unstubAllGlobals();
+});
+
 test('staging files returns focus to the editor', async () => {
   setup({ roomId: '!room:example.org' });
   await flushed();
@@ -1103,6 +1136,7 @@ test.each([
 async function withDeniedMicrophone(run: () => Promise<void>): Promise<void> {
   vi.stubGlobal('AudioContext', vi.fn());
   vi.stubGlobal('Worker', vi.fn());
+  vi.stubGlobal('MediaRecorder', { isTypeSupported: () => true });
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
     value: { getUserMedia: () => Promise.reject(new DOMException('', 'NotAllowedError')) },
@@ -1997,13 +2031,13 @@ test('an edited scheduled message loads its text and saves through its own time'
     context: {
       kind: 'schedule',
       eventId: 'delay',
-      body: 'see you tomorow',
+      body: 'see you tomorrow',
       scheduled: { source: 'server', dueTs },
     },
   });
   await flushed();
 
-  expect(editorText()).toBe('see you tomorow');
+  expect(editorText()).toBe('see you tomorrow');
 
   submit();
   await flushed();
@@ -2017,7 +2051,7 @@ test('an edited scheduled message loads its text and saves through its own time'
   if (!scheduleForm) throw new Error('schedule form not found');
   await fireEvent.submit(scheduleForm);
 
-  expect(schedule).toHaveBeenCalledWith('!room:example.org', 'see you tomorow', null, dueTs);
+  expect(schedule).toHaveBeenCalledWith('!room:example.org', 'see you tomorrow', null, dueTs);
 });
 
 test('a press beside the text focuses the editor, and one on a button does not', async () => {
@@ -2421,6 +2455,29 @@ test('choosing a bot command suggestion opens its argument form', async () => {
   expect(screen.getByLabelText('days')).toBeTruthy();
 });
 
+test('an open bot command form and its values survive switching rooms', async () => {
+  draftText('/wa');
+  let switchRoom: ((roomId: string) => void) | undefined;
+  setup({
+    roomId: '!room:example.org',
+    onSendBotCommand: async () => {},
+    registerRoom: (set) => {
+      switchRoom = set;
+    },
+  });
+  await press(await screen.findByRole('option', { name: /\/warn/ }));
+  await fireEvent.input(screen.getByLabelText('days'), { target: { value: '7' } });
+
+  switchRoom?.('!other:example.org');
+  await flushed();
+  expect(screen.queryByRole('form', { name: 'Arguments for /warn' })).toBeNull();
+  switchRoom?.('!room:example.org');
+  await flushed();
+
+  expect(screen.getByRole('form', { name: 'Arguments for /warn' })).toBeTruthy();
+  expect(screen.getByLabelText('days')).toHaveProperty('value', '7');
+});
+
 test.each(['command', 'argument'])('formatting a bot %s keeps its invocation', async (part) => {
   const onSendBotCommand = vi.fn(async () => {});
   const draft = composerSchema.node('doc', null, [
@@ -2527,11 +2584,14 @@ test('a failed bot command does not restore into another room', async () => {
   setRoom?.('!other:example.org');
   await flushed();
   rejectSend?.(new Error('offline'));
+  await flushed();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-  await vi.waitFor(() => {
-    expect(screen.getByRole('alert')).toBeInTheDocument();
-  });
+  expect(screen.queryByRole('alert')).toBeNull();
   expect(editorText()).toBe('');
+  setRoom?.('!room:example.org');
+  await flushed();
+  expect(editorText()).toBe('/register payload');
 });
 
 test('a bot command lookup does not clear a newer draft', async () => {
@@ -2841,4 +2901,51 @@ test('without bot command support an unknown command still goes to the slash han
       room: false,
     });
   });
+});
+
+test('a send that fails after leaving the room returns its text to that room, not the open one', async () => {
+  let failSend: ((error: Error) => void) | undefined;
+  const send = vi.fn(
+    () =>
+      new Promise<void>((_, reject) => {
+        failSend = reject;
+      })
+  );
+  let switchRoom: ((roomId: string) => void) | undefined;
+  const doc = composerSchema.node('doc', null, [
+    composerSchema.nodes.paragraph.create(null, [composerSchema.text('meant for the first room')]),
+  ]);
+  writeDraft('!first:example.org', { doc: doc.toJSON(), staged: [], nextStagedId: 0 });
+  setup({
+    roomId: '!first:example.org',
+    onSend: send,
+    registerRoom: (set) => {
+      switchRoom = set;
+    },
+  });
+  await flushed();
+
+  submit();
+  await vi.waitFor(() => {
+    expect(send).toHaveBeenCalled();
+  });
+  switchRoom?.('!second:example.org');
+  await flushed();
+  expect(editorText()).toBe('');
+  failSend?.(new Error('network'));
+  await flushed();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await flushed();
+
+  expect(send).toHaveBeenCalledWith(
+    '!first:example.org',
+    'meant for the first room',
+    null,
+    expect.anything()
+  );
+  expect(editorText()).toBe('');
+  expect(screen.queryByRole('alert')).toBeNull();
+  switchRoom?.('!first:example.org');
+  await flushed();
+  expect(editorText()).toBe('meant for the first room');
 });
