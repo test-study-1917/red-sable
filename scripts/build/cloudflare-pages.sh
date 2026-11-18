@@ -17,18 +17,17 @@ export MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES='.pages-tool-versions'
 mise trust "$PWD/.mise/config.toml"
 mise install
 
-# The Pages image does not provide the C toolchain used by ring when targeting
-# wasm32. Keep this explicit instead of relying on the image's package set.
-SUDO=$([ "$(id -u)" -eq 0 ] || echo sudo)
-$SUDO apt-get update
-$SUDO apt-get install --no-install-recommends -y clang llvm
+# Cloudflare's build user cannot use sudo. Install clang through mise instead;
+# ring needs it to compile its C/assembly support for wasm32.
+MISE_CLANG='clang@18.1.8'
+mise exec "$MISE_CLANG" -- true
 
 mise exec -- pnpm install --frozen-lockfile
 
 # 包含 Rust/WASM 的正式构建；不生成前端 source map
 export CARGO_BUILD_JOBS=2
 export SABLE_FOSS=1
-mise exec -- pnpm build
+mise exec "$MISE_CLANG" -- pnpm build
 
 # 启用 Pages 默认 SPA 路由回退
 rm -f dist/404.html
