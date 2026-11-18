@@ -17,6 +17,12 @@ export MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES='.pages-tool-versions'
 mise trust "$PWD/.mise/config.toml"
 mise install
 
+# The Pages image does not provide the C toolchain used by ring when targeting
+# wasm32. Keep this explicit instead of relying on the image's package set.
+SUDO=$([ "$(id -u)" -eq 0 ] || echo sudo)
+$SUDO apt-get update
+$SUDO apt-get install --no-install-recommends -y clang llvm
+
 mise exec -- pnpm install --frozen-lockfile
 
 # 包含 Rust/WASM 的正式构建；不生成前端 source map
