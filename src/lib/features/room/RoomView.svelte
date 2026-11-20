@@ -89,7 +89,7 @@
   import RoomVoiceChat from './RoomVoiceChat.svelte';
   import RoomSidePanels from './RoomSidePanels.svelte';
   import RoomDialogs from './RoomDialogs.svelte';
-  import { offersCall, RoomCallSupport } from './room-call-support.svelte.js';
+  import { RoomCallSupport } from './room-call-support.svelte.js';
   import { refreshRoomMembers } from './room-member-refresh.svelte.js';
   import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
 
@@ -312,16 +312,6 @@
       callSupport.current.can_join &&
       (callSupport.current.has_focus || callParticipants.length > 0)
   );
-  let callOffered = $derived(
-    callable &&
-      offersCall({
-        direct: resolvedRoom?.is_direct ?? false,
-        participants: callParticipants.length,
-        members: memberLoader.members.length,
-        alwaysShow: preferences.alwaysShowCallButton,
-      })
-  );
-
   let composerMounted = $state(false);
   $effect(() => {
     if (composerMounted) return;
@@ -851,6 +841,18 @@
   }
 
   function startCall(): void {
+    if (!callable) {
+      if (call.active) {
+        toasts.error('已有 Element Call 通话正在进行。');
+      } else if (callSupport.current === null) {
+        toasts.error('尚未取得房间通话能力信息，请稍后重试。');
+      } else if (!callSupport.current.can_join) {
+        toasts.error('当前房间不支持 Element Call 或没有加入权限。');
+      } else {
+        toasts.error('当前房间缺少可用的通话服务。');
+      }
+      return;
+    }
     call.clearFailure();
     void call.join(
       resolvedRoomId,
@@ -1021,7 +1023,8 @@
     members={memberLoader.members}
     membersOpen={desktop ? panels.desktopMembersOpen : panels.membersOpen}
     searchOpen={panels.searchOpen}
-    onCall={callOffered && !isVoiceRoom ? startCall : null}
+    onCall={!isVoiceRoom ? startCall : null}
+    elementCallActive={Boolean(callShown && call.active)}
     onToggleChat={isVoiceRoom ? () => (voiceChat.open = !voiceChat.open) : null}
     chatOpen={voiceChat.open}
     chatBeside={desktop}
@@ -1152,6 +1155,12 @@
     {panels}
     room={resolvedRoom}
     roomId={resolvedRoomId}
+    {roomName}
+    historyItems={timeline.items}
+    onLoadHistory={requestHistory}
+    onOpenHistoryMedia={(id: string) =>
+      mediaViewerState.open(id, () => timeline.items, jumpToEvent)}
+    onJumpToHistoryMessage={jumpToEvent}
     {desktop}
     {memberLoader}
     {roomSession}

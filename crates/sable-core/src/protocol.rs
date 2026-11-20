@@ -3327,6 +3327,11 @@ pub struct InboxItemView {
     pub read: bool,
     pub thread_root: Option<String>,
     pub reply: bool,
+    /// Custom notification category retained across upgrades.
+    pub kind: String,
+    pub jump_event_id: String,
+    pub reaction_key: Option<String>,
+    pub keyword: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

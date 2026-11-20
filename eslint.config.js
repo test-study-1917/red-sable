@@ -100,6 +100,11 @@ export default defineConfig([
     },
   },
   {
+    // Recognize already-resolved roomSectionPath() links in the focused inbox.
+    files: ['src/lib/features/inbox/FocusedNotificationList.svelte'],
+    languageOptions: { parserOptions: { projectService: true } },
+  },
+  {
     files: ['**/*.svelte.ts'],
     languageOptions: {
       parser: tseslint.parser,

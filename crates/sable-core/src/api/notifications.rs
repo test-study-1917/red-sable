@@ -31,6 +31,7 @@ domain! {
     set_master_mute,
     inbox,
     backfill_inbox,
+    mark_notification_seen,
     set_options,
     push_rules,
     set_push_rule_enabled,
@@ -485,6 +486,21 @@ impl Handler for BackfillInboxParams {
             .backfill_inbox(self.include_read, self.room_id.as_deref())
             .await?;
         Ok(BackfillInboxOk { recorded, has_more })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct MarkNotificationSeenParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub event_id: OwnedEventId,
+}
+
+impl Handler for MarkNotificationSeenParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.mark_notification_seen(self.event_id).await
     }
 }
 

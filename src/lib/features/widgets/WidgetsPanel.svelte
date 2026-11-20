@@ -5,6 +5,7 @@
   import GridFourIcon from 'phosphor-svelte/lib/GridFourIcon';
   import ShieldSlashIcon from 'phosphor-svelte/lib/ShieldSlashIcon';
   import XIcon from 'phosphor-svelte/lib/XIcon';
+  import { isJitsiWidget } from './jitsi-widget.js';
 
   import { i18n } from '#lib/i18n.js';
   import { readText, removeLocalValue, writeText } from '#lib/platform/local-json.js';
@@ -21,6 +22,8 @@
   interface Props {
     roomId: string;
     widgets: readonly RoomWidget[];
+    autoOpenWidgetId?: string | null;
+    onActiveWidgetChange?: (widgetId: string | null) => void;
     userId: string;
     displayName: string;
     avatarUrl: string;
@@ -34,6 +37,8 @@
   let {
     roomId,
     widgets,
+    autoOpenWidgetId = null,
+    onActiveWidgetChange,
     userId,
     displayName,
     avatarUrl,
@@ -53,6 +58,12 @@
   const storedWidth = Number.parseFloat(readText(WIDTH_STORAGE_KEY) ?? '');
   let width = $state(Number.isFinite(storedWidth) ? clampWidth(storedWidth) : 22);
   let activeId = $state<string | null>(null);
+  $effect(() => {
+    const requested = autoOpenWidgetId;
+    if (requested && widgets.some((widget) => widget.id === requested && !isJitsiWidget(widget))) {
+      activeId = requested;
+    }
+  });
 
   function clampWidth(next: number): number {
     return clamp(next, MIN_WIDTH, MAX_WIDTH);
@@ -62,7 +73,8 @@
     return pixels / Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
   }
 
-  let activeWidget = $derived(widgets.find((widget) => widget.id === activeId) ?? null);
+  let visibleWidgets = $derived(widgets.filter((widget) => !isJitsiWidget(widget)));
+  let activeWidget = $derived(visibleWidgets.find((widget) => widget.id === activeId) ?? null);
   let activeUrl = $derived(
     activeWidget
       ? templateWidgetUrl(activeWidget, {
@@ -76,6 +88,15 @@
   let activeKey = $derived(
     activeWidget && activeUrl ? widgetPermissionKey(userId, roomId, activeWidget, activeUrl) : null
   );
+  function selectWidget(widgetId: string): void {
+    activeId = widgetId;
+    onActiveWidgetChange?.(widgetId);
+  }
+
+  function backToWidgets(): void {
+    activeId = null;
+    onActiveWidgetChange?.(null);
+  }
 </script>
 
 <aside
@@ -102,7 +123,7 @@
   <PanelHeader class="widgets-header" title={activeWidget?.name || i18n.t('widgets.title')}>
     {#snippet prefix()}
       {#if activeWidget}
-        <PanelHeaderButton label={i18n.t('widgets.back')} onclick={() => (activeId = null)}>
+        <PanelHeaderButton label={i18n.t('widgets.back')} onclick={backToWidgets}>
           <ArrowLeftIcon class="mirror-rtl" />
         </PanelHeaderButton>
       {:else}
@@ -116,7 +137,7 @@
           label={i18n.t('widgets.capabilitiesForget')}
           onclick={() => {
             removeLocalValue(key);
-            activeId = null;
+            backToWidgets();
           }}
         >
           <ShieldSlashIcon />
@@ -135,9 +156,9 @@
   {:else}
     <WidgetList
       {roomId}
-      {widgets}
+      widgets={visibleWidgets}
       {canManage}
-      onOpen={(id) => (activeId = id)}
+      onOpen={selectWidget}
       {onAdd}
       {onRemove}
     />

@@ -28,6 +28,10 @@ import RoomNotificationsPanel from './RoomNotificationsPanel.svelte';
 
 function item(eventId: string, body: string, read = true): InboxItemView {
   return {
+    kind: 'message',
+    jump_event_id: eventId,
+    reaction_key: null,
+    keyword: null,
     room_id: '!room',
     event_id: eventId,
     ts: 1,
