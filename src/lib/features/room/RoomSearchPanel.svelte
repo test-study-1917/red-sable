@@ -5,6 +5,7 @@
 
   import SearchView from '../search/SearchView.svelte';
   import RoomSidePanel from './RoomSidePanel.svelte';
+  import RoomHistoryExportTools from './RoomHistoryExportTools.svelte';
 
   interface Props {
     query: string;
@@ -25,6 +26,9 @@
 >
   {#snippet icon()}
     <MagnifyingGlassIcon aria-hidden="true" />
+  {/snippet}
+  {#snippet actions()}
+    <RoomHistoryExportTools />
   {/snippet}
   <SearchView panel initialQuery={query} />
 </RoomSidePanel>

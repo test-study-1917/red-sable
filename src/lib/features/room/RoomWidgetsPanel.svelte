@@ -15,9 +15,20 @@
     memberLoader: RoomMemberLoader;
     roomSession: RoomSession;
     canManage: boolean;
+    autoOpenWidgetId?: string | null;
+    onActiveWidgetChange?: (widgetId: string | null) => void;
   }
 
-  let { panels, roomId, desktop, memberLoader, roomSession, canManage }: Props = $props();
+  let {
+    panels,
+    roomId,
+    desktop,
+    memberLoader,
+    roomSession,
+    canManage,
+    autoOpenWidgetId = null,
+    onActiveWidgetChange,
+  }: Props = $props();
   const core = useCoreClient();
 
   let ownMember = $derived(
@@ -50,6 +61,8 @@
 {#snippet panel(modal: boolean)}
   <WidgetsPanel
     {roomId}
+    {autoOpenWidgetId}
+    {onActiveWidgetChange}
     widgets={roomSession.widgets}
     userId={core.session?.user_id ?? ''}
     displayName={ownMember?.display_name ?? core.session?.user_id ?? ''}

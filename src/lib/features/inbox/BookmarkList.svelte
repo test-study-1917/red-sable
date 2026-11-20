@@ -12,11 +12,12 @@
   import { toasts } from '#lib/ui/toasts.svelte.js';
   import { useCoreClient } from '#lib/core/context.js';
   import { DisplayNames } from './display-names.svelte';
+  import { useEventItems } from '../room/messages/event-items.svelte.js';
+  import SenderName from '../room/members/SenderName.svelte';
+  import { senderDisplayColors } from '../room/members/members.js';
   import { filteredBookmarks, focusRowAt, formatCompactTimestamp } from './inbox';
   import InboxFeedRow from './InboxFeedRow.svelte';
-  import MessagePreview from '#lib/features/room/messages/MessagePreview.svelte';
   import InboxSectionHeader from './InboxSectionHeader.svelte';
-  import Skeleton from '#lib/ui/primitives/Skeleton.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
   let { standalone = false }: { standalone?: boolean } = $props();
@@ -24,6 +25,7 @@
   const roomList = useRoomList();
   const core = useCoreClient();
   const names = new DisplayNames(core);
+  const eventItems = useEventItems();
   $effect(() => core.onProfileChanged(names.forget));
   const headingId = $props.id();
 
@@ -97,11 +99,29 @@
     <ul class="feed">
       {#each visible as bookmark (bookmark.bookmark_id)}
         {@const name = roomName(bookmark.room_id, bookmark.room_name)}
-        {@const from = bookmark.sender ? names.name(bookmark.sender) : null}
+        {@const savedEvent = eventItems.get(bookmark.room_id, bookmark.event_id)}
+        {@const senderId = savedEvent?.sender ?? bookmark.sender}
+        {@const globalName = senderId ? names.name(senderId) : null}
+        {@const from = savedEvent?.sender_name ?? globalName}
+        {@const previewText =
+          savedEvent?.content.kind === 'message'
+            ? savedEvent.content.body
+            : (bookmark.body_preview ?? i18n.t('inbox.bookmarkPreviewEmpty'))}
         {@const timestampLabel = formatMessageTimestamp(bookmark.bookmarked_ts)}
-        <InboxFeedRow roomId={bookmark.room_id} eventId={bookmark.event_id} {name}>
+        <InboxFeedRow roomId={bookmark.room_id} eventId={bookmark.event_id} {name} compact>
           <span class="head">
             <span class="name">{name}</span>
+            <span class="preview" title={previewText}>
+              {#if from && senderId}
+                <span class="sender">
+                  <SenderName
+                    displayName={from}
+                    colors={senderDisplayColors(senderId, names.profile(senderId))}
+                    compact
+                  />：
+                </span>
+              {/if}{previewText}
+            </span>
             <Tooltip label={timestampLabel}>
               {#snippet trigger({ props })}
                 <time
@@ -113,23 +133,6 @@
               {/snippet}
             </Tooltip>
           </span>
-          {#snippet message()}
-            <MessagePreview
-              roomId={bookmark.room_id}
-              eventId={bookmark.event_id}
-              loadPreviewProfile
-            >
-              {#snippet loading()}
-                <Skeleton class="preview-loading" />
-              {/snippet}
-              {#snippet fallback()}
-                <span class="preview">
-                  {#if from}<span class="sender">{from}:</span>&nbsp;{/if}{bookmark.body_preview ??
-                    i18n.t('inbox.bookmarkPreviewEmpty')}
-                </span>
-              {/snippet}
-            </MessagePreview>
-          {/snippet}
           {#snippet trailing()}
             <IconButton
               class="remove"
@@ -167,14 +170,19 @@
   }
 
   .head {
-    align-items: baseline;
+    align-items: center;
     display: flex;
-    gap: var(--space-300);
+    gap: var(--space-200);
     min-width: 0;
+    width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
   .name {
-    flex: 1;
+    flex: 0 1 11rem;
+    max-width: 28%;
+    min-width: 0;
     font-weight: var(--font-weight-medium);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -191,15 +199,13 @@
   .preview {
     color: var(--surface-var-on-container);
     display: block;
+    flex: 1 1 0;
+    min-width: 0;
     font-size: var(--font-size-small);
+    line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .feed :global(.preview-loading) {
-    height: var(--font-size-small);
-    width: 60%;
   }
 
   .sender {
@@ -210,5 +216,53 @@
     color: var(--surface-var-on-container);
     margin: 0;
     text-align: center;
+  }
+  /* SABLE_DEV_INBOX_V6: force single-row bookmark preview; dev/HMR friendly. */
+  .feed :global(li.compact) {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+  .feed :global(li.compact .row) {
+    min-width: 0;
+    padding: var(--space-100) var(--space-250);
+  }
+  .feed :global(li.compact .body) {
+    display: block;
+    min-width: 0;
+  }
+  .feed :global(li.compact .avatar-root) {
+    --avatar-size: var(--avatar-size-200);
+  }
+  .feed :global(li.compact .message) {
+    display: none;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    gap: var(--space-200);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .name {
+    flex: 0 1 11rem;
+    max-width: 28%;
+    min-width: 0;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
+  .preview {
+    display: block;
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.3;
+  }
+  .when {
+    flex: none;
   }
 </style>

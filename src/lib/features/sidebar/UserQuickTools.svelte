@@ -1,18 +1,15 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { on } from 'svelte/events';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
+  import { useCoreClient } from '#lib/core/context.js';
   import {
     defaultSettingsSection,
     openSettingsOver,
   } from '#lib/features/settings/settings-navigation.js';
-  import { countInvites, countNotifications, hasMarkedUnread } from '#lib/features/inbox/inbox.js';
-  import { isDeclining } from '#lib/rooms/invites.svelte.js';
-  import { dismissedInvites } from '#lib/rooms/dismissed-invites.svelte.js';
-  import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { paletteState } from '#lib/ui/shortcuts/palette-state.svelte.js';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
-  import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
   import BellIcon from 'phosphor-svelte/lib/BellIcon';
   import ChatsIcon from 'phosphor-svelte/lib/ChatsIcon';
   import GearIcon from 'phosphor-svelte/lib/GearIcon';
@@ -30,21 +27,52 @@
   }
 
   let { mobile = false, compact = false, onNavigate }: Props = $props();
-  const roomList = useRoomList();
   const alertProviders = useAlertProviders();
-
-  let inboxCount = $derived(
-    countNotifications(roomList.rooms, roomList.badgeUnreadFor) +
-      countInvites(
-        roomList.rooms.filter(
-          (room) => !isDeclining(room.room_id) && !dismissedInvites.has(room.room_id)
-        )
-      )
-  );
-  let inboxCounts = $derived({
-    unread: 0,
-    highlight: inboxCount,
-    marked: hasMarkedUnread(roomList.rooms, roomList.badgeUnreadFor),
+  const focusedCore = useCoreClient();
+  let focusedInboxCount = $state(0);
+  $effect(() => {
+    const account = focusedCore.session?.account_id;
+    if (!account) {
+      focusedInboxCount = 0;
+      return;
+    }
+    let active = true;
+    let serial = 0;
+    async function refresh(): Promise<void> {
+      const current = ++serial;
+      try {
+        const response = await focusedCore.rpc.notifications.inbox({
+          filter: 'all',
+          include_read: false,
+          limit: 20000,
+          before_ts: null,
+        });
+        if (active && current === serial) {
+          focusedInboxCount = response.items.filter(
+            (item) =>
+              item.kind === 'reaction' ||
+              item.kind === 'mention' ||
+              item.kind === 'keyword' ||
+              (!item.kind && item.highlight)
+          ).length;
+        }
+      } catch (cause) {
+        console.warn('[sable inbox bell] unread check failed', cause);
+      }
+    }
+    const stop = focusedCore.subscribeEvents((event) => {
+      if (event.type === 'inbox_changed' || event.type === 'room_list_diff') void refresh();
+    });
+    const localChange = () => {
+      void refresh();
+    };
+    const stopLocal = on(window, 'sable-focused-inbox-changed', localChange);
+    void refresh();
+    return () => {
+      active = false;
+      stop();
+      stopLocal();
+    };
   });
 
   let hasAlerts = $derived(alertProviders.some((provider) => provider.priority !== null));
@@ -81,8 +109,8 @@
 
   /** The badge is decorative, so the count has to reach the accessible name. */
   function toolLabel(item: { href: string | null; label: string }): string {
-    if (item.href !== '/inbox' || inboxCount === 0) return i18n.t(item.label);
-    return i18n.t('inbox.navLabel', { count: inboxCount });
+    if (item.href !== '/inbox' || focusedInboxCount === 0) return i18n.t(item.label);
+    return i18n.t('inbox.navLabel', { count: focusedInboxCount });
   }
 
   function isToolActive(href: string): boolean {
@@ -143,7 +171,8 @@
               ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
             >
             {#if item.href === '/inbox'}
-              <UnreadBadge counts={inboxCounts} aria-hidden="true" />
+              {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"
+                ></span>{/if}
             {/if}
           </a>
           <!-- eslint-enable svelte/no-navigation-without-resolve -->
@@ -182,7 +211,8 @@
             ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
           >
           {#if item.href === '/inbox'}
-            <UnreadBadge counts={inboxCounts} aria-hidden="true" />
+            {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"
+              ></span>{/if}
           {/if}
         </a>
         <!-- eslint-enable svelte/no-navigation-without-resolve -->
@@ -218,7 +248,8 @@
               ><item.icon weight={toolActive ? 'fill' : 'regular'} /></span
             >
             {#if item.href === '/inbox'}
-              <UnreadBadge counts={inboxCounts} aria-hidden="true" />
+              {#if focusedInboxCount > 0}<span class="sable-inbox-red-dot" aria-hidden="true"
+                ></span>{/if}
             {/if}
           </a>
           <!-- eslint-enable svelte/no-navigation-without-resolve -->
@@ -230,6 +261,19 @@
 {/if}
 
 <style>
+  .sable-inbox-red-dot {
+    background: var(--supporter-red);
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--surface-container);
+    height: 0.55rem;
+    inset-inline-end: 0.36rem;
+    pointer-events: none;
+    position: absolute;
+    top: 0.36rem;
+    width: 0.55rem;
+    z-index: 2;
+  }
+
   .quick-tool {
     position: relative;
   }

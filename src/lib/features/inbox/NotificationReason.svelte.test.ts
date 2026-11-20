@@ -14,6 +14,10 @@ import NotificationReason from './NotificationReason.svelte';
 
 function item(overrides: Partial<InboxItemView>): InboxItemView {
   return {
+    kind: 'message',
+    jump_event_id: '$e',
+    reaction_key: null,
+    keyword: null,
     room_id: '!room',
     event_id: '$e',
     ts: 1,

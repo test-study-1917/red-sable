@@ -3,6 +3,7 @@ import { t } from '#lib/i18n.js';
 import { copyText } from '#lib/platform/clipboard.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 import { resolve } from '$app/paths';
+import type { ResolvedPathname } from '$app/types';
 
 import type { RoomListItemView } from '#src/generated/protocol';
 
@@ -66,7 +67,7 @@ function sectionPath(
   room: RoomListItemView | undefined,
   roomParam: string,
   spaceOrder: readonly string[]
-): string {
+): ResolvedPathname {
   if (room?.room_kind === 'space')
     return resolve('/(app)/space/[spaceId]/lobby', { spaceId: roomParam });
   if (room?.is_direct) return resolve('/(app)/direct/[roomId]', { roomId: roomParam });
@@ -89,7 +90,7 @@ export function roomSectionPath(
   roomIdOrAlias: string,
   eventId?: string | null,
   via: readonly string[] = []
-): string {
+): ResolvedPathname {
   const room = findRoomByPathId(rooms, roomIdOrAlias);
   const base = sectionPath(
     rooms,
@@ -106,7 +107,7 @@ export function roomSectionPath(
   if (room === undefined) for (const server of via) query.append('via', server);
 
   const search = query.toString();
-  return search === '' ? base : `${base}?${search}`;
+  return search === '' ? base : (`${base}?${search}` as ResolvedPathname);
 }
 
 /** An alias resolves through its own domain; only a room id needs routing help. */
