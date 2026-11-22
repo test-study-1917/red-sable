@@ -1,7 +1,7 @@
 use sable_model::text::visible_name;
 
 use crate::api::notifications::InboxFilter;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -27,7 +27,7 @@ use crate::push_rules;
 
 const SCHEMA: u32 = 1;
 const KEY: &[u8] = b"sable.inbox.notifications";
-const MAX_ENTRIES: usize = 5_000;
+const MAX_ENTRIES: usize = 20_000;
 const PREVIEW_LIMIT: usize = 120;
 const PAGE_SIZE: u16 = 50;
 const MAX_PAGES: usize = 5;
@@ -54,6 +54,14 @@ pub(crate) struct Entry {
     thread_root: Option<OwnedEventId>,
     #[serde(default)]
     reply: bool,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    target_event_id: Option<OwnedEventId>,
+    #[serde(default)]
+    reaction_key: Option<String>,
+    #[serde(default)]
+    keyword: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -63,6 +71,8 @@ struct Stored {
     cursors: BTreeMap<OwnedRoomId, Option<String>>,
     #[serde(default)]
     unread_scans: BTreeMap<OwnedRoomId, UnreadScan>,
+    #[serde(default)]
+    seen_notifications: HashSet<OwnedEventId>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -510,11 +520,79 @@ impl Core {
             return None;
         }
         let event = raw.deserialize().ok()?;
-        if !(notifications::notifies(actions) || is_dm_message(&event) && dm_notifies(room).await) {
-            return None;
-        }
-        if event.sender() == room.own_user_id() {
-            return None;
+        let from_self = event.sender() == room.own_user_id();
+        let value: serde_json::Value = serde_json::from_str(raw.json().get()).ok()?;
+        let content = value.get("content")?;
+        let own_id = room.own_user_id();
+        let body_text = content
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let is_reaction =
+            value.get("type").and_then(serde_json::Value::as_str) == Some("m.reaction");
+        let mut target_event_id = None;
+        let mut reaction_key = None;
+        let mut keyword = None;
+        let mut reaction_body = None;
+        let kind: String;
+        if is_reaction {
+            let relation = content.get("m.relates_to")?;
+            let original_id = relation.get("event_id")?.as_str()?;
+            let owned_id = OwnedEventId::try_from(original_id.to_owned()).ok()?;
+            let key = relation.get("key")?.as_str()?.to_owned();
+            // A reaction is relevant only when its target really belongs to our account.
+            let original = room.load_or_fetch_event(&owned_id, None).await.ok()?;
+            let original_json: serde_json::Value =
+                serde_json::from_str(original.raw().json().get()).ok()?;
+            if original_json.get("sender")?.as_str()? != own_id.as_str() {
+                return None;
+            }
+            reaction_body = original_json
+                .pointer("/content/body")
+                .and_then(serde_json::Value::as_str)
+                .map(|text| preview(text.to_owned()));
+            target_event_id = Some(owned_id);
+            reaction_key = Some(key);
+            kind = "reaction".to_owned();
+        } else {
+            let mentioned = content
+                .pointer("/m.mentions/user_ids")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(own_id.as_str())))
+                || body_text.contains(own_id.as_str());
+            // A user's ordinary messages must not create notifications for
+            // themselves; explicit self-mentions are allowed for testing.
+            if from_self && !mentioned {
+                return None;
+            }
+            if let Ok(rules) = self.push_rules().await {
+                keyword = push_rules::keywords(&rules.snapshot().await)
+                    .into_iter()
+                    .find(|item| {
+                        item.mode != crate::protocol::MentionNotificationModeView::Off
+                            && !item.keyword.is_empty()
+                            && body_text
+                                .to_lowercase()
+                                .contains(&item.keyword.to_lowercase())
+                    })
+                    .map(|item| item.keyword);
+            }
+            let notified = notifications::notifies(actions)
+                || is_dm_message(&event) && dm_notifies(room).await;
+            let highlighted = actions.iter().any(Action::is_highlight);
+            if !(notified || mentioned || keyword.is_some() || highlighted) {
+                return None;
+            }
+            kind = if mentioned {
+                "mention"
+            } else if keyword.is_some() {
+                "keyword"
+            } else if actions.iter().any(Action::is_highlight) {
+                "mention"
+            } else {
+                "direct"
+            }
+            .to_owned();
         }
         let sender_name = room
             .get_member_no_sync(event.sender())
@@ -534,13 +612,25 @@ impl Core {
             ts: u64::from(event.origin_server_ts().get()),
             sender: event.sender().to_owned(),
             sender_name,
-            body: self.inbox_body(&event, encrypted),
+            body: if is_reaction {
+                if self.shows_inbox_body(encrypted) {
+                    reaction_body
+                } else {
+                    None
+                }
+            } else {
+                self.inbox_body(&event, encrypted)
+            },
             highlight: actions.iter().any(Action::is_highlight),
             is_direct: is_dm(room).await,
             encrypted,
             undecryptable: notifications::raw_is_encrypted(raw),
             thread_root: extract_thread_root(raw),
             reply: is_reply(raw),
+            kind,
+            target_event_id,
+            reaction_key,
+            keyword,
         })
     }
 
@@ -713,6 +803,7 @@ impl Core {
     ) -> Result<(Vec<InboxItemView>, bool), RpcError> {
         let client = self.client().await?;
         let stored = self.stored_inbox(&client).await?;
+        let seen_notifications = stored.seen_notifications.clone();
         let mut rooms: HashMap<OwnedRoomId, Option<(bool, RoomReadState)>> = HashMap::new();
         let mut threads: HashMap<OwnedEventId, u64> = HashMap::new();
         let mut room_receipts: HashMap<OwnedRoomId, u64> = HashMap::new();
@@ -757,7 +848,7 @@ impl Core {
                 continue;
             };
             entry.is_direct = *direct;
-            let unread = match &entry.thread_root {
+            let room_unread = match &entry.thread_root {
                 Some(thread_root) => {
                     let thread_read_ts = if let Some(ts) = threads.get(thread_root) {
                         *ts
@@ -774,6 +865,15 @@ impl Core {
                     entry.ts > thread_read_ts
                 }
                 None => is_unread(&entry, read),
+            };
+            // Preserve manually read notification records without changing
+            // ordinary room receipts or the new per-thread read state.
+            let unread = if seen_notifications.contains(&entry.event_id) {
+                false
+            } else if matches!(entry.kind.as_str(), "reaction" | "mention" | "keyword") {
+                true
+            } else {
+                room_unread
             };
             if !matches(&entry, filter)
                 || (!unread && !include_read)
@@ -800,10 +900,44 @@ impl Core {
                 read: !unread,
                 thread_root: entry.thread_root.as_ref().map(ToString::to_string),
                 reply: entry.reply,
+                kind: if entry.kind.is_empty() && entry.highlight {
+                    "mention".to_owned()
+                } else {
+                    entry.kind
+                },
+                jump_event_id: entry
+                    .target_event_id
+                    .unwrap_or_else(|| entry.event_id.clone())
+                    .to_string(),
+                reaction_key: entry.reaction_key,
+                keyword: entry.keyword,
             });
         }
 
         Ok((items, has_more))
+    }
+
+    pub(crate) async fn mark_notification_seen(
+        &self,
+        event_id: OwnedEventId,
+    ) -> Result<(), RpcError> {
+        let client = self.client().await?;
+        let mut inbox = self.loaded_inbox(&client).await?;
+        let stored = inbox.stored();
+        let changed = stored
+            .entries
+            .iter()
+            .any(|entry| entry.event_id == event_id)
+            && stored.seen_notifications.insert(event_id);
+        if changed {
+            inbox.revision += 1;
+            self.inbox_changed.notify_one();
+        }
+        drop(inbox);
+        if changed {
+            self.emit(CoreEvent::InboxChanged);
+        }
+        Ok(())
     }
 
     pub(crate) async fn backfill_inbox(
@@ -1017,6 +1151,35 @@ mod tests {
         assert_eq!(stored.entries.len(), 2);
         *core.inbox.lock().await = super::InboxCache::default();
         assert_eq!(core.stored_inbox(&client).await.unwrap().entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn marking_a_notification_seen_wakes_the_inbox_persister() {
+        let server = MatrixMockServer::new().await;
+        let (core, client, _room) = setup(&server, 1).await;
+        tokio::time::pause();
+        core.watch_inbox_persist(&client);
+        core.record_inbox(
+            &client,
+            vec![entry("first", 100)],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(super::INBOX_FLUSH_INTERVAL * 2).await;
+        let stored = super::load(&client).await.unwrap();
+        let event_id = event_id!("$first");
+        assert_eq!(stored.entries[0].event_id, event_id);
+        assert!(stored.seen_notifications.is_empty());
+
+        core.mark_notification_seen(event_id.to_owned())
+            .await
+            .unwrap();
+        tokio::time::sleep(super::INBOX_FLUSH_INTERVAL * 2).await;
+
+        let stored = super::load(&client).await.unwrap();
+        assert!(stored.seen_notifications.contains(event_id));
     }
 
     #[tokio::test]
@@ -1701,6 +1864,10 @@ mod tests {
             undecryptable: false,
             thread_root: None,
             reply: false,
+            kind: String::new(),
+            target_event_id: None,
+            reaction_key: None,
+            keyword: None,
         }
     }
 

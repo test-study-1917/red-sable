@@ -1,4 +1,9 @@
 <script lang="ts">
+  import { setContext } from 'svelte';
+  import {
+    HISTORY_EXPORT_CONTEXT,
+    type RoomHistoryExportContext,
+  } from './room-history-export-context.js';
   import type { RoomListItemView } from '#src/generated/protocol';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
   import type { RoomMemberLoader } from '#lib/rooms/room-members.svelte.js';
@@ -16,6 +21,14 @@
     panels: RoomPanels;
     room: RoomListItemView | undefined;
     roomId: string;
+    roomName: string;
+    historyItems: readonly unknown[];
+    historyReachesLatest: boolean;
+    onLoadHistory: (count: number) => Promise<boolean>;
+    onOpenHistoryMedia: (eventId: string) => void;
+    onJumpToHistoryMessage: (eventId: string) => void;
+    autoOpenWidgetId?: string | null;
+    onActiveWidgetChange?: (widgetId: string | null) => void;
     desktop: boolean;
     memberLoader: RoomMemberLoader;
     roomSession: RoomSession;
@@ -30,6 +43,14 @@
     panels,
     room,
     roomId,
+    roomName,
+    historyItems,
+    historyReachesLatest,
+    onLoadHistory,
+    onOpenHistoryMedia,
+    onJumpToHistoryMessage,
+    autoOpenWidgetId = null,
+    onActiveWidgetChange,
     desktop,
     memberLoader,
     roomSession,
@@ -39,6 +60,16 @@
     onMatrixLink,
     onMemberProfile,
   }: Props = $props();
+  setContext(HISTORY_EXPORT_CONTEXT, {
+    roomId: () => roomId,
+    roomName: () => roomName,
+    timelineItems: () => historyItems,
+    reachesLatest: () => historyReachesLatest,
+    members: () => memberLoader.members,
+    loadOlder: (count: number) => onLoadHistory(count),
+    openMedia: (eventId: string) => onOpenHistoryMedia(eventId),
+    jumpToMessage: (eventId: string) => onJumpToHistoryMessage(eventId),
+  } satisfies RoomHistoryExportContext);
 </script>
 
 {#if panels.threadsOpen}
@@ -87,6 +118,8 @@
 <RoomMembersPanel {panels} {roomId} {desktop} {memberLoader} {roomSession} {onMemberProfile} />
 
 <RoomWidgetsPanel
+  {autoOpenWidgetId}
+  {onActiveWidgetChange}
   {panels}
   {roomId}
   {desktop}

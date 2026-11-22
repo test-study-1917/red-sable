@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+import { currentLocale } from '#lib/i18n.js';
 import {
   formatDate,
   formatFullTimestamp,
@@ -18,7 +19,7 @@ test('formatTime follows the 24-hour clock preference', () => {
 
   setPreference('hour24Clock', false);
   expect(formatTime(afternoon)).toBe(
-    new Date(afternoon).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    new Date(afternoon).toLocaleTimeString(currentLocale(), { hour: '2-digit', minute: '2-digit' })
   );
 
   setPreference('hour24Clock', previous);

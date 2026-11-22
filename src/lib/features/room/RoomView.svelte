@@ -1022,6 +1022,7 @@
     membersOpen={desktop ? panels.desktopMembersOpen : panels.membersOpen}
     searchOpen={panels.searchOpen}
     onCall={callOffered && !isVoiceRoom ? startCall : null}
+    elementCallActive={Boolean(callShown && call.active)}
     onToggleChat={isVoiceRoom ? () => (voiceChat.open = !voiceChat.open) : null}
     chatOpen={voiceChat.open}
     chatBeside={desktop}
@@ -1152,6 +1153,13 @@
     {panels}
     room={resolvedRoom}
     roomId={resolvedRoomId}
+    {roomName}
+    historyItems={timeline.items}
+    historyReachesLatest={timeline.reachesLatest}
+    onLoadHistory={requestHistory}
+    onOpenHistoryMedia={(id: string) =>
+      mediaViewerState.open(id, () => timeline.items, jumpToEvent)}
+    onJumpToHistoryMessage={jumpToEvent}
     {desktop}
     {memberLoader}
     {roomSession}

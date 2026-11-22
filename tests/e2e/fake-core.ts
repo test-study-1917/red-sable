@@ -29,6 +29,7 @@ import type {
 
 export type RoomCoreMode =
   | 'ready'
+  | 'callable'
   | 'direct'
   | 'room_name_overflow'
   | 'thread_links'
@@ -912,6 +913,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       };
     };
 
+    const seenNotifications = new Set<string>();
     const rpcHandlers: RpcHandlers = {
       'auth.login': () => {
         signedOut = false;
@@ -1214,14 +1216,30 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
             thread_root: null,
             reply: false,
           },
-        ].filter(
-          (item) =>
-            (params.room_id == null || item.room_id === params.room_id) &&
-            (params.include_read || !item.read) &&
-            (params.filter !== 'mentions' || item.highlight) &&
-            (params.filter !== 'direct' || item.is_direct)
-        );
-        return { items, has_more: false };
+        ]
+          .map((item) => ({ ...item, read: item.read || seenNotifications.has(item.event_id) }))
+          .filter(
+            (item) =>
+              (params.room_id == null || item.room_id === params.room_id) &&
+              (params.include_read || !item.read) &&
+              (params.filter !== 'mentions' || item.highlight) &&
+              (params.filter !== 'direct' || item.is_direct)
+          );
+        return {
+          items: items.map((item) => ({
+            ...item,
+            kind: item.highlight ? 'mention' : 'message',
+            jump_event_id: item.event_id,
+            reaction_key: '',
+            keyword: '',
+          })),
+          has_more: false,
+        };
+      },
+      'notifications.mark_notification_seen': (params, port) => {
+        seenNotifications.add(params.event_id);
+        port.emit({ type: 'inbox_changed' });
+        return null;
       },
       'notifications.backfill_inbox': () => ({ recorded: 0, has_more: false }),
       'notifications.add_keyword': (params) => {
@@ -1374,7 +1392,10 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
         delayed_events: false,
         rtc_transports: 'none',
       }),
-      'calls.support': () => ({ has_focus: false, can_join: false }),
+      'calls.support': () => ({
+        has_focus: workerMode === 'callable',
+        can_join: workerMode === 'callable',
+      }),
       'calls.turn_server': () => ({
         username: 'e2e',
         password: 'e2e',

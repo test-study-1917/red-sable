@@ -1,12 +1,13 @@
 import { SvelteMap } from 'svelte/reactivity';
 
+import type { ProfileView } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { senderName } from './inbox';
 
 const MAX_ATTEMPTS = 3;
 
 export class DisplayNames {
-  readonly #names = new SvelteMap<string, string>();
+  readonly #profiles = new SvelteMap<string, ProfileView>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- only guards duplicate requests
   readonly #requested = new Set<string>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- only counts failed requests
@@ -16,7 +17,7 @@ export class DisplayNames {
 
   forget = (userId: string): void => {
     this.#requested.delete(userId);
-    this.#names.delete(userId);
+    this.#profiles.delete(userId);
   };
 
   name(userId: string): string {
@@ -24,7 +25,7 @@ export class DisplayNames {
       this.#requested.add(userId);
       void this.core.userProfile(userId).then(
         (profile) => {
-          if (profile.display_name) this.#names.set(userId, profile.display_name);
+          this.#profiles.set(userId, profile);
         },
         (error: unknown) => {
           console.debug('[sable inbox] display name unavailable', error);
@@ -34,6 +35,10 @@ export class DisplayNames {
         }
       );
     }
-    return this.#names.get(userId) ?? senderName(userId);
+    return this.#profiles.get(userId)?.display_name || senderName(userId);
+  }
+
+  profile(userId: string): ProfileView | null {
+    return this.#profiles.get(userId) ?? null;
   }
 }
