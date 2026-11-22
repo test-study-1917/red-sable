@@ -473,6 +473,14 @@
           "type": "boolean",
           "default": true
         },
+        "bannerFit": {
+          "title": "Banner size",
+          "enum": [
+            "fixed",
+            "image"
+          ],
+          "default": "fixed"
+        },
         "showDmTopics": {
           "title": "Show topics in direct messages",
           "type": "boolean",
@@ -797,6 +805,11 @@
           "type": "boolean",
           "default": true
         },
+        "showExtraMessageMenuItems": {
+          "title": "Show extra message menu items",
+          "type": "boolean",
+          "default": false
+        },
         "showAllTimestamps": {
           "title": "Show the time on every message",
           "type": "boolean",
@@ -966,12 +979,12 @@
         "composerGifButton": {
           "title": "GIF button",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "composerStickerButton": {
           "title": "Sticker button",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "composerEmoteButton": {
           "title": "Emote button",
@@ -1968,6 +1981,14 @@
           "type": "boolean",
           "default": true
         },
+        "bannerFit": {
+          "title": "Banner size",
+          "enum": [
+            "fixed",
+            "image"
+          ],
+          "default": "fixed"
+        },
         "showDmTopics": {
           "title": "Show topics in direct messages",
           "type": "boolean",
@@ -2292,6 +2313,11 @@
           "type": "boolean",
           "default": true
         },
+        "showExtraMessageMenuItems": {
+          "title": "Show extra message menu items",
+          "type": "boolean",
+          "default": false
+        },
         "showAllTimestamps": {
           "title": "Show the time on every message",
           "type": "boolean",
@@ -2461,12 +2487,12 @@
         "composerGifButton": {
           "title": "GIF button",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "composerStickerButton": {
           "title": "Sticker button",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "composerEmoteButton": {
           "title": "Emote button",

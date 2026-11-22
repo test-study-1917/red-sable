@@ -79,6 +79,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setPreference('openRoomsAtUnread', true);
+  setPreference('showExtraMessageMenuItems', false);
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -146,6 +147,7 @@ function timelineViewport(): HTMLElement {
 }
 
 test('expanding a member group exposes the original event source', async () => {
+  setPreference('showExtraMessageMenuItems', true);
   const roomTimeline = timeline();
   const source = JSON.stringify({ event_id: '$first' });
   const eventSource = vi.fn(() =>

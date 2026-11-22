@@ -344,6 +344,14 @@ export const timelineCategory: SettingsCategory = {
       type: 'boolean',
     },
     {
+      key: 'showExtraMessageMenuItems',
+      section: 'messages',
+      icon: DotsThreeIcon,
+      name: 'settings.showExtraMessageMenuItems',
+      description: 'settings.showExtraMessageMenuItemsHint',
+      type: 'boolean',
+    },
+    {
       key: 'showRoleTooltip',
       section: 'messages',
       icon: UserCircleIcon,

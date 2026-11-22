@@ -26,6 +26,8 @@ import ThreadIcon from 'phosphor-svelte/lib/ChatCircleDotsIcon';
 import TrashIcon from 'phosphor-svelte/lib/TrashIcon';
 import UserSwitchIcon from 'phosphor-svelte/lib/UserSwitchIcon';
 
+import { preferences } from '#lib/settings/preferences.svelte.js';
+
 export type MessageActions = {
   roomId?: string;
   onReact?: (emoji: string) => void;
@@ -279,7 +281,8 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onEditHistory,
     });
   }
-  if (actions.onViewSource) {
+  const showExtraItems = preferences.showExtraMessageMenuItems;
+  if (showExtraItems && actions.onViewSource) {
     rows.push({
       key: 'source',
       label: 'common.viewSource',
@@ -295,12 +298,13 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       run: actions.onViewRedacted,
     });
   }
-  if (actions.onReport) {
+  const report = showExtraItems ? actions.onReport : undefined;
+  if (report) {
     rows.push({
       key: 'report',
       label: 'timeline.reportMessage',
       icon: ReportIcon,
-      run: actions.onReport,
+      run: report,
       separated: true,
     });
   }
@@ -311,7 +315,7 @@ export function messageMenuRows(actions: MessageActions): MessageMenuRow[] {
       icon: GavelIcon,
       run: actions.onMeowlnirBan,
       destructive: true,
-      separated: !actions.onReport,
+      separated: !report,
     });
   }
   if (actions.onCancelSend) {

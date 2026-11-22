@@ -2520,6 +2520,8 @@
     "messageSwipeActionReply": "Reply",
     "messageSwipeActionMembers": "Open the member list",
     "showSingleReactionCount": "Show the count on single reactions",
+    "showExtraMessageMenuItems": "Show extra message menu items",
+    "showExtraMessageMenuItemsHint": "Show View source and Report in the message menu.",
     "showAllTimestamps": "Show the time on every message",
     "showRoleTooltip": "Show role name on hover",
     "hideMessageShields": "Hide minor security warnings",
