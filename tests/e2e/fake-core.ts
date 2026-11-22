@@ -29,6 +29,7 @@ import type {
 
 export type RoomCoreMode =
   | 'ready'
+  | 'callable'
   | 'direct'
   | 'room_name_overflow'
   | 'thread_links'
@@ -1391,7 +1392,10 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
         delayed_events: false,
         rtc_transports: 'none',
       }),
-      'calls.support': () => ({ has_focus: false, can_join: false }),
+      'calls.support': () => ({
+        has_focus: workerMode === 'callable',
+        can_join: workerMode === 'callable',
+      }),
       'calls.turn_server': () => ({
         username: 'e2e',
         password: 'e2e',

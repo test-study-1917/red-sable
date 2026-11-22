@@ -23,6 +23,12 @@ test('notification history retains a mention after marking it read', async ({
       )
     )
     .toBe(true);
+  await expect(history.getByRole('button', { name: '全部标为已读', exact: true })).toHaveCount(0);
+  expect(
+    await page.evaluate(() =>
+      window.__e2eCalls.some((call) => call.method === 'timeline.mark_read')
+    )
+  ).toBe(false);
   await page.screenshot({ path: 'test-results/focused-inbox.png', fullPage: true });
   await history.getByRole('button', { name: '仅未读', exact: true }).click();
   await expect(history.locator('.notification-entry')).toHaveCount(0);

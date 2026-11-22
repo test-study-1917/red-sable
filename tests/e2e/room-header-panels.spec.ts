@@ -81,3 +81,48 @@ test('a thread side panel keeps its width beside the timeline', async ({
   expect(thread.width).toBeCloseTo(27.5 * rem, 0);
   expect(thread.x + thread.width).toBeCloseTo(room.x + room.width, 0);
 });
+
+for (const [supported, alwaysShow, visible] of [
+  [true, false, false],
+  [true, true, true],
+  [false, true, false],
+] as const) {
+  test(`large room call button: support=${supported}, always show=${alwaysShow}`, async ({
+    page,
+    app,
+    installRoomCore,
+  }) => {
+    await page.addInitScript((alwaysShow) => {
+      localStorage.setItem(
+        'sable-preferences',
+        JSON.stringify({ alwaysShowCallButton: alwaysShow })
+      );
+      window.__e2eMembers = Array.from({ length: 11 }, (_, index) => ({
+        user_id: `@member${index}:example.test`,
+        display_name: null,
+        avatar_url: null,
+        real_name: null,
+        real_avatar_url: null,
+        power_level: 0,
+        membership: 'join',
+        member_ts: null,
+        kicked: false,
+        service: false,
+      }));
+    }, alwaysShow);
+    await installRoomCore(supported ? 'callable' : 'ready');
+    await app.openRoom('!room:example.test');
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          ['calls.support', 'members.list'].every((method) =>
+            window.__e2eCalls.some((call) => call.method === method)
+          )
+        )
+      )
+      .toBe(true);
+    await expect(page.getByRole('button', { name: en.call.start, exact: true })).toHaveCount(
+      visible ? 1 : 0
+    );
+  });
+}
