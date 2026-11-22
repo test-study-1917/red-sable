@@ -23,6 +23,7 @@
     roomId: string;
     roomName: string;
     historyItems: readonly unknown[];
+    historyReachesLatest: boolean;
     onLoadHistory: (count: number) => Promise<boolean>;
     onOpenHistoryMedia: (eventId: string) => void;
     onJumpToHistoryMessage: (eventId: string) => void;
@@ -44,6 +45,7 @@
     roomId,
     roomName,
     historyItems,
+    historyReachesLatest,
     onLoadHistory,
     onOpenHistoryMedia,
     onJumpToHistoryMessage,
@@ -62,6 +64,7 @@
     roomId: () => roomId,
     roomName: () => roomName,
     timelineItems: () => historyItems,
+    reachesLatest: () => historyReachesLatest,
     members: () => memberLoader.members,
     loadOlder: (count: number) => onLoadHistory(count),
     openMedia: (eventId: string) => onOpenHistoryMedia(eventId),

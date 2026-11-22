@@ -153,6 +153,7 @@ test('the preview and all downloads use the same reconciled messages', async () 
     roomId: () => '!room:example.org',
     roomName: () => 'Room',
     timelineItems: () => timeline.current,
+    reachesLatest: () => true,
     members: () => [],
     loadOlder: () => Promise.resolve(true),
     openMedia: () => {},
@@ -163,7 +164,7 @@ test('the preview and all downloads use the same reconciled messages', async () 
   render(RoomHistoryExportTools, { context: new Map([[HISTORY_EXPORT_CONTEXT, source]]) });
   await fireEvent.click(screen.getByRole('button', { name: '查看及导出聊天记录' }));
   const dialog = within(screen.getByRole('dialog', { name: '聊天记录' }));
-  await dialog.findByText('已达时间线边界', { exact: false });
+  await dialog.findByText('已读到最早和最新可读取的记录', { exact: false });
   expect(dialog.getByText(originalBody)).toBeVisible();
 
   const body = 'Edited https://example.org/new';
