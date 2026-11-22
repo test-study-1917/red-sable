@@ -1157,6 +1157,7 @@
     roomId={resolvedRoomId}
     {roomName}
     historyItems={timeline.items}
+    historyReachesLatest={timeline.reachesLatest}
     onLoadHistory={requestHistory}
     onOpenHistoryMedia={(id: string) =>
       mediaViewerState.open(id, () => timeline.items, jumpToEvent)}

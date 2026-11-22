@@ -5,6 +5,7 @@ export interface RoomHistoryExportContext {
   roomId: () => string;
   roomName: () => string;
   timelineItems: () => readonly unknown[];
+  reachesLatest: () => boolean;
   members: () => readonly unknown[];
   /** Resolve true when pagination reaches the start of the timeline. */
   loadOlder: (count: number) => Promise<boolean>;

@@ -100,8 +100,7 @@
     waiting:
       '\u5386\u53f2\u8bb0\u5f55\u6b63\u5728\u81ea\u52a8\u8bfb\u53d6\uff0c\u5b8c\u6210\u540e\u5c06\u81ea\u52a8\u5bfc\u51fa\u3002',
     loading: '\u6b63\u5728\u81ea\u52a8\u8bfb\u53d6\u5386\u53f2',
-    done: '\u5386\u53f2\u8bfb\u53d6\u5b8c\u6210',
-    partial: '\u5386\u53f2\u672a\u5b8c\u6574\uff0c\u4ec5\u5bfc\u51fa\u5df2\u8bfb\u53d6\u90e8\u5206',
+    done: '已读到最早可读取的记录',
     failed:
       '\u5386\u53f2\u81ea\u52a8\u8bfb\u53d6\u4e2d\u65ad\u3002\u53ef\u91cd\u65b0\u6253\u5f00\u7a97\u53e3\u7ee7\u7eed\u5c1d\u8bd5\uff0c\u6216\u5bfc\u51fa\u5df2\u8bfb\u53d6\u7684\u90e8\u5206\u3002',
     previewImage: '\u9884\u89c8\u56fe\u7247',
@@ -111,10 +110,16 @@
     openLink: '\u6253\u5f00\u94fe\u63a5',
     loadedScope:
       '\u5df2\u8bfb\u53d6\u5386\u53f2\uff08\u6309\u5f53\u524d\u7b5b\u9009\u6761\u4ef6\uff09',
-    partialScope:
-      '\u53ea\u542b\u5f53\u524d\u5df2\u8bfb\u53d6\u7684\u90e8\u5206\u5386\u53f2\uff0c\u5e76\u975e\u5168\u91cf',
+    partialScope: '仅含已读取且符合筛选条件的记录',
+    missingOlder: '较早的记录尚未读完',
+    missingNewer: '尚未读到最新的记录',
   } as const;
 
+  let historyGaps = $derived(
+    [!endReached && L.missingOlder, !source?.reachesLatest() && L.missingNewer]
+      .filter(Boolean)
+      .join('；')
+  );
   let matching = $derived(filterHistory(records, filters));
   let visibleMessages = $derived(matching.slice(Math.max(0, matching.length - visibleCount)));
   let people = $derived(
@@ -276,7 +281,7 @@
         '\u5f53\u524d\u7b5b\u9009\u6761\u4ef6\u4e0b\u6ca1\u6709\u804a\u5929\u8bb0\u5f55\u3002';
       return;
     }
-    const scope = endReached ? L.loadedScope : L.partialScope;
+    const scope = historyGaps ? `${L.partialScope}；${historyGaps}` : L.loadedScope;
     const roomName = source.roomName();
     const data =
       format === 'txt'
@@ -285,7 +290,7 @@
           ? createHistoryMarkdown(roomName, source.roomId(), items, scope)
           : createHistoryHtml(roomName, source.roomId(), items, scope);
     saveHistoryFile(roomName, format, data);
-    feedback = `${endReached ? '' : `${L.partial}: `}${items.length} ${'\u6761'} ${format.toUpperCase()} ${'\u5df2\u5bfc\u51fa'}`;
+    feedback = `已导出 ${items.length} 条 ${format.toUpperCase()}${historyGaps ? '（部分历史）' : ''}`;
   }
 
   function chooseFormat(format: HistoryExportFormat): void {
@@ -374,10 +379,8 @@
           />
         </div>
         <div class="history-stat">
-          已载入 {records.length} 条 · 符合筛选条件 {matching.length} 条
-          {#if !endReached}
-            · 还有未读取的历史{:else}
-            · 已达时间线边界{/if}
+          已载入 {records.length} 条 · 符合筛选条件 {matching.length} 条 ·
+          {historyGaps || '已读到最早和最新可读取的记录'}
         </div>
       </div>
 
