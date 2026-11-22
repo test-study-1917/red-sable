@@ -555,6 +555,10 @@ export type InboxItemView = {
 	read: boolean,
 	thread_root: string | null,
 	reply: boolean,
+	kind: string,
+	jump_event_id: string,
+	reaction_key: string | null,
+	keyword: string | null,
 };
 
 export type InviteAvatarsView = "on" | "off";
@@ -3203,6 +3207,7 @@ export type Rpc = {
 	recorded: number,
 	has_more: boolean,
 }>;
+    markNotificationSeen: (params: { event_id: string }) => Promise<null>;
     setOptions: (params: {
 	enabled: boolean,
 	content: boolean,
@@ -4077,6 +4082,7 @@ export type RpcMethods = {
   'notifications.set_master_mute': Rpc['notifications']['setMasterMute'];
   'notifications.inbox': Rpc['notifications']['inbox'];
   'notifications.backfill_inbox': Rpc['notifications']['backfillInbox'];
+  'notifications.mark_notification_seen': Rpc['notifications']['markNotificationSeen'];
   'notifications.set_options': Rpc['notifications']['setOptions'];
   'notifications.push_rules': Rpc['notifications']['pushRules'];
   'notifications.set_push_rule_enabled': Rpc['notifications']['setPushRuleEnabled'];
@@ -4441,6 +4447,7 @@ export function createRpc(call: RpcCall): Rpc {
       setMasterMute: (params) => call('notifications.set_master_mute', params) as ReturnType<Rpc['notifications']['setMasterMute']>,
       inbox: (params) => call('notifications.inbox', params) as ReturnType<Rpc['notifications']['inbox']>,
       backfillInbox: (params) => call('notifications.backfill_inbox', params) as ReturnType<Rpc['notifications']['backfillInbox']>,
+      markNotificationSeen: (params) => call('notifications.mark_notification_seen', params) as ReturnType<Rpc['notifications']['markNotificationSeen']>,
       setOptions: (params) => call('notifications.set_options', params) as ReturnType<Rpc['notifications']['setOptions']>,
       pushRules: (params = {}) => call('notifications.push_rules', params) as ReturnType<Rpc['notifications']['pushRules']>,
       setPushRuleEnabled: (params) => call('notifications.set_push_rule_enabled', params) as ReturnType<Rpc['notifications']['setPushRuleEnabled']>,

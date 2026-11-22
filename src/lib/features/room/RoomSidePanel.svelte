@@ -20,6 +20,7 @@
     /** `none` hands the area under the header to `children`, which then scroll themselves. */
     body?: 'padded' | 'flush' | 'none';
     icon: Snippet;
+    actions?: Snippet;
     children: Snippet;
     onClose: () => void;
   }
@@ -33,6 +34,7 @@
     modal = false,
     body: bodyStyle = 'padded',
     icon,
+    actions,
     children,
     onClose,
   }: Props = $props();
@@ -75,6 +77,7 @@
         {@render icon()}
       {/snippet}
       {#snippet suffix()}
+        {#if actions}{@render actions()}{/if}
         <PanelHeaderButton label={closeLabel} onclick={onClose}>
           <XIcon />
         </PanelHeaderButton>

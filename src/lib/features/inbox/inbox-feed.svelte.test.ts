@@ -8,6 +8,10 @@ function item(eventId: string): InboxItemView {
   return {
     room_id: '!room:example.org',
     event_id: eventId,
+    kind: 'message',
+    jump_event_id: eventId,
+    reaction_key: '',
+    keyword: '',
     ts: 1,
     sender: '@alice:example.org',
     sender_name: 'Alice',
