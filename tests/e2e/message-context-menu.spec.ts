@@ -44,6 +44,36 @@ test('right-clicking a second message moves the menu to it', async ({ page, time
   expect(second?.x).toBeGreaterThan((first?.x ?? 0) + 100);
 });
 
+test('extra message menu items are hidden by default and follow the timeline setting', async ({
+  page,
+  app,
+  timeline,
+}) => {
+  const row = timeline.itemById('menu-1').locator('article.message');
+  const extras = menu(page).getByRole('menuitem', { name: /^(View source|Report)$/ });
+  const receipts = menu(page).getByRole('menuitem', { name: 'Read receipts', exact: true });
+  await row.click({ button: 'right' });
+  await expect(receipts).toBeVisible();
+  await expect(extras).toHaveCount(0);
+
+  for (const enabled of [true, false]) {
+    await page.keyboard.press('Escape');
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    await page
+      .getByRole('navigation', { name: 'Settings sections' })
+      .getByText('Timeline', { exact: true })
+      .click();
+    const toggle = page.getByRole('switch', { name: 'Show extra message menu items' });
+    await expect(toggle).toBeChecked({ checked: !enabled });
+    await toggle.click();
+    await expect(toggle).toBeChecked({ checked: enabled });
+    await app.closeSettings.click();
+    await row.click({ button: 'right' });
+    await expect(receipts).toBeVisible();
+    await expect(extras).toHaveCount(enabled ? 2 : 0);
+  }
+});
+
 test.describe('mobile reactions', () => {
   test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
 

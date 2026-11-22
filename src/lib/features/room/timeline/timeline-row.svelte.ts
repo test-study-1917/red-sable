@@ -122,7 +122,7 @@ export interface TimelineRowOptions extends MessageCallbacks {
 
 export class TimelineRow {
   element = $state<HTMLElement | null>(null);
-  #pointerHeld = false;
+  #touchSelection: 'idle' | 'holding' | 'released' = 'idle';
   #anchor = $state.raw<CursorAnchor | null>(null);
   actionsPinned = $state(false);
 
@@ -303,17 +303,20 @@ export class TimelineRow {
       ...withSelectedText(this.actions, text),
       onQuoteMarkdown:
         quote && this.actions.onReply && onQuoteMarkdown
-          ? () => onQuoteMarkdown(quote.text)
+          ? () => {
+              onQuoteMarkdown(quote.text);
+            }
           : undefined,
       onQuoteReply:
         quote && this.actions.onReply && onReply && eventId
-          ? () =>
+          ? () => {
               onReply(eventId, {
                 of: eventId,
                 body: quote.body,
                 html: null,
                 selectedQuote: quote,
-              })
+              });
+            }
           : undefined,
     };
   }
@@ -324,14 +327,11 @@ export class TimelineRow {
     let timer: ReturnType<typeof setTimeout>;
     const scheduleSelection = () => {
       clearTimeout(timer);
-      if (!selectedQuote(node)) return;
+      if (this.#touchSelection !== 'released' || !selectedQuote(node)) return;
       // Touch selection handles settle before the shared selection menu opens.
       timer = setTimeout(() => {
-        if (this.#pointerHeld) {
-          scheduleSelection();
-          return;
-        }
         if (
+          this.#touchSelection !== 'released' ||
           !this.actionable ||
           this.menu.id !== null ||
           this.dialogs.isOpen(this.#options().item, 'sheet')
@@ -348,7 +348,8 @@ export class TimelineRow {
     };
     const detachSelection = on(document, 'selectionchange', scheduleSelection);
     const release = () => {
-      this.#pointerHeld = false;
+      if (this.#touchSelection !== 'holding') return;
+      this.#touchSelection = 'released';
       scheduleSelection();
     };
     const detachRelease = on(window, 'pointerup', release);
@@ -370,21 +371,23 @@ export class TimelineRow {
   };
 
   pointerDown = (event: PointerEvent): void => {
-    this.#pointerHeld = true;
-    if (event.pointerType !== 'mouse' && canSelectText(event.target)) this.press.cancel();
-    else this.press.start(event);
     this.#doubleTap.down(event);
     if (event.pointerType === 'mouse') this.engagement.hold();
+    if (event.pointerType !== 'mouse' && canSelectText(event.target)) {
+      this.#touchSelection = 'holding';
+      this.press.cancel();
+      return;
+    }
+    this.#touchSelection = 'idle';
+    this.press.start(event);
   };
 
   pointerUp = (event: PointerEvent): void => {
-    this.#pointerHeld = false;
     this.press.end(event);
     this.#doubleTap.up(event);
   };
 
   pointerCancel = (event: PointerEvent): void => {
-    this.#pointerHeld = false;
     this.press.end(event);
     this.#doubleTap.cancel();
   };

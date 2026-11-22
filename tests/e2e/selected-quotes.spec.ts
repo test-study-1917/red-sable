@@ -3,10 +3,12 @@ import { expect, test, SIGNED_OUT } from './fixtures/test';
 import { historyItems, timelineItem } from './fixtures/timeline-items';
 import type { Locator } from '@playwright/test';
 
-// Use real DOM ranges so the selection menu, formatted text and offsets are exercised together.
-async function selectPassage(body: Locator, text: string, occurrence = 0): Promise<void> {
-  await body.evaluate(
-    (root, { text, occurrence }) => {
+async function selectPassage(body: Locator, text: string, { touch = false, occurrence = 0 } = {}) {
+  const pointer = { pointerType: 'touch', isPrimary: true };
+  // Headless mobile browsers don't create native selection handles from a long press.
+  if (touch) await body.dispatchEvent('pointerdown', pointer);
+  const passage = await body.evaluate(
+    (root, { text, occurrence, touch }) => {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       const nodes: Text[] = [];
       while (walker.nextNode()) nodes.push(walker.currentNode as Text);
@@ -24,18 +26,32 @@ async function selectPassage(body: Locator, text: string, occurrence = 0): Promi
         }
         offset += node.length;
       }
-      getSelection()?.removeAllRanges();
-      getSelection()?.addRange(range);
-      document.dispatchEvent(new Event('selectionchange'));
+      if (touch) {
+        getSelection()?.removeAllRanges();
+        getSelection()?.addRange(range);
+      }
+      const rect = range.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, y: rect.top + rect.height / 2 };
     },
-    { text, occurrence }
+    { text, occurrence, touch }
   );
+  const point = { x: (passage.left + passage.right) / 2, y: passage.y };
+  if (touch) {
+    await body.dispatchEvent('pointerup', pointer);
+    return point;
+  }
+  const mouse = body.page().mouse;
+  await mouse.move(passage.left, passage.y);
+  await mouse.down();
+  await mouse.move(passage.right, passage.y, { steps: 5 });
+  await mouse.up();
+  return point;
 }
 
 test.use({ storageState: SIGNED_OUT });
 
 for (const richTextComposer of [true, false]) {
-  test(`selection menu inserts a Markdown quote without creating a reply (${richTextComposer ? 'rich' : 'source'})`, async ({
+  test(`right-click after selecting text opens the Markdown quote action (${richTextComposer ? 'rich' : 'source'})`, async ({
     page,
     app,
     core,
@@ -49,17 +65,24 @@ for (const richTextComposer of [true, false]) {
     await core.emitTimelineDiff(await core.subscription(), [
       { op: 'reset', values: [timelineItem('source', 'Before selected passage after')] },
     ]);
-    await selectPassage(
+    await page.clock.install();
+    const point = await selectPassage(
       page.locator('[data-item-id="source"] .formatted-body'),
       'selected passage'
     );
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe('selected passage');
+    await page.clock.runFor(500);
+    const quoteMenu = page.locator('.message-menu');
+    await expect(quoteMenu).toHaveCount(0);
+
+    await page.mouse.click(point.x, point.y, { button: 'right' });
     await expect(
-      page.getByRole('menuitem', { name: en.timeline.quoteMarkdown, exact: true })
+      quoteMenu.getByRole('menuitem', { name: en.timeline.quoteMarkdown, exact: true })
     ).toBeVisible();
     await expect(
-      page.getByRole('menuitem', { name: en.timeline.quoteReply, exact: true })
+      quoteMenu.getByRole('menuitem', { name: en.timeline.quoteReply, exact: true })
     ).toBeVisible();
-    await page.getByRole('menuitem', { name: en.timeline.quoteMarkdown, exact: true }).click();
+    await quoteMenu.getByRole('menuitem', { name: en.timeline.quoteMarkdown, exact: true }).click();
     await expect(app.composer).toContainText('selected passage');
     if (richTextComposer)
       await expect(app.composer.locator('blockquote')).toHaveText('selected passage');
@@ -80,12 +103,18 @@ test('touch: partial reply survives sending, expands, collapses and highlights t
   app,
   core,
   installRoomCore,
+  isMobile,
 }) => {
   await installRoomCore('ready');
   await app.openRoom('!room:example.test');
   const source = timelineItem('source', 'First passage; second passage. 中文 😀');
   await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [source] }]);
-  await selectPassage(page.locator('[data-item-id="source"] .formatted-body'), 'passage', 1);
+  const point = await selectPassage(
+    page.locator('[data-item-id="source"] .formatted-body'),
+    'passage',
+    { touch: isMobile, occurrence: 1 }
+  );
+  if (!isMobile) await page.mouse.click(point.x, point.y, { button: 'right' });
   await page.getByRole('menuitem', { name: en.timeline.quoteReply, exact: true }).click();
   await app.composer.fill('My reply');
   await app.sendMessage.click();
@@ -306,7 +335,7 @@ test('touch: message text is selectable and both quote actions fit the selection
   ]);
   const body = page.locator('[data-item-id="source"] .formatted-body');
   expect(await body.evaluate((node) => getComputedStyle(node).userSelect)).not.toBe('none');
-  await selectPassage(body, 'selected passage');
+  await selectPassage(body, 'selected passage', { touch: true });
   await expect(
     page.getByRole('menuitem', { name: en.timeline.quoteMarkdown, exact: true })
   ).toBeInViewport();
@@ -321,6 +350,7 @@ test('touch: repeated code quotes exclude controls and survive a collapsed remou
   app,
   core,
   installRoomCore,
+  isMobile,
 }) => {
   await installRoomCore('ready');
   await app.openRoom('!room:example.test');
@@ -332,7 +362,10 @@ test('touch: repeated code quotes exclude controls and survive a collapsed remou
   await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [source] }]);
   const sourceRow = page.locator('[data-item-id="code-source"]');
   await sourceRow.locator('[data-code-toggle]').nth(1).click();
-  await selectPassage(sourceRow.locator('pre code').nth(1), 'line 0');
+  const point = await selectPassage(sourceRow.locator('pre code').nth(1), 'line 0', {
+    touch: isMobile,
+  });
+  if (!isMobile) await page.mouse.click(point.x, point.y, { button: 'right' });
   await page.getByRole('menuitem', { name: en.timeline.quoteReply, exact: true }).click();
   await app.composer.fill('Reply to the second code block');
   await app.sendMessage.click();

@@ -1983,6 +1983,8 @@
     "captionPositionInline": "旁边",
     "captionPositionHidden": "隐藏",
     "doubleTapReact": "双击以回应",
+    "showExtraMessageMenuItems": "显示额外消息菜单项",
+    "showExtraMessageMenuItemsHint": "在消息菜单中显示「查看源代码」和「举报」。",
     "showRoleTooltip": "悬停时显示角色名称",
     "doubleTapReaction": "双击回应",
     "hideTypingIndicators": "隐藏正在输入指示器",

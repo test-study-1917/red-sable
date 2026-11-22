@@ -354,6 +354,7 @@ const SETTINGS = {
   doubleTapReact: toggle(true, { account: true }),
   messageSwipeAction: choice(['reply', 'members'], 'reply', { account: true }),
   showSingleReactionCount: toggle(true, { account: true }),
+  showExtraMessageMenuItems: toggle(false),
   showAllTimestamps: toggle(false, { account: true }),
   showRoleTooltip: toggle(false, { account: true }),
   hideMessageShields: toggle(false, { account: true }),
@@ -387,8 +388,8 @@ const SETTINGS = {
   composerSpellcheck: toggle(true, { account: true, device: true }),
   composerAutocapitalize: toggle(true, { account: true, device: true }),
   emoticonToEmoji: toggle(false, { account: true }),
-  composerGifButton: toggle(true, { account: true }),
-  composerStickerButton: toggle(true, { account: true }),
+  composerGifButton: toggle(false, { account: true }),
+  composerStickerButton: toggle(false, { account: true }),
   composerEmoteButton: toggle(true, { account: true }),
   composerVoiceButton: toggle(true, { account: true }),
   composerButtonOrder: list<ComposerButton>(COMPOSER_ORDER_VALUES, [...COMPOSER_BUTTONS], {

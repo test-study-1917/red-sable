@@ -1,6 +1,11 @@
-import { expect, test } from 'vitest';
+import { afterEach, expect, test } from 'vitest';
 
+import { setPreference } from '#lib/settings/preferences.svelte.js';
 import { messageMenuRows } from './message-menu-items.js';
+
+afterEach(() => {
+  setPreference('showExtraMessageMenuItems', false);
+});
 
 test('reply offers one row, not a second that claims to open a thread', () => {
   const rows = messageMenuRows({ onReply: () => {} });
@@ -38,13 +43,16 @@ test('a link under the cursor adds a row beside the message permalink', () => {
   ]);
 });
 
-test('version history sits with the other inspection rows', () => {
-  const rows = messageMenuRows({
+test('read receipts and version history stay visible when source is hidden', () => {
+  const actions = {
     onReadReceipts: () => {},
     onEditHistory: () => {},
     onViewSource: () => {},
-  });
+  };
+  expect(messageMenuRows(actions).map((row) => row.key)).toEqual(['receipts', 'edit-history']);
 
+  setPreference('showExtraMessageMenuItems', true);
+  const rows = messageMenuRows(actions);
   expect(rows.map((row) => row.key)).toEqual(['receipts', 'edit-history', 'source']);
   expect(rows[1].label).toBe('timeline.editHistory');
 });
@@ -84,11 +92,15 @@ test('both selection quote actions appear alongside the ordinary reply', () => {
   expect(rows[1].run).toBe(reply);
 });
 
-test('banning the sender with Meowlnir sits with report, marked as destructive', () => {
-  const rows = messageMenuRows({ onReport: () => {}, onMeowlnirBan: () => {} });
+test('the Meowlnir ban keeps its separator when report is hidden', () => {
+  const actions = { onReport: () => {}, onMeowlnirBan: () => {} };
+  expect(messageMenuRows(actions)).toMatchObject([
+    { key: 'meowlnir-ban', destructive: true, separated: true },
+  ]);
 
-  expect(rows.map((row) => [row.key, row.destructive ?? false, row.separated ?? false])).toEqual([
-    ['report', false, true],
-    ['meowlnir-ban', true, false],
+  setPreference('showExtraMessageMenuItems', true);
+  expect(messageMenuRows(actions)).toMatchObject([
+    { key: 'report', separated: true },
+    { key: 'meowlnir-ban', destructive: true, separated: false },
   ]);
 });

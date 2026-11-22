@@ -26,6 +26,7 @@ except those marked deployment only.
 - `showRoomIcon` (Room icons): One of `always`, `sometimes`, `collapsed`, `never`. Default `always`.
 - `voiceParticipantPlacement` (Voice room participants): One of `both`, `below`, `inline`. Default `both`.
 - `showRoomBanners` (Room banners above the list): `true` or `false`. Default `true`.
+- `bannerFit` (Banner size): One of `fixed`, `image`. Default `fixed`.
 - `showDmTopics` (Show topics in direct messages): `true` or `false`. Default `true`.
 - `messagePreviews` (Message previews): One of `off`, `direct`, `rooms`, `all`. Default `off`.
 - `subspaceHierarchyLimit` (Subspace nesting depth): One of `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`. Default `3`.
@@ -80,6 +81,7 @@ except those marked deployment only.
 - `doubleTapReact` (Double tap to react): `true` or `false`. Default `true`.
 - `messageSwipeAction` (Swipe left on a message to): One of `reply`, `members`. Default `reply`.
 - `showSingleReactionCount` (Show the count on single reactions): `true` or `false`. Default `true`.
+- `showExtraMessageMenuItems` (Show extra message menu items): `true` or `false`. Default `false`. Deployment only.
 - `showAllTimestamps` (Show the time on every message): `true` or `false`. Default `false`.
 - `showRoleTooltip` (Show role name on hover): `true` or `false`. Default `false`.
 - `hideMessageShields` (Hide minor security warnings): `true` or `false`. Default `false`.
@@ -128,8 +130,8 @@ except those marked deployment only.
 - `composerSpellcheck` (Spell check): `true` or `false`. Default `true`.
 - `composerAutocapitalize` (Capitalize sentences): `true` or `false`. Default `true`.
 - `emoticonToEmoji` (Convert emoticons to emoji): `true` or `false`. Default `false`.
-- `composerGifButton` (GIF button): `true` or `false`. Default `true`.
-- `composerStickerButton` (Sticker button): `true` or `false`. Default `true`.
+- `composerGifButton` (GIF button): `true` or `false`. Default `false`.
+- `composerStickerButton` (Sticker button): `true` or `false`. Default `false`.
 - `composerEmoteButton` (Emote button): `true` or `false`. Default `true`.
 - `composerVoiceButton` (Voice message button): `true` or `false`. Default `true`.
 - `scheduleInEncryptedRooms` (Allow scheduling in encrypted rooms): `true` or `false`. Default `true`. Deployment only.

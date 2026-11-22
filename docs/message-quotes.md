@@ -1,6 +1,6 @@
 # Quote a passage from a message
 
-Select text inside a message to open its selection menu. The same actions are available when you right-click the selection.
+With a mouse, select text inside a message and right-click the selection to open the quote menu. On a touchscreen, long-press to select text; the menu opens after you release.
 
 - **Quote as Markdown** inserts a blockquote into the composer. In Markdown/source mode it inserts `>` lines. Write your response after the quote and send it as a normal message.
 - **Reply to selection** creates a reply linked to the source message. After sending, use the chevron beside the quote to expand or collapse the source text, with the selected passage highlighted. Click the quoted sender or passage to jump to the original message and highlight the same passage.
