@@ -6,15 +6,23 @@ import { beforeEach, expect, test, vi } from 'vitest';
 vi.mock('#lib/core/context.js');
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/rooms/room-list.svelte.js')>()),
-  useRoomList: () => ({ rooms: [], badgeUnreadFor: () => ({}), labelFor: () => 'Room' }),
+  useRoomList: () => roomList,
 }));
 
 import { core } from '#lib/core/__mocks__/context.js';
 import FocusedNotificationList from './FocusedNotificationList.svelte';
-import type { InboxItemView } from '#src/generated/protocol';
+import type { InboxItemView, RoomListItemView } from '#src/generated/protocol';
+
+const roomList = vi.hoisted(() => ({
+  rooms: [] as RoomListItemView[],
+  badgeUnreadFor: (room: RoomListItemView) => room.counts,
+  labelFor: () => 'Room',
+  byId: () => undefined,
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  roomList.rooms = [];
   core.session = { account_id: 'account' };
   core.rpc.notifications.backfillInbox.mockResolvedValue({ recorded: 0, has_more: false });
   core.subscribeEvents.mockReturnValue(() => {});
@@ -83,20 +91,58 @@ test('filters persistent reaction, mention and keyword history, including read r
 });
 
 test('mark-all persists each notification without changing ordinary room receipts', async () => {
+  roomList.rooms = [
+    {
+      room_id: '!ordinary:example.org',
+      state: 'joined',
+      room_kind: null,
+      counts: { unread: 1, notifying: 1, highlight: 0, marked: false },
+      latest_event: null,
+    } as unknown as RoomListItemView,
+  ];
   let records = [notification('reaction'), notification('mention'), notification('keyword', true)];
-  core.rpc.notifications.inbox.mockImplementation(async () => ({
+  core.rpc.notifications.inbox.mockImplementation(() => Promise.resolve({
     items: records,
     has_more: false,
   }));
-  core.rpc.notifications.markNotificationSeen.mockImplementation(async ({ event_id }) => {
+  core.rpc.notifications.markNotificationSeen.mockImplementation(({ event_id }) => {
     records = records.map((item) => (item.event_id === event_id ? { ...item, read: true } : item));
-    return null;
+    return Promise.resolve(null);
   });
   render(FocusedNotificationList);
   await screen.findByText('reaction preview');
   await fireEvent.click(screen.getByRole('button', { name: '全部标为已读' }));
-  await vi.waitFor(() => expect(screen.queryByLabelText('未读')).not.toBeInTheDocument());
+  await vi.waitFor(() => {
+    expect(screen.queryByLabelText('未读')).not.toBeInTheDocument();
+  });
   expect(core.rpc.notifications.markNotificationSeen).toHaveBeenCalledTimes(2);
   expect(core.rpc.timeline.markRead).not.toHaveBeenCalled();
   expect(screen.getByText('reaction preview')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Mark Room as read/ })).toBeInTheDocument();
+});
+
+test('ordinary unread rooms keep an individual read action without a bulk button', async () => {
+  roomList.rooms = [
+    {
+      room_id: '!ordinary:example.org',
+      state: 'joined',
+      room_kind: null,
+      counts: { unread: 1, notifying: 1, highlight: 0, marked: false },
+      latest_event: null,
+    } as unknown as RoomListItemView,
+  ];
+  core.rpc.notifications.inbox.mockResolvedValue({ items: [], has_more: false });
+  render(FocusedNotificationList);
+
+  await screen.findByText('1 unread notification');
+  expect(screen.queryByRole('button', { name: '全部标为已读' })).not.toBeInTheDocument();
+
+  await fireEvent.click(screen.getByRole('button', { name: /Mark Room as read/ }));
+  expect(core.rpc.timeline.markRead).toHaveBeenCalledWith({
+    room_id: '!ordinary:example.org',
+    event_id: null,
+    thread_root: null,
+    subscription: null,
+    fully_read: true,
+  });
 });

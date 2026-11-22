@@ -139,7 +139,6 @@
         console.warn('[sable focused inbox] mark all failed', cause);
       }
     }
-    for (const room of unlisted) await markUnlistedRead(room.room_id);
     await reload();
   }
   $effect(() => {
@@ -206,7 +205,7 @@
         }}>仅未读</button
       >
     </div>
-    {#if items.some((item) => eligible(item) && !item.read) || unlisted.length > 0}
+    {#if items.some((item) => eligible(item) && !item.read)}
       <button class="mark-all" type="button" onclick={() => void markAllRead()}>全部标为已读</button
       >
     {/if}
