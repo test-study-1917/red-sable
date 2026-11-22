@@ -1,12 +1,22 @@
 // @vitest-environment happy-dom
 
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
+import { fromStore, writable } from 'svelte/store';
 import { afterEach, expect, test, vi } from 'vitest';
+import type { TimelineItemView } from '#src/generated/protocol';
+
+import RoomHistoryExportTools from './RoomHistoryExportTools.svelte';
+import {
+  HISTORY_EXPORT_CONTEXT,
+  type RoomHistoryExportContext,
+} from './room-history-export-context';
 import {
   createHistoryHtml,
   createHistoryMarkdown,
   createHistoryText,
   extractSafeLinks,
   filterHistory,
+  HistoryExportCache,
   normalizeHistoryItem,
   parseHistoryBoundary,
   saveHistoryFile,
@@ -15,6 +25,7 @@ import {
   type HistoryExportFormat,
   type HistoryFilter,
 } from './room-history-export';
+import { timelineItem } from './timeline/test-items.js';
 
 const entry: ExportedMessage = {
   eventId: '$message:example.org',
@@ -95,6 +106,93 @@ test('normalization supplies links for every exported message', () => {
   });
   expect(message?.links).toEqual(entry.links);
   expect(message?.hasLink).toBe(true);
+});
+
+test('the export cache reconciles edits and redactions without losing older pages', () => {
+  const cache = new HistoryExportCache();
+  const names = new Map<string, string>();
+  const older = timelineItem('older', 'Earlier page', { timestamp: 1 });
+  const original = timelineItem('edited', 'Original https://example.org/old', { timestamp: 2 });
+  const removed = timelineItem('removed', 'Withdrawn message', { timestamp: 3 });
+  const initial = cache.collect([original, removed, older], names);
+  expect(initial.map((item) => item.eventId)).toEqual(['$older', '$edited', '$removed']);
+  expect(cache.collect([original, removed], names)).toBe(initial);
+
+  const body = 'Edited https://example.org/new';
+  const edited = timelineItem('replacement-row', body, { eventId: '$edited', timestamp: 2 });
+  const redacted = {
+    ...removed,
+    content: { kind: 'redacted', reason: null, redacted_by: null } as const,
+  };
+  const current = cache.collect([edited, redacted], names);
+  expect(current.map((item) => item.body)).toEqual(['Earlier page', body]);
+  expect(cache.collect([removed], names)).toBe(current);
+
+  const matching = filterHistory(current, { ...filters, category: 'link' });
+  expect(matching.map((item) => item.links)).toEqual([['https://example.org/new']]);
+});
+
+test('replacing a message with an empty body removes its previous text and links', () => {
+  const cache = new HistoryExportCache();
+  const names = new Map<string, string>();
+  cache.collect([timelineItem('message', entry.body)], names);
+
+  const updated = cache.collect([timelineItem('message', '')], names);
+  expect(updated.map((item) => item.body)).toEqual(['']);
+  expect(filterHistory(updated, { ...filters, category: 'link' })).toEqual([]);
+});
+
+test('the preview and all downloads use the same reconciled messages', async () => {
+  const older = timelineItem('older', 'Earlier page');
+  const originalBody = 'Original https://example.org/old';
+  const original = timelineItem('edited', originalBody);
+  const removed = timelineItem('removed', 'Withdrawn message');
+  const pages = writable<readonly TimelineItemView[]>([older, original, removed]);
+  const timeline = fromStore(pages);
+  const source: RoomHistoryExportContext = {
+    roomId: () => '!room:example.org',
+    roomName: () => 'Room',
+    timelineItems: () => timeline.current,
+    members: () => [],
+    loadOlder: () => Promise.resolve(true),
+    openMedia: () => {},
+    jumpToMessage: () => {},
+  };
+  const download = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:history');
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  render(RoomHistoryExportTools, { context: new Map([[HISTORY_EXPORT_CONTEXT, source]]) });
+  await fireEvent.click(screen.getByRole('button', { name: '查看及导出聊天记录' }));
+  const dialog = within(screen.getByRole('dialog', { name: '聊天记录' }));
+  await dialog.findByText('已达时间线边界', { exact: false });
+  expect(dialog.getByText(originalBody)).toBeVisible();
+
+  const body = 'Edited https://example.org/new';
+  pages.set([
+    timelineItem('edited', body),
+    { ...removed, content: { kind: 'redacted', reason: null, redacted_by: null } },
+  ]);
+  expect(await dialog.findByText(body)).toBeVisible();
+  expect(dialog.getByText('Earlier page')).toBeVisible();
+  expect(dialog.queryByText('Withdrawn message')).toBeNull();
+  expect(dialog.queryByText('https://example.org/old')).toBeNull();
+  expect(dialog.getByRole('link', { name: /https:\/\/example\.org\/new/ })).toBeVisible();
+
+  for (const [name, mime] of [
+    ['TXT (.txt)', 'text/plain'],
+    ['Markdown (.md)', 'text/markdown'],
+    ['HTML (.html)', 'text/html'],
+  ]) {
+    await fireEvent.click(dialog.getByRole('button', { name: '导出聊天记录 ▾' }));
+    await fireEvent.click(dialog.getByRole('button', { name }));
+    const blob = download.mock.lastCall?.[0];
+    if (!(blob instanceof Blob)) throw new Error(`${name} did not generate a file`);
+    expect(blob.type).toBe(`${mime};charset=utf-8`);
+    const text = await blob.text();
+    expect(text).toContain('Earlier page');
+    expect(text).toContain(body);
+    expect(text).not.toContain('https://example.org/old');
+    expect(text).not.toContain('Withdrawn message');
+  }
 });
 
 test('TXT retains sender identity, body and media references', () => {

@@ -1,6 +1,5 @@
 <script lang="ts">
   import { getContext, onDestroy, tick } from 'svelte';
-  import { SvelteMap } from 'svelte/reactivity';
   import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
   import {
     HISTORY_EXPORT_CONTEXT,
@@ -11,15 +10,12 @@
     createHistoryText,
     createHistoryMarkdown,
     createHistoryHtml,
-    extractSafeLinks,
     dateTime,
     filterHistory,
+    HistoryExportCache,
     nameMap,
-    normalizeHistoryItem,
-    mergeHistory,
     parseHistoryBoundary,
     saveHistoryFile,
-    sortedHistory,
     type ExportedMessage,
     type HistoryExportFormat,
     type HistoryCategory,
@@ -30,8 +26,8 @@
   // button sits in the search layout. Native showModal() moves the viewer
   // into the browser top layer, so it cannot widen/clamp the search panel.
   const source = getContext<RoomHistoryExportContext | undefined>(HISTORY_EXPORT_CONTEXT);
-  const cache = new SvelteMap<string, ExportedMessage>();
-  let records = $state<ExportedMessage[]>([]);
+  const cache = new HistoryExportCache();
+  let records = $state.raw<readonly ExportedMessage[]>([]);
   const filters = $state<HistoryFilter>({
     query: '',
     senderId: '',
@@ -129,23 +125,13 @@
     { id: 'link', label: '链接' },
   ];
 
-  function gather(snapshot: readonly unknown[]): number {
-    if (!source) return 0;
-    const names = nameMap(source.members());
-    const added: ExportedMessage[] = [];
-    for (const value of snapshot) {
-      const item = normalizeHistoryItem(value, names);
-      if (!item || cache.has(item.eventId)) continue;
-      cache.set(item.eventId, item);
-      added.push(item);
-    }
-    if (added.length) records = mergeHistory(records, sortedHistory(added));
-    return added.length;
+  function gather(): void {
+    if (!source) return;
+    records = cache.collect(source.timelineItems(), nameMap(source.members()));
   }
 
   $effect(() => {
-    if (!source) return;
-    gather([...source.timelineItems()]);
+    gather();
   });
 
   onDestroy(() => {
@@ -155,7 +141,7 @@
 
   async function openHistory(): Promise<void> {
     if (!source || !dialog || dialog.open) return;
-    gather([...source.timelineItems()]);
+    gather();
     dialog.showModal();
     await tick();
     if (messageArea) messageArea.scrollTop = messageArea.scrollHeight;
@@ -217,7 +203,7 @@
     if (!source || endReached) return;
     const reachedEnd = await source.loadOlder(100);
     await tick();
-    gather([...source.timelineItems()]);
+    gather();
     pages += 1;
     if (reachedEnd) endReached = true;
   }
@@ -232,22 +218,22 @@
     try {
       // oxlint-disable-next-line no-unmodified-loop-condition -- UI callbacks and dialog lifecycle update these flags between awaited pages.
       while (dialog?.open && !stop && !disposed && !endReached && pages < MAX_AUTO_PAGES) {
-        const count = cache.size;
+        const count = records.length;
         await nextPage();
-        stalled = cache.size === count ? stalled + 1 : 0;
+        stalled = records.length === count ? stalled + 1 : 0;
         if (stalled >= 20) {
           automaticIncomplete = true;
           break;
         }
         if (Date.now() - lastAnnouncement > 250) {
-          feedback = `${L.loading}: ${cache.size} / ${pages} 页`;
+          feedback = `${L.loading}: ${records.length} / ${pages} 页`;
           lastAnnouncement = Date.now();
         }
         await new Promise<void>((resolve) => window.setTimeout(resolve, 65));
       }
       if (disposed || stop || !dialog?.open) return;
       if (endReached) {
-        feedback = `${L.done}: ${cache.size} ${'\u6761'}`;
+        feedback = `${L.done}: ${records.length} ${'\u6761'}`;
       } else if (pages >= MAX_AUTO_PAGES || automaticIncomplete) {
         automaticIncomplete = true;
         feedback = L.failed;
@@ -270,7 +256,7 @@
 
   function exportHistory(format: HistoryExportFormat): void {
     if (!source || !dateCheck()) return;
-    const items = filterHistory(sortedHistory(cache.values()), filters);
+    const items = matching;
     if (!items.length) {
       feedback =
         '\u5f53\u524d\u7b5b\u9009\u6761\u4ef6\u4e0b\u6ca1\u6709\u804a\u5929\u8bb0\u5f55\u3002';
@@ -436,9 +422,9 @@
               {:else}
                 <div class="message-content">{item.body}</div>
               {/if}
-              {#if (item.links ?? extractSafeLinks(item.body)).length}
+              {#if item.links.length}
                 <div class="link-cards">
-                  {#each item.links ?? extractSafeLinks(item.body) as link (link)}
+                  {#each item.links as link (link)}
                     <a
                       href={link}
                       target="_blank"

@@ -105,16 +105,27 @@ export function normalizeHistoryItem(
   value: unknown,
   names: ReadonlyMap<string, string> = new Map()
 ): ExportedMessage | null {
+  const change = historyChange(value, names);
+  return change && !('redacted' in change) ? change : null;
+}
+
+function historyChange(
+  value: unknown,
+  names: ReadonlyMap<string, string>
+): ExportedMessage | { eventId: string; redacted: true } | null {
   const item = record(value);
   const eventId = string(item.event_id) ?? string(item.eventId);
   if (!eventId) return null;
   const content = record(item.content);
   const kind = string(content.kind) ?? '';
+  if (kind === 'redacted') return { eventId, redacted: true };
   // Export message-like content only; do not write a state/receipt event as a chat message.
   if (['state_event', 'read_receipt', 'divider', 'date', 'membership'].includes(kind)) return null;
   const embedded = record(content.message);
   const plainBody =
-    string(content.body) ??
+    (kind === 'message' && typeof content.body === 'string'
+      ? content.body
+      : string(content.body)) ??
     string(embedded.body) ??
     string(record(embedded.content).body) ??
     string(embedded.filename) ??
@@ -126,7 +137,7 @@ export function normalizeHistoryItem(
     string(content.formatted_body) ??
     string(item.body);
   const category = categoryOf(content);
-  if (!plainBody && category === 'message') return null;
+  if (plainBody === null && category === 'message') return null;
   const body =
     plainBody ?? (category === 'image' ? '[图片]' : category === 'video' ? '[视频]' : '[文件]');
   const links = extractSafeLinks(body);
@@ -206,6 +217,56 @@ export function mergeHistory(
   while (i < existing.length) merged.push(existing[i++]);
   while (j < incoming.length) merged.push(incoming[j++]);
   return merged;
+}
+
+export class HistoryExportCache {
+  readonly #items = new Map<string, ExportedMessage | null>();
+  #records: readonly ExportedMessage[] = [];
+
+  collect(
+    snapshot: readonly unknown[],
+    names: ReadonlyMap<string, string>
+  ): readonly ExportedMessage[] {
+    const changed = new Set<string>();
+    let replacesRecords = false;
+    for (const value of snapshot) {
+      const item = historyChange(value, names);
+      if (!item) continue;
+      const previous = this.#items.get(item.eventId);
+      if (previous === null) continue; // A later window can still contain a stale copy.
+      if ('redacted' in item) {
+        this.#items.set(item.eventId, null);
+        if (previous) {
+          changed.add(item.eventId);
+          replacesRecords = true;
+        }
+        continue;
+      }
+      if (
+        previous &&
+        previous.timestamp === item.timestamp &&
+        previous.senderId === item.senderId &&
+        previous.senderName === item.senderName &&
+        previous.body === item.body &&
+        previous.category === item.category
+      )
+        continue;
+      this.#items.set(item.eventId, item);
+      changed.add(item.eventId);
+      if (previous) replacesRecords = true;
+    }
+    if (changed.size === 0) return this.#records;
+    const incoming: ExportedMessage[] = [];
+    for (const eventId of changed) {
+      const item = this.#items.get(eventId);
+      if (item) incoming.push(item);
+    }
+    this.#records = mergeHistory(
+      replacesRecords ? this.#records.filter((item) => !changed.has(item.eventId)) : this.#records,
+      sortedHistory(incoming)
+    );
+    return this.#records;
+  }
 }
 
 /**
