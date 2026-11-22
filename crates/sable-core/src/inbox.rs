@@ -931,6 +931,7 @@ impl Core {
             && stored.seen_notifications.insert(event_id);
         if changed {
             inbox.revision += 1;
+            self.inbox_changed.notify_one();
         }
         drop(inbox);
         if changed {
@@ -1150,6 +1151,35 @@ mod tests {
         assert_eq!(stored.entries.len(), 2);
         *core.inbox.lock().await = super::InboxCache::default();
         assert_eq!(core.stored_inbox(&client).await.unwrap().entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn marking_a_notification_seen_wakes_the_inbox_persister() {
+        let server = MatrixMockServer::new().await;
+        let (core, client, _room) = setup(&server, 1).await;
+        tokio::time::pause();
+        core.watch_inbox_persist(&client);
+        core.record_inbox(
+            &client,
+            vec![entry("first", 100)],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(super::INBOX_FLUSH_INTERVAL * 2).await;
+        let stored = super::load(&client).await.unwrap();
+        let event_id = event_id!("$first");
+        assert_eq!(stored.entries[0].event_id, event_id);
+        assert!(stored.seen_notifications.is_empty());
+
+        core.mark_notification_seen(event_id.to_owned())
+            .await
+            .unwrap();
+        tokio::time::sleep(super::INBOX_FLUSH_INTERVAL * 2).await;
+
+        let stored = super::load(&client).await.unwrap();
+        assert!(stored.seen_notifications.contains(event_id));
     }
 
     #[tokio::test]
