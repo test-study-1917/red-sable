@@ -1749,7 +1749,7 @@ mod tests {
 
         assert_eq!(
             url,
-            format!("{uri}/index.html?scalar_token=s3&room_id=%21room%3Aexample.org")
+            format!("{uri}/scalar?scalar_token=s3&room_id=%21room%3Aexample.org")
         );
     }
 
