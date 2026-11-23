@@ -4,16 +4,17 @@
 # Settings reference
 
 These names and values are accepted by `settingsDefaults` and `settingsLocked` in
-[`config.json`](web.md#configuration). Invalid values are ignored, and numbers outside
-their range are clamped.
+[`config.json`](https://docs.sable.moe/installation/self-hosting/#configuration). Invalid
+values are ignored, and numbers outside their range are clamped.
 
-[`/.well-known/sable`](web.md#homeserver-configuration) accepts the same settings
-except those marked deployment only.
+[`/.well-known/sable`](https://docs.sable.moe/installation/homeserver-configuration/)
+accepts the same settings except those marked deployment only.
 
 ## Appearance
 
 - `language` (Language): One of `system`, `ar`, `bg`, `ca`, `cs`, `de`, `en`, `es`, `fi`, `fr`, `hu`, `it`, `mi`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `th`, `tok`, `tr`, `uk`, `zh-Hans`. Default `system`.
 - `theme` (Light or dark): One of `system`, `dark`, `light`. Default `system`.
+- `deploymentTheme` (Use this server’s theme): `true` or `false`. Default `true`.
 - `underlineLinks` (Always underline links): `true` or `false`. Default `true`.
 - `renderRoomColors` (Use room colours instead of profile colours): `true` or `false`. Default `true`.
 - `renderProfileColors` (Show profile name colours): `true` or `false`. Default `true`.
@@ -24,13 +25,14 @@ except those marked deployment only.
 - `alwaysShowAltText` (Always show image descriptions): `true` or `false`. Default `false`.
 - `nameColorCorrection` (Improve name colour readability): One of `strong`, `weak`, `off`. Default `strong`.
 - `showRoomIcon` (Room icons): One of `always`, `sometimes`, `collapsed`, `never`. Default `always`.
+- `showEncryptionStatusIcon` (Show encryption status icon): `true` or `false`. Default `true`.
 - `voiceParticipantPlacement` (Voice room participants): One of `both`, `below`, `inline`. Default `both`.
 - `showRoomBanners` (Room banners above the list): `true` or `false`. Default `true`.
 - `bannerFit` (Banner size): One of `fixed`, `image`. Default `fixed`.
 - `showDmTopics` (Show topics in direct messages): `true` or `false`. Default `true`.
 - `messagePreviews` (Message previews): One of `off`, `direct`, `rooms`, `all`. Default `off`.
 - `subspaceHierarchyLimit` (Subspace nesting depth): One of `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`. Default `3`.
-- `showHome` (All rooms in the sidebar): `true` or `false`. Default `false`.
+- `showHome` (Show Home with all rooms): `true` or `false`. Default `false`.
 - `restoreLastRoom` (Restore last viewed room): `true` or `false`. Default `true`.
 - `showUnreadCounts` (Show counts on quiet rooms): `true` or `false`. Default `false`.
 - `badgeCountDMsOnly` (Show counts on quiet direct messages): `true` or `false`. Default `true`.
@@ -70,6 +72,7 @@ except those marked deployment only.
 - `hideProfileChanges` (Hide name and avatar changes): `true` or `false`. Default `true`.
 - `hideTopicChanges` (Hide topic changes): `true` or `false`. Default `false`.
 - `hideMemberInReadOnly` (Hide members in read-only rooms): `true` or `false`. Default `true`.
+- `hideSentBeforeJoined` (Hide messages sent before you joined): `true` or `false`. Default `false`.
 - `showTombstoneEvents` (Show removed-message placeholders): `true` or `false`. Default `true`.
 - `openRoomsAtUnread` (Open rooms at the first unread message): `true` or `false`. Default `true`.
 - `jumpToLatestOnSend` (Jump to your message when you send): `true` or `false`. Default `false`.
@@ -248,8 +251,8 @@ except those marked deployment only.
 - `roomBannerHeight`: Number from 56 to 500. Default `190`.
 - `doubleTapReaction`: Text. Default `❤️`.
 - `memberSort`: One of `name-asc`, `name-desc`, `newest`, `oldest`. Default `name-asc`.
-- `roomSort`: One of `recent`, `name-asc`, `name-desc`. Default `recent`.
-- `directSort`: One of `recent`, `name-asc`, `name-desc`. Default `recent`.
+- `roomSort`: One of `recent`, `unread-first`, `name-asc`, `name-desc`. Default `recent`.
+- `directSort`: One of `recent`, `unread-first`, `name-asc`, `name-desc`. Default `recent`.
 - `composerButtonOrder`: List of `gif`, `sticker`, `emoticon`, `persona`, `format`, `separator:0`, `separator:1`, `separator:2`, `separator:3`, `separator:4`, `separator:5`, `separator:6`, `separator:7`, `separator:8`. Default `["gif","sticker","emoticon","separator:0","persona","format"]`.
 - `personaGrid`: `true` or `false`. Default `true`.
 - `personaAlternateAvatar`: `true` or `false`. Default `false`.

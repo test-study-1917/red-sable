@@ -3,7 +3,7 @@
 import { render, screen, within } from '@testing-library/svelte';
 import { userEvent } from '@testing-library/user-event';
 import { tick } from 'svelte';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type {
   MemberView,
@@ -33,6 +33,14 @@ Object.assign(core.rpc.members, {
 
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('$app/navigation', () => import('#lib/test-support/app-navigation.js'));
+const afterOverlayPops = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+afterEach(() => {
+  afterOverlayPops.mockImplementation(() => Promise.resolve());
+});
+vi.mock('#lib/platform/overlay-back.svelte.js', async (original) => ({
+  ...(await original<typeof import('#lib/platform/overlay-back.svelte.js')>()),
+  afterOverlayPops,
+}));
 
 import { goto } from '#lib/test-support/app-navigation.js';
 
@@ -388,6 +396,41 @@ test('asks before the Message button creates a new chat', async () => {
     user_id: '@alice:example.org',
     encrypted: null,
     encrypt_new: true,
+  });
+});
+
+test('starting a chat waits for the closed dialog to leave history before navigating', async () => {
+  core.rpc.rooms.createDm.mockClear();
+  core.rpc.rooms.createDm.mockResolvedValue('!dm:example.org');
+  vi.mocked(goto).mockClear();
+  let release!: () => void;
+  const popped = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  afterOverlayPops.mockImplementation(() => popped);
+  render(MentionProfileCard, {
+    props: {
+      userId: '@alice:example.org',
+      roomId: '!room:example.org',
+      member: null,
+      profile: emptyProfile,
+    },
+  });
+  await tick();
+
+  await user.click(screen.getByRole('button', { name: 'Message' }));
+  await user.click(
+    within(await screen.findByRole('dialog')).getByRole('button', { name: 'Start chat' })
+  );
+  await vi.waitFor(() => {
+    expect(core.rpc.rooms.createDm).toHaveBeenCalled();
+  });
+  await tick();
+  expect(vi.mocked(goto).mock.calls.some(([url]) => url.includes('/direct/'))).toBe(false);
+
+  release();
+  await vi.waitFor(() => {
+    expect(goto).toHaveBeenCalledWith(expect.stringContaining('/direct/'));
   });
 });
 
@@ -1037,6 +1080,50 @@ test('asks before lowering your own role', async () => {
     expect(core.rpc.members.setUserPowerLevel).toHaveBeenCalledWith({
       room_id: '!room:example.org',
       user_id: '@me:example.org',
+      power_level: 50,
+    });
+  });
+});
+
+test('asks before giving someone a role equal to your own', async () => {
+  core.rpc.members.setUserPowerLevel.mockReset().mockResolvedValue(null);
+  render(MentionProfileCard, {
+    props: {
+      userId: '@alice:example.org',
+      roomId: '!room:example.org',
+      ownPowerLevel: 50,
+      permissions: {
+        own_power_level: 50,
+        can_change_power_levels: true,
+      } as RoomPermissionsView,
+      member: {
+        user_id: '@alice:example.org',
+        display_name: 'Alice',
+        real_name: 'Alice',
+        real_avatar_url: null,
+        avatar_url: null,
+        power_level: 0,
+        membership: 'join',
+        member_ts: null,
+        kicked: false,
+        service: false,
+      },
+      profile: emptyProfile,
+    },
+  });
+  await tick();
+
+  await chooseAction('Change role');
+  await user.click(await screen.findByRole('menuitem', { name: /Moderator/ }));
+  const dialog = await screen.findByRole('dialog', { name: 'Give Alice your own role?' });
+  expect(within(dialog).getByText(/@alice:example\.org/)).toBeInTheDocument();
+  expect(core.rpc.members.setUserPowerLevel).not.toHaveBeenCalled();
+
+  await user.click(within(dialog).getByRole('button', { name: 'Give role' }));
+  await vi.waitFor(() => {
+    expect(core.rpc.members.setUserPowerLevel).toHaveBeenCalledWith({
+      room_id: '!room:example.org',
+      user_id: '@alice:example.org',
       power_level: 50,
     });
   });

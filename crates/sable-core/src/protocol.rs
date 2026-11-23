@@ -1049,6 +1049,7 @@ pub struct RoomUnreadView {
 pub enum RoomSortView {
     #[default]
     Recent,
+    UnreadFirst,
     NameAsc,
     NameDesc,
 }
@@ -1076,6 +1077,9 @@ pub struct RoomListOptionsView {
     /// A quiet space quiets everything under it.
     #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
     pub quiet_rooms: Vec<OwnedRoomId>,
+    /// Shows the unread dot even where the default or a quiet space would hide it.
+    #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
+    pub shown_rooms: Vec<OwnedRoomId>,
 }
 
 impl Default for RoomListOptionsView {
@@ -1088,6 +1092,7 @@ impl Default for RoomListOptionsView {
             badge_default_direct: BadgeModeView::All,
             badge_default_group: BadgeModeView::Mentions,
             quiet_rooms: Vec::new(),
+            shown_rooms: Vec::new(),
         }
     }
 }
@@ -1588,9 +1593,19 @@ pub struct TimelineItemView {
     pub forwarded: Option<ForwardedView>,
     pub forum_title: Option<String>,
     pub shield: Option<MessageShieldView>,
+    /// MSC4268: who sent the key bundle this message was decrypted with.
+    pub shared_by: Option<SharedByView>,
     /// MSC4293: shown as deleted because its sender was banned or kicked with
     /// `redact_events`. The content is still held locally.
     pub redacted_on_ban: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct SharedByView {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub user_id: OwnedUserId,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1728,6 +1743,9 @@ pub struct PostView {
     pub url: Option<String>,
     pub author: PostAuthorView,
     pub text: Option<String>,
+    /// The language code `text` was machine translated from.
+    #[serde(default)]
+    pub translated_from: Option<String>,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub created_at: Option<u64>,
     pub media: Vec<PostMediaView>,
@@ -2694,6 +2712,19 @@ pub enum ShareHistoryView {
     Unencrypted,
     NoCrossSigning,
     HistoryNotShared,
+    NotInvited,
+    NoVerifiedDevices,
+    NothingToShare,
+}
+
+/// What became of the room's past messages when an invite went out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum InviteHistoryView {
+    Shared,
+    NotShared,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2716,6 +2747,8 @@ pub enum DiagnosticPushView {
 pub struct DefaultNotificationModesView {
     pub direct: NotificationModeView,
     pub group: NotificationModeView,
+    /// The server has the MSC4563 rule.
+    pub direct_rule: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2826,17 +2859,19 @@ pub struct PushEventView {
     pub content: serde_json::Value,
     pub sender: String,
     pub sender_display_name: Option<String>,
+    pub sender_avatar_url: Option<String>,
     pub room_name: String,
     pub room_avatar_url: Option<String>,
     pub encrypted: bool,
     pub noisy: bool,
+    pub mention: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PushFetchView {
-    Event { event: PushEventView },
+    Event { event: Box<PushEventView> },
     Discard,
     Unavailable,
 }
@@ -2847,13 +2882,35 @@ pub enum PushFetchView {
 pub struct LatestEventView {
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub sender: Option<OwnedUserId>,
-    /// Plain text: a list row must not run untrusted HTML.
+    /// Sent by this account, including a local echo.
+    pub own: bool,
+    /// Only in a room with more than two people, and never for `own`. A
+    /// per-message profile name wins over the member's.
+    pub sender_label: Option<String>,
+    pub kind: LatestEventKind,
+    /// Plain text: a list row must not run untrusted HTML. For a non-text
+    /// `kind` this is the caption or poll question, empty when there is none.
     pub body: String,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub timestamp: Option<u64>,
     pub sending: bool,
     #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
     pub event_id: Option<OwnedEventId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum LatestEventKind {
+    Text,
+    Image,
+    Video,
+    Audio,
+    Voice,
+    File,
+    Sticker,
+    Location,
+    Poll,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3182,6 +3239,8 @@ pub struct RoomRulesView {
     pub version: i64,
     pub require_acceptance: bool,
     pub accepted: bool,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    pub updated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

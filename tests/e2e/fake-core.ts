@@ -81,6 +81,7 @@ declare global {
     __e2eTimelineFocus: TimelineFocusView[];
     __e2ePaginationDirections: string[];
     __e2eRefreshRoom: () => void;
+    __e2eLeaveRoom: (roomId: string) => void;
     __e2eReceiveMessage: (body: string) => void;
     __e2eEmitTimelineEvent: (event: unknown) => void;
     __e2eTimelineIndexOf: (subscription: number, itemId: string) => number;
@@ -204,6 +205,9 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       marked_unread: false,
       latest_event: {
         sender: '@alice:example.test',
+        own: false,
+        sender_label: null,
+        kind: 'text',
         body: 'General message 19',
         timestamp: 1_700_000_000_019,
         sending: false,
@@ -229,6 +233,9 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       highlight: 0,
       latest_event: {
         sender: '@ada:example.test',
+        own: false,
+        sender_label: null,
+        kind: 'text',
         body: 'invited you',
         timestamp: 1_700_000_000_000,
         sending: false,
@@ -461,6 +468,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
             per_message_profile: null,
             bundled_link_previews: [],
             link_previews_removed: null,
+            shared_by: null,
             redacted_on_ban: null,
             mention: 'none',
             forwarded: null,
@@ -1161,6 +1169,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'notifications.default_modes': () => ({
         direct: 'all',
         group: defaultGroupMode,
+        direct_rule: false,
       }),
       'notifications.mention_notifications': () => mentionNotificationModes,
       'notifications.event_notifications': () => eventNotifications,
@@ -1217,9 +1226,14 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
             reply: false,
           },
         ]
-          .map((item) => ({ ...item, read: item.read || seenNotifications.has(item.event_id) }))
+          .map((item) => ({
+            ...item,
+            read: params.focused ? seenNotifications.has(item.event_id) : item.read,
+          }))
           .filter(
             (item) =>
+              (!params.focused ||
+                (item.highlight && rooms.get(item.room_id)?.state === 'joined')) &&
               (params.room_id == null || item.room_id === params.room_id) &&
               (params.include_read || !item.read) &&
               (params.filter !== 'mentions' || item.highlight) &&
@@ -1238,6 +1252,11 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       },
       'notifications.mark_notification_seen': (params, port) => {
         seenNotifications.add(params.event_id);
+        port.emit({ type: 'inbox_changed' });
+        return null;
+      },
+      'notifications.mark_notifications_seen': (params, port) => {
+        for (const id of params.event_ids) seenNotifications.add(id);
         port.emit({ type: 'inbox_changed' });
         return null;
       },
@@ -2124,6 +2143,11 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
           ]),
         }),
     });
+
+    window.__e2eLeaveRoom = (roomId) => {
+      rooms.delete(roomId);
+      activePort?.emit({ type: 'inbox_changed' });
+    };
 
     class FakeSharedWorker {
       port = new FakePort();

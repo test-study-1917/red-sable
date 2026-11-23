@@ -268,6 +268,8 @@ export type CreateJoinRuleView = "public" | "invite" | "knock" | "restricted" | 
 export type DefaultNotificationModesView = {
 	direct: NotificationModeView,
 	group: NotificationModeView,
+	/**  The server has the MSC4563 rule. */
+	direct_rule: boolean,
 };
 
 export type DehydratedDeviceView = "unsupported" | "disabled" | "active" | "needs_recovery_key";
@@ -555,6 +557,7 @@ export type InboxItemView = {
 	read: boolean,
 	thread_root: string | null,
 	reply: boolean,
+	/**  Custom notification category retained across upgrades. */
 	kind: string,
 	jump_event_id: string,
 	reaction_key: string | null,
@@ -562,6 +565,9 @@ export type InboxItemView = {
 };
 
 export type InviteAvatarsView = "on" | "off";
+
+/**  What became of the room's past messages when an invite went out. */
+export type InviteHistoryView = "shared" | "not_shared" | "failed";
 
 export type InviteTriageView = {
 	room_id: string,
@@ -625,10 +631,23 @@ export type KeywordNotificationView = {
 	mode: MentionNotificationModeView,
 };
 
+export type LatestEventKind = "text" | "image" | "video" | "audio" | "voice" | "file" | "sticker" | "location" | "poll";
+
 /**  Structured, so arranging and localising the preview stays with the UI. */
 export type LatestEventView = {
 	sender: string | null,
-	/**  Plain text: a list row must not run untrusted HTML. */
+	/**  Sent by this account, including a local echo. */
+	own: boolean,
+	/**
+	 *  Only in a room with more than two people, and never for `own`. A
+	 *  per-message profile name wins over the member's.
+	 */
+	sender_label: string | null,
+	kind: LatestEventKind,
+	/**
+	 *  Plain text: a list row must not run untrusted HTML. For a non-text
+	 *  `kind` this is the caption or poll question, empty when there is none.
+	 */
 	body: string,
 	timestamp: number | null,
 	sending: boolean,
@@ -1033,6 +1052,8 @@ export type PostView = {
 	url: string | null,
 	author: PostAuthorView,
 	text: string | null,
+	/**  The language code `text` was machine translated from. */
+	translated_from: string | null,
 	created_at: number | null,
 	media: PostMediaView[],
 	stats: PostStatsView | null,
@@ -1197,10 +1218,12 @@ export type PushEventView = {
 	content: unknown,
 	sender: string,
 	sender_display_name: string | null,
+	sender_avatar_url: string | null,
 	room_name: string,
 	room_avatar_url: string | null,
 	encrypted: boolean,
 	noisy: boolean,
+	mention: boolean,
 };
 
 export type PushFetchView = { kind: "event"; event: PushEventView } | { kind: "discard" } | { kind: "unavailable" };
@@ -1433,6 +1456,8 @@ export type RoomListOptionsView = {
 	badge_default_group: BadgeModeView,
 	/**  A quiet space quiets everything under it. */
 	quiet_rooms: string[],
+	/**  Shows the unread dot even where the default or a quiet space would hide it. */
+	shown_rooms: string[],
 };
 
 export type RoomOpenView = {
@@ -1527,6 +1552,7 @@ export type RoomRulesView = {
 	version: number,
 	require_acceptance: boolean,
 	accepted: boolean,
+	updated_at: number | null,
 };
 
 /**  `key` is `home`, `unspaced`, `direct` or a space's room id. */
@@ -1554,7 +1580,7 @@ export type RoomSectionsUpdate = {
 	room_spaces: RoomSpacesView[] | null,
 };
 
-export type RoomSortView = "recent" | "name-asc" | "name-desc";
+export type RoomSortView = "recent" | "unread-first" | "name-asc" | "name-desc";
 
 /**  Where a room sits in the spaces this account has joined. */
 export type RoomSpacesView = {
@@ -1943,7 +1969,12 @@ export type SessionInfo = {
 	needs_reauth: boolean,
 };
 
-export type ShareHistoryView = "shared" | "unencrypted" | "no_cross_signing" | "history_not_shared";
+export type ShareHistoryView = "shared" | "unencrypted" | "no_cross_signing" | "history_not_shared" | "not_invited" | "no_verified_devices" | "nothing_to_share";
+
+export type SharedByView = {
+	user_id: string,
+	name: string | null,
+};
 
 export type SidebarItemView = { kind: "space"; room_id: string } | { kind: "folder"; id: string; name: string | null; icon: string | null; content: string[] };
 
@@ -2226,6 +2257,8 @@ export type TimelineItemView = {
 	forwarded: ForwardedView | null,
 	forum_title: string | null,
 	shield: MessageShieldView | null,
+	/**  MSC4268: who sent the key bundle this message was decrypted with. */
+	shared_by: SharedByView | null,
 	/**
 	 *  MSC4293: shown as deleted because its sender was banned or kicked with
 	 *  `redact_events`. The content is still held locally.
@@ -3196,6 +3229,8 @@ export type Rpc = {
 	before_ts?: number | null,
 	room_id?: string | null,
 	query?: string | null,
+	/**  Focused notification history tracks read state independently from room receipts. */
+	focused?: boolean,
 }) => Promise<{
 	items: InboxItemView[],
 	has_more: boolean,
@@ -3207,7 +3242,12 @@ export type Rpc = {
 	recorded: number,
 	has_more: boolean,
 }>;
-    markNotificationSeen: (params: { event_id: string }) => Promise<null>;
+    markNotificationSeen: (params: {
+	event_id: string,
+}) => Promise<null>;
+    markNotificationsSeen: (params: {
+	event_ids: string[],
+}) => Promise<null>;
     setOptions: (params: {
 	enabled: boolean,
 	content: boolean,
@@ -3504,7 +3544,7 @@ export type Rpc = {
     invite: (params: {
 	room_id: string,
 	user_id: string,
-}) => Promise<null>;
+}) => Promise<InviteHistoryView>;
     create: (params: {
 	name?: string | null,
 	topic: string | null,
@@ -3657,6 +3697,7 @@ export type Rpc = {
     accessToken: (params?: Record<string, never>) => Promise<string | null>;
     openIdToken: (params?: Record<string, never>) => Promise<OpenIdTokenView>;
     syncStatus: (params?: Record<string, never>) => Promise<SyncStatus>;
+    retrySync: (params?: Record<string, never>) => Promise<null>;
     serverFeatures: (params?: Record<string, never>) => Promise<string[]>;
     delayedEventsSupported: (params?: Record<string, never>) => Promise<boolean>;
     qrGrantSupported: (params?: Record<string, never>) => Promise<boolean>;
@@ -4083,6 +4124,7 @@ export type RpcMethods = {
   'notifications.inbox': Rpc['notifications']['inbox'];
   'notifications.backfill_inbox': Rpc['notifications']['backfillInbox'];
   'notifications.mark_notification_seen': Rpc['notifications']['markNotificationSeen'];
+  'notifications.mark_notifications_seen': Rpc['notifications']['markNotificationsSeen'];
   'notifications.set_options': Rpc['notifications']['setOptions'];
   'notifications.push_rules': Rpc['notifications']['pushRules'];
   'notifications.set_push_rule_enabled': Rpc['notifications']['setPushRuleEnabled'];
@@ -4197,6 +4239,7 @@ export type RpcMethods = {
   'session.access_token': Rpc['session']['accessToken'];
   'session.open_id_token': Rpc['session']['openIdToken'];
   'session.sync_status': Rpc['session']['syncStatus'];
+  'session.retry_sync': Rpc['session']['retrySync'];
   'session.server_features': Rpc['session']['serverFeatures'];
   'session.delayed_events_supported': Rpc['session']['delayedEventsSupported'];
   'session.qr_grant_supported': Rpc['session']['qrGrantSupported'];
@@ -4448,6 +4491,7 @@ export function createRpc(call: RpcCall): Rpc {
       inbox: (params) => call('notifications.inbox', params) as ReturnType<Rpc['notifications']['inbox']>,
       backfillInbox: (params) => call('notifications.backfill_inbox', params) as ReturnType<Rpc['notifications']['backfillInbox']>,
       markNotificationSeen: (params) => call('notifications.mark_notification_seen', params) as ReturnType<Rpc['notifications']['markNotificationSeen']>,
+      markNotificationsSeen: (params) => call('notifications.mark_notifications_seen', params) as ReturnType<Rpc['notifications']['markNotificationsSeen']>,
       setOptions: (params) => call('notifications.set_options', params) as ReturnType<Rpc['notifications']['setOptions']>,
       pushRules: (params = {}) => call('notifications.push_rules', params) as ReturnType<Rpc['notifications']['pushRules']>,
       setPushRuleEnabled: (params) => call('notifications.set_push_rule_enabled', params) as ReturnType<Rpc['notifications']['setPushRuleEnabled']>,
@@ -4578,6 +4622,7 @@ export function createRpc(call: RpcCall): Rpc {
       accessToken: (params = {}) => call('session.access_token', params) as ReturnType<Rpc['session']['accessToken']>,
       openIdToken: (params = {}) => call('session.open_id_token', params) as ReturnType<Rpc['session']['openIdToken']>,
       syncStatus: (params = {}) => call('session.sync_status', params) as ReturnType<Rpc['session']['syncStatus']>,
+      retrySync: (params = {}) => call('session.retry_sync', params) as ReturnType<Rpc['session']['retrySync']>,
       serverFeatures: (params = {}) => call('session.server_features', params) as ReturnType<Rpc['session']['serverFeatures']>,
       delayedEventsSupported: (params = {}) => call('session.delayed_events_supported', params) as ReturnType<Rpc['session']['delayedEventsSupported']>,
       qrGrantSupported: (params = {}) => call('session.qr_grant_supported', params) as ReturnType<Rpc['session']['qrGrantSupported']>,

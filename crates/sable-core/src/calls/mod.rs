@@ -238,35 +238,40 @@ fn pick_focus(
     deprecated,
     reason = "calls still get their token from the JWT service of the earlier MSC4195"
 )]
-fn livekit_service_urls(transports: Vec<RtcTransport>) -> Vec<String> {
+fn livekit_foci(transports: Vec<RtcTransport>) -> Vec<String> {
     transports
         .into_iter()
-        .filter_map(|transport| match transport {
-            RtcTransport::LiveKit(livekit) => livekit.service_url,
-            RtcTransport::LegacyLiveKit(livekit) => livekit.service_url,
-            _ => None,
+        .filter_map(|transport| {
+            let (service_url, url) = match transport {
+                RtcTransport::LiveKit(livekit) => (livekit.service_url, Some(livekit.url)),
+                RtcTransport::LegacyLiveKit(livekit) => (livekit.service_url, livekit.url),
+                _ => return None,
+            };
+            service_url
+                .filter(|url| !url.trim().is_empty())
+                .or_else(|| url.filter(|url| membership::is_sfu_url(url)))
         })
-        .filter(|url| !url.trim().is_empty())
         .collect()
 }
 
-async fn discovered_service_urls(client: &Client) -> Vec<String> {
-    let endpoint = client
+async fn discovered_foci(client: &Client) -> Vec<String> {
+    let mut foci = client
         .discover_rtc_transports()
         .await
         .ok()
         .flatten()
-        .map(livekit_service_urls)
+        .map(livekit_foci)
         .unwrap_or_default();
-    if !endpoint.is_empty() {
-        return endpoint;
+    if foci.iter().all(|focus| membership::is_sfu_url(focus)) {
+        foci.extend(
+            client
+                .well_known_rtc_transports()
+                .await
+                .map(livekit_foci)
+                .unwrap_or_default(),
+        );
     }
-
-    client
-        .well_known_rtc_transports()
-        .await
-        .map(livekit_service_urls)
-        .unwrap_or_default()
+    foci
 }
 
 const SLOT_TYPES: [&str; 2] = [crate::view::RTC_SLOT_TYPE, "m.rtc.slot"];
@@ -541,7 +546,7 @@ pub(crate) fn affects_voice_roster(update: &matrix_sdk_base::sticky::StickyEvent
         .iter()
         .chain(&update.updated)
         .map(|event| &event.key)
-        .chain(update.removed.iter().map(|(key, _)| key))
+        .chain(update.removed.iter().map(|removal| &removal.key))
         .any(|key| membership::is_rtc_member_type(&key.event_type.to_string()))
 }
 
@@ -654,13 +659,13 @@ impl Core {
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|transports| !livekit_service_urls(transports).is_empty());
+                .is_some_and(|transports| !livekit_foci(transports).is_empty());
         let rtc_transports = if endpoint {
             RtcTransportSource::Endpoint
         } else if client
             .well_known_rtc_transports()
             .await
-            .is_ok_and(|transports| !livekit_service_urls(transports).is_empty())
+            .is_ok_and(|transports| !livekit_foci(transports).is_empty())
         {
             RtcTransportSource::WellKnown
         } else {
@@ -744,15 +749,19 @@ impl Core {
             return Some(url);
         }
 
-        let discovered = discovered_service_urls(&room.client()).await;
-        pick_focus(&[], &discovered, configured)
+        let (sfu_urls, services): (Vec<_>, Vec<_>) = discovered_foci(&room.client())
+            .await
+            .into_iter()
+            .partition(|focus| membership::is_sfu_url(focus));
+        // Older clients can only follow a JWT service, so an SFU URL is the last resort.
+        pick_focus(&[], &services, configured).or_else(|| sfu_urls.into_iter().next())
     }
 
     pub(crate) fn watch_incoming_calls(self: &Arc<Self>, client: &Client, generation: u64) {
         invite_service::watch(self, client, generation);
     }
 
-    /// The well-known fallback in `discovered_service_urls` retries a server name that may serve
+    /// The well-known fallback in `discovered_foci` retries a server name that may serve
     /// nothing, so it is fetched here rather than on the first room header.
     pub(crate) fn prefetch_call_well_known(&self, client: &Client) {
         let client = client.clone();
@@ -1156,7 +1165,8 @@ impl Core {
         match result {
             Ok(sent) => {
                 let claim = self
-                    .claim_call_termination(generation, session, &shared, |termination| {
+                    .claim_call_termination(generation, session, &shared, |state| {
+                        let termination = &mut state.termination;
                         if termination.ended.is_some() {
                             return None;
                         }
@@ -1194,8 +1204,8 @@ impl Core {
         &self,
         generation: u64,
         session: CallSessionId,
-        state: &Arc<tokio::sync::Mutex<runtime::State>>,
-        end: impl FnOnce(&mut termination::Reader) -> Option<termination::Ended>,
+        state: &tokio::sync::Mutex<runtime::State>,
+        end: impl FnOnce(&mut runtime::State) -> Option<termination::Ended>,
     ) -> Result<Option<CallTerminationClaim>, RpcCode> {
         let mut calls = self.call_sessions.lock().await;
         let mut state = state.lock().await;
@@ -1204,13 +1214,13 @@ impl Core {
         }
         // A joining call is not in the map yet, but join must still see an
         // admitted end before it can activate the session.
-        let Some(ended) = end(&mut state.termination) else {
+        let Some(ended) = end(&mut state) else {
             return Ok(None);
         };
         let Some(teardown) = calls.take_for_teardown(session) else {
             return Ok(None);
         };
-        state.termination.pending.clear();
+        state.termination.clear_pending();
         Ok(Some(CallTerminationClaim {
             generation,
             session,
@@ -1269,7 +1279,7 @@ impl Core {
         drop(call.postpone.take());
         drop(call.termination_keys.take());
         call._handlers.clear();
-        call.state.lock().await.termination.pending.clear();
+        call.state.lock().await.termination.clear_pending();
         let result = self.hang_up(&call).await;
         if let Err(error) = &result {
             tracing::warn!(?error, room_id = %call.room.room_id(), "could not retract call signaling");
@@ -1479,22 +1489,27 @@ mod tests {
     use matrix_sdk::ruma::{device_id, owned_user_id, user_id};
 
     use super::membership::CallMember;
-    use super::{
-        can_join_call, livekit_service_urls, member_views, membership_state_key, pick_focus,
-    };
+    use super::{can_join_call, livekit_foci, member_views, membership_state_key, pick_focus};
 
     #[test]
-    fn test_both_livekit_transport_types_name_their_jwt_service() {
+    fn test_a_transport_offers_its_jwt_service_before_its_sfu_url() {
         let transports = serde_json::from_value(serde_json::json!([
             {"type": "livekit", "livekit_service_url": "https://legacy.example"},
             {"type": "m.livekit", "url": "wss://sfu.example", "livekit_service_url": "https://current.example"},
             {"type": "m.livekit", "url": "wss://sfu-only.example"},
+            {"type": "livekit", "url": "wss://deployed-sfu-only.example"},
+            {"type": "livekit", "url": "https://not-a-websocket.example"},
         ]))
         .unwrap();
 
         assert_eq!(
-            livekit_service_urls(transports),
-            ["https://legacy.example", "https://current.example"]
+            livekit_foci(transports),
+            [
+                "https://legacy.example",
+                "https://current.example",
+                "wss://sfu-only.example",
+                "wss://deployed-sfu-only.example",
+            ]
         );
     }
 
@@ -1651,6 +1666,7 @@ mod tests {
             created_ts: 0,
             joined_ts: 0,
             expires_at_ms: None,
+            sticky_event_id: None,
             foci: Vec::new(),
             screen_sharing: false,
             wire: super::membership::RtcWire::Deployed,

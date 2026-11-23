@@ -1,1 +1,21 @@
-{}
+{
+  "upcoming": {
+    "added": [
+      "deploymentTheme",
+      "showEncryptionStatusIcon"
+    ],
+    "changed": []
+  },
+  "v26.11.4": {
+    "added": [
+      "hideSentBeforeJoined"
+    ],
+    "changed": []
+  },
+  "v26.11.3": {
+    "added": [
+      "bannerFit"
+    ],
+    "changed": []
+  }
+}

@@ -31,6 +31,7 @@ use matrix_sdk_base::{RawStateEventWithKeys, RoomInfo, RoomInfoNotableUpdateReas
 use crate::ResultExt;
 use crate::api::rooms::PublicRoomsOk;
 use crate::api::spaces::HierarchyOk;
+use crate::errors::CoreResultExt as _;
 use crate::protocol::{JoinRuleView, RoomPreviewView, RpcCode, RpcError};
 
 use crate::Core;
@@ -264,6 +265,19 @@ impl Core {
                 .mark_as_dm(room_id, &others)
                 .await
                 .or_failed(self, "set_direct")?;
+            let rules = self.push_rules().await?;
+            let snapshot = rules.snapshot().await;
+            if !crate::push_rules::direct_defaults(
+                &snapshot,
+                true,
+                room.joined_members_count() == 2,
+            ) {
+                let writes = crate::push_rules::plan_direct_default(&snapshot, room_id);
+                rules
+                    .apply(writes)
+                    .await
+                    .or_report(self, "set_direct_notifications")?;
+            }
         } else {
             room.set_is_direct(false)
                 .await

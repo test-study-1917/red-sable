@@ -1,9 +1,13 @@
 use serde_json::{Value, json};
 
-use super::{EVENT_TYPE, Reader, local_members};
-use crate::calls::{membership::CallMember, runtime::tests::member};
+use super::{Candidate, EVENT_TYPE, MembershipWait, Reader, local_members};
+use crate::calls::{
+    membership::{CallMember, StickyMemberships},
+    runtime::tests::member,
+};
 use crate::protocol::CallMode;
 use matrix_sdk::ruma::{owned_device_id, owned_user_id};
+use matrix_sdk_base::RequestedRequiredStates;
 
 fn person(user: &str, device: &str, joined: u64) -> CallMember {
     let mut value = member(CallMode::Compatibility, joined, &[]);
@@ -251,6 +255,188 @@ fn sticky_renewal_advances_membership_boundary_and_pending_is_bounded() {
     assert_eq!(own.user_id, owned_user_id!("@me:example.org"));
 }
 
+#[test]
+fn decrypted_ends_wait_for_membership_without_relaxing_the_server_timestamp() {
+    let own = person("@me:example.org", "LOCAL", 100);
+    let mut remote = person("@alice:example.org", "ALICE", 200);
+    remote.wire = crate::calls::membership::RtcWire::Stable;
+    let sender = remote.user_id.as_str();
+    let mut reader = Reader::new(&own, std::slice::from_ref(&own), 300);
+    let mut too_old = event(sender, 199);
+    too_old["event_id"] = json!("$before-membership");
+    for signal in [too_old, event(sender, 220)] {
+        assert!(
+            reader
+                .admit_candidate(
+                    Candidate::parse(&signal).unwrap(),
+                    300,
+                    Some(MembershipWait::EncryptedSticky { since: 300 })
+                )
+                .is_none()
+        );
+    }
+    assert!(reader.retry_membership(310).is_none());
+    reader.observe_verified(&own, std::slice::from_ref(&remote), vec![own.clone()], 320);
+    let ended = reader.retry_membership(320).unwrap();
+    assert_eq!(ended.event_id, "$end");
+
+    let mut reader = Reader::new(&own, std::slice::from_ref(&own), 300);
+    let signal = Candidate::parse(&event(sender, 220)).unwrap();
+    assert!(
+        reader
+            .admit_candidate(
+                signal,
+                300,
+                Some(MembershipWait::EncryptedSticky { since: 300 })
+            )
+            .is_none()
+    );
+    reader.observe_verified(&own, &[remote], vec![own.clone()], 30_301);
+    assert!(reader.retry_membership(30_301).is_none());
+    assert!(!reader.waits_for_membership());
+}
+
+#[test]
+fn a_slow_room_roster_request_still_rechecks_the_original_end_time() {
+    let own = person("@me:example.org", "LOCAL", 100);
+    let remote = person("@alice:example.org", "ALICE", 200);
+    let mut reader = Reader::new(&own, std::slice::from_ref(&own), 300);
+    let mut before_join = event(remote.user_id.as_str(), 199);
+    before_join["event_id"] = json!("$before-join");
+    for event in [before_join, event(remote.user_id.as_str(), 220)] {
+        assert!(
+            reader
+                .admit_candidate(
+                    Candidate::parse(&event).unwrap(),
+                    300,
+                    Some(MembershipWait::RoomRoster {
+                        encrypted_sticky: false
+                    }),
+                )
+                .is_none()
+        );
+    }
+    let synced_at = 31_300;
+    reader.observe_verified(&own, &[remote], vec![own.clone()], synced_at);
+    assert_eq!(reader.retry_membership(synced_at).unwrap().event_id, "$end");
+}
+
+#[test]
+fn a_room_roster_delayed_past_sticky_expiry_cannot_extend_end_authority() {
+    let own = person("@me:example.org", "LOCAL", 100);
+    let mut remote = person("@alice:example.org", "ALICE", 200);
+    remote.expires_at_ms = Some(2_000);
+    let mut reader = Reader::new(&own, &[own.clone(), remote.clone()], 1_000);
+    let mut late = event(remote.user_id.as_str(), 8_000);
+    late["event_id"] = json!("$after-expiry");
+    for event in [late, event(remote.user_id.as_str(), 1_900)] {
+        assert!(
+            reader
+                .admit_candidate(
+                    Candidate::parse(&event).unwrap(),
+                    9_000,
+                    Some(MembershipWait::RoomRoster {
+                        encrypted_sticky: false
+                    }),
+                )
+                .is_none()
+        );
+    }
+    let synced_at = 12_000;
+    reader.observe(&own, std::slice::from_ref(&own), synced_at);
+    assert_eq!(reader.retry_membership(synced_at).unwrap().event_id, "$end");
+}
+
+#[test]
+fn a_same_event_expiry_correction_survives_the_batch_and_limits_a_queued_end() {
+    for (correction_at, replace_same_key) in [(1_500, false), (12_000, false), (12_000, true)] {
+        check_expiry_correction(correction_at, replace_same_key);
+    }
+}
+
+fn check_expiry_correction(correction_at: u64, replace_same_key: bool) {
+    use crate::calls::{
+        content,
+        membership::{RtcWire, StickyExpiry, StickyTrust},
+    };
+
+    let own = person("@me:example.org", "LOCAL", 100);
+    let mut remote = person("@alice:example.org", "ALICE", 200);
+    remote.mode = CallMode::Matrix2;
+    remote.wire = RtcWire::Stable;
+    let room_id = ruma::owned_room_id!("!call:example.org");
+    let mut membership = json!({
+        "type": "m.rtc.member", "event_id": "$remote", "sender": remote.user_id,
+        "origin_server_ts": 200, "msc4354_sticky": {"duration_ms": 60_000},
+        "content": content::content_at(&room_id, &remote, None, 1_000),
+    });
+    let mut sticky = StickyMemberships::default();
+    assert!(sticky.apply_with_trust(
+        &membership,
+        1_000,
+        StickyTrust::Plain,
+        Some((StickyExpiry::Known(23_000), 1_000))
+    ));
+    let mut observed = sticky.members(1_000);
+    observed.push(own.clone());
+    let mut reader = Reader::new(&own, &observed, 1_000);
+    let correction = |sticky: &mut StickyMemberships| {
+        assert!(!sticky.apply_with_trust(
+            &membership,
+            correction_at,
+            StickyTrust::Plain,
+            Some((StickyExpiry::Known(2_000), correction_at))
+        ));
+    };
+    if correction_at < 2_000 {
+        correction(&mut sticky);
+        // An unsynced room can reconcile known sticky events, but it must
+        // not seed the reader from the unverified roster.
+        reader.reconcile_sticky(&sticky, correction_at);
+    }
+    let mut late = event(remote.user_id.as_str(), 8_000);
+    late["event_id"] = json!("$after-corrected-expiry");
+    for event in [late, event(remote.user_id.as_str(), 1_900)] {
+        assert!(
+            reader
+                .admit_candidate(
+                    Candidate::parse(&event).unwrap(),
+                    9_000,
+                    Some(MembershipWait::RoomRoster {
+                        encrypted_sticky: false
+                    })
+                )
+                .is_none()
+        );
+    }
+
+    let batch_at = 12_000;
+    if correction_at == batch_at {
+        correction(&mut sticky);
+    }
+    membership["event_id"] = json!("$newer");
+    membership["origin_server_ts"] = json!(10_000);
+    if !replace_same_key {
+        membership["sender"] = json!("@other:example.org");
+    }
+    assert!(sticky.apply_with_trust(
+        &membership,
+        batch_at,
+        StickyTrust::Plain,
+        Some((StickyExpiry::Known(13_000), batch_at))
+    ));
+    reader.reconcile_sticky(&sticky, batch_at);
+    let synced_at = if replace_same_key { 14_000 } else { batch_at };
+    reader.reconcile_sticky(&sticky, synced_at);
+    reader.observe_verified(
+        &own,
+        &sticky.members(synced_at),
+        vec![own.clone()],
+        synced_at,
+    );
+    assert_eq!(reader.retry_membership(synced_at).unwrap().event_id, "$end");
+}
+
 /// These tests exercise the SDK's actual live sync/decryption handler, rather
 /// than treating JSON parser fixtures as evidence for Matrix transport.
 #[tokio::test]
@@ -280,23 +466,28 @@ async fn sdk_plain_live_event_reaches_reader_but_state_and_other_room_do_not() {
         100,
     );
     let remote = person("@alice:example.org", "A", 100);
-    let state = Arc::new(Mutex::new(State::new(
-        own.clone(),
-        vec![own, remote.clone()],
-        Default::default(),
-        &room.room_id().to_owned(),
-        false,
-        None,
-        false,
-    )));
+    let state = Arc::new(Mutex::new(
+        State::new(
+            own.clone(),
+            vec![own, remote.clone()],
+            StickyMemberships::default(),
+            &room.room_id().to_owned(),
+            false,
+            None,
+            false,
+        )
+        .with_admission_roster(),
+    ));
     let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    server.mock_get_members().ok(vec![]).mount().await;
+    room.sync_members().await.unwrap();
     let _guard = watch_termination(
         &core,
-        &client,
         1,
         CallSessionId(1),
         &room,
         &state,
+        Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     );
     let raw =
@@ -335,6 +526,123 @@ async fn sdk_plain_live_event_reaches_reader_but_state_and_other_room_do_not() {
             .terminated_by,
         remote.user_id.as_str()
     );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one SDK fixture verifies same-batch sticky and ordered controls"
+)]
+async fn sdk_stable_sticky_join_is_visible_to_an_end_in_the_same_sync_batch() {
+    use crate::calls::{
+        content,
+        membership::RtcWire,
+        runtime::{State, watch_termination},
+    };
+    use crate::protocol::CallSessionId;
+    use crate::{Core, store::MemorySessionStore};
+    use matrix_sdk::{
+        ruma::{api::client::sync::sync_events::msc4186, room_id, serde::Raw},
+        test_utils::mocks::MatrixMockServer,
+    };
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Notify};
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!stable:example.org");
+    let sender = owned_user_id!("@alice:example.org");
+    let factory = EventFactory::new().room(room_id).sender(&sender);
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id).add_state_event(factory.member(&sender)),
+        )
+        .await;
+    server.mock_room_state_encryption().plain().mount().await;
+    room.request_encryption_state().await.unwrap();
+    server
+        .mock_get_members()
+        .ok(vec![factory.member(&sender).into_raw()])
+        .mount()
+        .await;
+    room.sync_members().await.unwrap();
+
+    let now = crate::now_ms();
+    let mut own = person(
+        client.user_id().unwrap().as_str(),
+        client.device_id().unwrap().as_str(),
+        now - 1_000,
+    );
+    let mut remote = person(sender.as_str(), "ALICE", now - 100);
+    for member in [&mut own, &mut remote] {
+        member.mode = CallMode::Matrix2;
+        member.wire = RtcWire::Stable;
+        member.foci = vec!["wss://sfu.example.org".to_owned()];
+    }
+    let membership = |event_id, member: &CallMember| {
+        json!({
+            "type": "m.rtc.member", "event_id": event_id, "sender": member.user_id,
+            "origin_server_ts": member.created_ts, "msc4354_sticky": {"duration_ms": 3_600_000},
+            "content": content::content_at(&room_id.to_owned(), member, None, now),
+        })
+    };
+    let mut sticky = StickyMemberships::default();
+    assert!(sticky.apply(&membership("$own", &own), now));
+    let state = Arc::new(Mutex::new(State::new(
+        own.clone(),
+        vec![own],
+        sticky,
+        &room_id.to_owned(),
+        false,
+        None,
+        false,
+    )));
+    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let _guard = watch_termination(
+        &core,
+        1,
+        CallSessionId(1),
+        &room,
+        &state,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    );
+
+    let mut before_join = event(sender.as_str(), now - 101);
+    before_join["event_id"] = json!("$before-join");
+    let mut response = msc4186::Response::new("stable-batch".to_owned());
+    let mut timeline = msc4186::response::Room::default();
+    timeline.timeline = [before_join, event(sender.as_str(), now)]
+        .iter()
+        .map(|event| Raw::new(event).unwrap().cast_unchecked())
+        .collect();
+    response.rooms.insert(room_id.to_owned(), timeline);
+    let mut sticky = msc4186::response::StickyEventsRoom::default();
+    sticky.events.push(
+        Raw::new(&membership("$remote", &remote))
+            .unwrap()
+            .cast_unchecked(),
+    );
+    response
+        .extensions
+        .sticky_events
+        .rooms
+        .insert(room_id.to_owned(), sticky);
+    client
+        .process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default())
+        .await
+        .unwrap();
+
+    let state = state.lock().await;
+    let ended = state
+        .termination
+        .ended
+        .as_ref()
+        .expect("same-batch sticky member can end the call");
+    assert_eq!(ended.event_id, "$end");
+    assert_eq!(ended.terminated_by, sender.as_str());
 }
 
 #[tokio::test]
@@ -422,6 +730,7 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
     assert!(!String::from_utf8_lossy(&request.body).contains("io.element.call.terminate"));
 
     let room = bob.get_room(room_id).unwrap();
+    room.sync_members().await.unwrap();
     let own = person(
         bob.user_id().unwrap().as_str(),
         bob.device_id().unwrap().as_str(),
@@ -432,15 +741,18 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
         alice.device_id().unwrap().as_str(),
         100,
     );
-    let state = Arc::new(Mutex::new(State::new(
-        own.clone(),
-        vec![own.clone(), remote],
-        Default::default(),
-        &room_id.to_owned(),
-        false,
-        None,
-        false,
-    )));
+    let state = Arc::new(Mutex::new(
+        State::new(
+            own.clone(),
+            vec![own.clone(), remote],
+            StickyMemberships::default(),
+            &room_id.to_owned(),
+            false,
+            None,
+            false,
+        )
+        .with_admission_roster(),
+    ));
     let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
     let (_wake, _handlers, _keys) =
         join_handlers(&core, 1, CallSessionId(1), &room, &state, false).await;
@@ -634,15 +946,18 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
         100,
     );
     let remote = person("@alice:example.org", "A", 100);
-    let state = Arc::new(Mutex::new(State::new(
-        own.clone(),
-        vec![own.clone(), remote.clone()],
-        Default::default(),
-        &room.room_id().to_owned(),
-        false,
-        None,
-        false,
-    )));
+    let state = Arc::new(Mutex::new(
+        State::new(
+            own.clone(),
+            vec![own.clone(), remote.clone()],
+            StickyMemberships::default(),
+            &room.room_id().to_owned(),
+            false,
+            None,
+            false,
+        )
+        .with_admission_roster(),
+    ));
     let session = CallSessionId(99);
     let membership = core
         .call_memberships
@@ -664,8 +979,10 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
             _handlers: Vec::new(),
         },
     );
+    server.mock_get_members().ok(vec![]).mount().await;
+    room.sync_members().await.unwrap();
     let signal = event(remote.user_id.as_str(), 200);
-    let ((), (), leave) = tokio::join!(
+    let (_, _, leave) = tokio::join!(
         receive_termination(&core, 1, session, &room, &state, signal.clone()),
         receive_termination(&core, 1, session, &room, &state, signal),
         core.leave_call(session),
@@ -709,17 +1026,22 @@ async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
         100,
     );
     let remote = person("@alice:example.org", "A", 100);
-    let state = Arc::new(Mutex::new(State::new(
-        own.clone(),
-        vec![own, remote.clone()],
-        Default::default(),
-        &room.room_id().to_owned(),
-        false,
-        None,
-        false,
-    )));
+    let state = Arc::new(Mutex::new(
+        State::new(
+            own.clone(),
+            vec![own, remote.clone()],
+            StickyMemberships::default(),
+            &room.room_id().to_owned(),
+            false,
+            None,
+            false,
+        )
+        .with_admission_roster(),
+    ));
     let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
     let session = CallSessionId(1);
+    server.mock_get_members().ok(vec![]).mount().await;
+    room.sync_members().await.unwrap();
     receive_termination(
         &core,
         1,
@@ -765,6 +1087,8 @@ async fn rpc_fixture() -> RpcFixture {
         .sync_joined_room(&client, room_id!("!call:example.org"))
         .await;
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    server.mock_get_members().ok(vec![]).mount().await;
+    room.sync_members().await.unwrap();
     let (core, events) = Core::new("test", Box::new(MemorySessionStore::default()));
     *core.session.write().await = Some(Session {
         account_id: "test".into(),
@@ -779,15 +1103,18 @@ async fn rpc_fixture() -> RpcFixture {
         100,
     );
     let remote = person("@alice:example.org", "A", 100);
-    let state = Arc::new(Mutex::new(State::new(
-        own.clone(),
-        vec![own.clone(), remote],
-        Default::default(),
-        &room.room_id().to_owned(),
-        false,
-        None,
-        false,
-    )));
+    let state = Arc::new(Mutex::new(
+        State::new(
+            own.clone(),
+            vec![own.clone(), remote],
+            StickyMemberships::default(),
+            &room.room_id().to_owned(),
+            false,
+            None,
+            false,
+        )
+        .with_admission_roster(),
+    ));
     let session = CallSessionId(99);
     let membership = core
         .call_memberships
@@ -817,6 +1144,41 @@ async fn rpc_fixture() -> RpcFixture {
         session,
         events,
     }
+}
+
+#[tokio::test]
+async fn a_limited_sync_can_invalidate_memberships_while_end_admission_waits_for_its_claim() {
+    use crate::calls::runtime::receive_termination;
+    use matrix_sdk::ruma::api::client::sync::sync_events::msc4186;
+
+    let f = rpc_fixture().await;
+    // The key-retry task uses this same admission path independently of sync.
+    let calls = f.core.call_sessions.lock().await;
+    let mut admission = std::pin::pin!(receive_termination(
+        &f.core,
+        1,
+        f.session,
+        &f.room,
+        &f.state,
+        event("@alice:example.org", crate::now_ms()),
+    ));
+    assert!(futures_util::poll!(&mut admission).is_pending());
+    let mut timeline = msc4186::response::Room::default();
+    timeline.limited = true;
+    let mut response = msc4186::Response::new("limited-before-claim".to_owned());
+    response.rooms.insert(f.room.room_id().to_owned(), timeline);
+    f.room
+        .client()
+        .process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default())
+        .await
+        .unwrap();
+    assert!(!f.room.are_members_synced());
+    drop(calls);
+
+    assert!(admission.await);
+    let state = f.state.lock().await;
+    assert!(state.termination.waits_for_membership());
+    assert!(state.termination.ended.is_none());
 }
 
 async fn wait_for_send(server: &matrix_sdk::test_utils::mocks::MatrixMockServer) {
@@ -1097,8 +1459,8 @@ async fn a_claim_completed_after_account_switch_cannot_signal_on_the_replacement
     let value = event("@alice:example.org", crate::now_ms());
     let claim = f
         .core
-        .claim_call_termination(generation, f.session, &f.state, |termination| {
-            termination.admit(&value, crate::now_ms())
+        .claim_call_termination(generation, f.session, &f.state, |state| {
+            state.termination.admit(&value, crate::now_ms())
         })
         .await
         .unwrap()
@@ -1158,8 +1520,8 @@ async fn account_retirement_owns_unclaimed_calls_and_awaits_already_claimed_ones
         if claimed_first {
             let claim = f
                 .core
-                .claim_call_termination(generation, f.session, &f.state, |termination| {
-                    termination.admit(&value, crate::now_ms())
+                .claim_call_termination(generation, f.session, &f.state, |state| {
+                    state.termination.admit(&value, crate::now_ms())
                 })
                 .await
                 .unwrap()

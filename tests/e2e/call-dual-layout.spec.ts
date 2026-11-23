@@ -320,6 +320,36 @@ test('search and thread panels shrink the actual measured room content and resto
   await expect(layout(page)).toHaveAttribute('data-call-layout', 'side-by-side');
 });
 
+test('resting call controls give the bottom of the stage back to video', async ({ page }, info) => {
+  await open(page);
+  await expect(layout(page)).toHaveAttribute('data-call-layout', 'side-by-side');
+  const stage = page.locator('.stage');
+  const mediaSpace = () =>
+    stage.locator('.media').evaluate((media) => {
+      const style = getComputedStyle(media);
+      const bottom = Number.parseFloat(style.paddingBottom);
+      return {
+        bottom,
+        gap: Number.parseFloat(style.paddingInlineEnd),
+        height: media.clientHeight - Number.parseFloat(style.paddingTop) - bottom,
+      };
+    });
+
+  await stage.hover({ position: { x: 16, y: 96 } });
+  await expect(stage).not.toHaveClass(/resting/);
+  const dockHeight = await stage.locator('.dock').evaluate((dock) => dock.clientHeight);
+  const visible = await mediaSpace();
+  expect(visible.bottom).toBe(dockHeight);
+  expect(visible.bottom).toBeGreaterThan(visible.gap);
+
+  await page.locator('.chat-host').hover({ position: { x: 16, y: 40 } });
+  await expect(stage).toHaveClass(/resting/);
+  const resting = await mediaSpace();
+  expect(resting.bottom).toBe(resting.gap);
+  expect(resting.height).toBeGreaterThan(visible.height);
+  await page.screenshot({ path: info.outputPath('resting.png') });
+});
+
 test('connecting and failed calls still lay out without another join or stale dock space', async ({
   page,
 }, info) => {

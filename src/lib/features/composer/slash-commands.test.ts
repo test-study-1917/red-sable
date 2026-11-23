@@ -12,6 +12,7 @@ import type {
   PersonaView,
   RoomPreviewView,
   RpcParams,
+  InviteHistoryView,
   ShareHistoryView,
   Rpc,
 } from '#src/generated/protocol';
@@ -30,7 +31,7 @@ import { memberView } from '#lib/test-support/room-views.js';
 function fakeCommands() {
   return {
     banUser: vi.fn(() => Promise.resolve()),
-    inviteUser: vi.fn(() => Promise.resolve()),
+    inviteUser: vi.fn(() => Promise.resolve<InviteHistoryView>('not_shared')),
     joinRoom: vi.fn(() => Promise.resolve('!joined:example.org')),
     kickUser: vi.fn(() => Promise.resolve()),
     knockRoom: vi.fn(() => Promise.resolve('!knocked:example.org')),
@@ -597,14 +598,41 @@ test('/sharehistory shares the room history with one user', async () => {
   });
 });
 
-test('/sharehistory says why nothing was shared', async () => {
+test('/invite says when the invite went out without its history', async () => {
+  const commands = fakeCommands();
+  commands.inviteUser.mockResolvedValue('failed');
+
+  await expect(runSlash('/invite @bob:example.org', context(commands))).resolves.toEqual({
+    kind: 'done',
+    notice: { key: 'room.inviteSentHistoryFailed', values: { user: '@bob:example.org' } },
+  });
+});
+
+test('/sharehistory confirms when the keys went out', async () => {
   const rpc = fakeRpc();
-  rpc.encryption.shareHistory.mockResolvedValue('no_cross_signing');
 
   await expect(
     runSlash('/sharehistory @bob:example.org', context(fakeCommands(), rpc))
-  ).rejects.toMatchObject({ key: 'composer.slashShareHistory.no_cross_signing' });
+  ).resolves.toEqual({
+    kind: 'done',
+    notice: { key: 'composer.slashShareHistory.shared', values: { user: '@bob:example.org' } },
+  });
 });
+
+test.each(['no_cross_signing', 'not_invited', 'no_verified_devices', 'nothing_to_share'] as const)(
+  '/sharehistory says why nothing was shared: %s',
+  async (outcome) => {
+    const rpc = fakeRpc();
+    rpc.encryption.shareHistory.mockResolvedValue(outcome);
+
+    await expect(
+      runSlash('/sharehistory @bob:example.org', context(fakeCommands(), rpc))
+    ).rejects.toMatchObject({
+      key: `composer.slashShareHistory.${outcome}`,
+      values: { user: '@bob:example.org' },
+    });
+  }
+);
 
 test('/acl hands the flags to the core', async () => {
   const rpc = fakeRpc();

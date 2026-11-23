@@ -1,3 +1,6 @@
+#[path = "sticky_ttl_primary_acceptance.rs"]
+mod sticky_ttl_primary_acceptance;
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
@@ -8,6 +11,7 @@ use matrix_sdk::{
     ruma::{device_id, event_id, owned_device_id, owned_room_id, owned_user_id, room_id},
     test_utils::mocks::MatrixMockServer,
 };
+use matrix_sdk_base::RequestedRequiredStates;
 use matrix_sdk_ui::sync_service::SyncService;
 use tokio::sync::Mutex;
 
@@ -27,11 +31,561 @@ pub(in crate::calls) fn member(mode: CallMode, created_ts: u64, foci: &[&str]) -
         created_ts,
         joined_ts: created_ts,
         expires_at_ms: None,
+        sticky_event_id: None,
         foci: foci.iter().map(ToString::to_string).collect(),
         screen_sharing: false,
         wire: super::membership::RtcWire::Deployed,
         focus_servers: HashMap::default(),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limited_sync_dispatches_later_events_while_call_fetches_members() {
+    check_limited_sync(false).await;
+    check_limited_sync(true).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture covers SDK dispatch, roster refresh and tombstone reconciliation"
+)]
+async fn check_limited_sync(remote_left: bool) {
+    use std::time::Duration;
+
+    use matrix_sdk::ruma::{
+        api::client::sync::sync_events::msc4186, events::AnySyncMessageLikeEvent, serde::Raw,
+    };
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use serde_json::json;
+    use tokio::sync::Notify;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = owned_room_id!("!limited:example.org");
+    let alice = owned_user_id!("@alice:example.org");
+    let factory = EventFactory::new().room(&room_id).sender(&alice);
+    let room = server
+        .sync_room(&client, JoinedRoomBuilder::new(&room_id))
+        .await;
+    server.mock_room_state_encryption().plain().mount().await;
+    room.request_encryption_state().await.unwrap();
+    let cached_join = remote_left.then(|| factory.member(&alice).into_raw());
+    let initial_members = server
+        .mock_get_members()
+        .ok(cached_join.into_iter().collect())
+        .mount_as_scoped()
+        .await;
+    room.sync_members().await.unwrap();
+    assert!(room.are_members_synced());
+    drop(initial_members);
+
+    let now = crate::now_ms();
+    let mut own = member(CallMode::Matrix2, now - 1_000, &[]);
+    own.user_id = client.user_id().unwrap().to_owned();
+    own.device_id = client.device_id().map(ToOwned::to_owned);
+    own.member_id = Some("own".to_owned());
+    own.wire = super::membership::RtcWire::Stable;
+    let mut remote = member(CallMode::Matrix2, now - 100, &[]);
+    remote.user_id = alice.clone();
+    remote.member_id = Some("remote".to_owned());
+    remote.wire = own.wire;
+    let membership = |id, member: &CallMember| {
+        json!({
+            "type": "m.rtc.member", "event_id": id, "sender": member.user_id,
+            "origin_server_ts": member.created_ts, "msc4354_sticky": {"duration_ms": 3_600_000},
+            "content": super::content(&room_id, member, None),
+        })
+    };
+    let mut sticky = super::StickyMemberships::default();
+    assert!(sticky.apply(&membership("$own", &own), now));
+    let state = Arc::new(Mutex::new(State::new(
+        own.clone(),
+        vec![own],
+        sticky,
+        &room_id,
+        false,
+        None,
+        false,
+    )));
+    let mut sticky = msc4186::response::StickyEventsRoom::default();
+    sticky.events.push(
+        Raw::new(&membership("$remote", &remote))
+            .unwrap()
+            .cast_unchecked(),
+    );
+    let mut response = msc4186::Response::new("sticky-join".to_owned());
+    response
+        .extensions
+        .sticky_events
+        .rooms
+        .insert(room_id.clone(), sticky);
+    client
+        .process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default())
+        .await
+        .unwrap();
+    assert_eq!(room.sticky_events().live().len(), 1);
+
+    let members_started = Arc::new(Notify::new());
+    let (release_members, wait) = std::sync::mpsc::sync_channel(1);
+    let wait = parking_lot::Mutex::new(wait);
+    let member_event = factory.member(&remote.user_id);
+    let member_event = if remote_left {
+        member_event.leave()
+    } else {
+        member_event
+    };
+    let member_event = member_event.into_raw::<ruma::events::room::member::RoomMemberEvent>();
+    let response = ResponseTemplate::new(200).set_body_json(json!({"chunk": [member_event]}));
+    Mock::given(method("GET"))
+        .and(path_regex(r"/rooms/.*/members$"))
+        .respond_with({
+            let members_started = members_started.clone();
+            move |_: &wiremock::Request| {
+                members_started.notify_one();
+                wait.lock().recv_timeout(Duration::from_secs(10)).unwrap();
+                response.clone()
+            }
+        })
+        .expect(1)
+        .mount(server.server())
+        .await;
+
+    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let session = CallSessionId(1);
+    let (wake, _handlers, _keys) =
+        super::join_handlers(&core, 1, session, &room, &state, false).await;
+    let update = tokio::spawn({
+        let room = room.clone();
+        let state = state.clone();
+        async move {
+            wake.notified().await;
+            refresh(&core, 1, session, &room, &state).await
+        }
+    });
+    let later_handler = client.add_room_event_handler(
+        &room_id,
+        move |raw: Raw<AnySyncMessageLikeEvent>, room: matrix_sdk::Room| {
+            let members_started = members_started.clone();
+            async move {
+                if raw.get_field::<String>("type").unwrap().as_deref() == Some("m.room.message") {
+                    members_started.notified().await;
+                    assert!(
+                        !room.are_members_synced(),
+                        "later message dispatched before /members completed"
+                    );
+                }
+            }
+        },
+    );
+    let _later_handler = client.event_handler_drop_guard(later_handler);
+
+    let end = |id, ts| {
+        json!({
+            "type": "io.element.call.reaction", "event_id": id, "sender": remote.user_id,
+            "origin_server_ts": ts,
+            "content": {"io.element.call.terminate": {"terminated_by": remote.user_id, "timestamp": now}},
+        })
+    };
+    let mut timeline = msc4186::response::Room::default();
+    timeline.limited = true;
+    timeline.timeline = [end("$old", now - 101), end("$end", now), json!({
+        "type": "m.room.message", "event_id": "$later", "sender": remote.user_id,
+        "origin_server_ts": now, "content": {"msgtype": "m.text", "body": "still receiving messages"},
+    })].iter().map(|event| Raw::new(event).unwrap().cast_unchecked()).collect();
+    let mut response = msc4186::Response::new("limited".to_owned());
+    response.rooms.insert(room_id.clone(), timeline);
+
+    tokio::time::timeout(
+        Duration::from_secs(4),
+        client.process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default()),
+    )
+    .await
+    .expect("sync must not wait for the call's /members response")
+    .unwrap();
+    assert!(state.lock().await.termination.ended.is_none());
+    release_members.send(()).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(4), update)
+        .await
+        .expect("call update retries pending ends after /members")
+        .unwrap();
+    if remote_left {
+        assert_eq!(outcome, Refreshed::Current);
+        assert!(
+            state.lock().await.termination.ended.is_none(),
+            "an old cached Join never authorizes an end"
+        );
+        return;
+    }
+    assert_eq!(outcome, Refreshed::Terminated);
+    assert_eq!(
+        state
+            .lock()
+            .await
+            .termination
+            .ended
+            .as_ref()
+            .unwrap()
+            .event_id,
+        "$end"
+    );
+
+    let mut tombstone = membership("$left", &remote);
+    tombstone["origin_server_ts"] = json!(now + 1);
+    tombstone["content"] = json!({"sticky_key": remote.member_id});
+    let mut sticky = msc4186::response::StickyEventsRoom::default();
+    sticky
+        .events
+        .push(Raw::new(&tombstone).unwrap().cast_unchecked());
+    let mut response = msc4186::Response::new("left".to_owned());
+    response
+        .extensions
+        .sticky_events
+        .rooms
+        .insert(room_id, sticky);
+    client
+        .process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default())
+        .await
+        .unwrap();
+    assert!(room.sticky_events().live().is_empty());
+    assert_eq!(room.sticky_events().unexpired().len(), 1);
+    let (roster, observed) = super::current_members(&room, &state, true).await;
+    assert!(observed);
+    let (members, _) = roster.unwrap();
+    assert!(
+        !members
+            .iter()
+            .any(|member| member.user_id == remote.user_id)
+    );
+}
+
+#[tokio::test]
+async fn a_queued_end_is_rechecked_even_when_the_local_call_member_is_absent() {
+    use matrix_sdk::ruma::{api::client::sync::sync_events::msc4186, serde::Raw};
+    use matrix_sdk_test::event_factory::EventFactory;
+    use serde_json::json;
+
+    for (remote_left, end_before_leave) in [(false, false), (true, false), (true, true)] {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let room_id = owned_room_id!("!call:example.org");
+        let room = server.sync_joined_room(&client, &room_id).await;
+        server.mock_room_state_encryption().plain().mount().await;
+        room.request_encryption_state().await.unwrap();
+        let now = crate::now_ms();
+        let mut own = member(CallMode::Matrix2, now - 20_000, &[]);
+        own.user_id = client.user_id().unwrap().to_owned();
+        own.device_id = client.device_id().map(ToOwned::to_owned);
+        own.member_id = Some("own".to_owned());
+        own.wire = super::membership::RtcWire::Stable;
+        let mut remote = member(CallMode::Matrix2, now - 15_000, &[]);
+        remote.user_id = owned_user_id!("@alice:example.org");
+        remote.member_id = Some("remote".to_owned());
+        remote.wire = own.wire;
+        let mut sticky = super::StickyMemberships::default();
+        let mut remote_event = json!({
+            "type": "m.rtc.member", "event_id": "$remote", "sender": remote.user_id,
+            "origin_server_ts": remote.created_ts, "msc4354_sticky": {"duration_ms": 3_600_000},
+            "content": super::content(&room_id, &remote, None),
+        });
+        assert!(sticky.apply(&remote_event, now));
+        let mut observed = sticky.members(now);
+        observed.push(own.clone());
+        let mut state =
+            State::new(own, observed, sticky, &room_id, false, None, false).with_admission_roster();
+        state.own_observed = true;
+        let state = Arc::new(Mutex::new(state));
+        let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+        let session = CallSessionId(1);
+        assert_eq!(
+            super::current_members(&room, &state, false)
+                .await
+                .0
+                .unwrap_err(),
+            Refreshed::Absent
+        );
+        // The late end arrived before /members finished, but after the
+        // peer's server departure plus the 5s tolerance.
+        let end_ts = if end_before_leave { now - 12_000 } else { now };
+        assert!(super::receive_termination(&core, 1, session, &room, &state, json!({
+            "type": "io.element.call.reaction", "event_id": "$end", "sender": remote.user_id,
+            "origin_server_ts": end_ts,
+            "content": {"io.element.call.terminate": {"terminated_by": remote.user_id, "timestamp": end_ts}},
+        })).await);
+        assert!(state.lock().await.termination.ended.is_none());
+        if remote_left {
+            remote_event["event_id"] = json!("$left");
+            remote_event["origin_server_ts"] = json!(now - 10_000);
+            remote_event["content"] = json!({"sticky_key": remote.member_id});
+            let mut sticky = msc4186::response::StickyEventsRoom::default();
+            sticky
+                .events
+                .push(Raw::new(&remote_event).unwrap().cast_unchecked());
+            let mut response = msc4186::Response::new("remote-left".to_owned());
+            response
+                .extensions
+                .sticky_events
+                .rooms
+                .insert(room_id.clone(), sticky);
+            client
+                .process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default())
+                .await
+                .unwrap();
+        }
+        let joined = EventFactory::new()
+            .room(&room_id)
+            .sender(&remote.user_id)
+            .member(&remote.user_id);
+        server
+            .mock_get_members()
+            .ok(vec![joined.into_raw()])
+            .mount()
+            .await;
+        let outcome = refresh(&core, 1, session, &room, &state).await;
+        let state = state.lock().await;
+        if remote_left && !end_before_leave {
+            assert_eq!(outcome, Refreshed::Absent);
+            assert!(
+                state.termination.ended.is_none(),
+                "a peer who left cannot send an end past the leave tolerance"
+            );
+            continue;
+        }
+        assert_eq!(outcome, Refreshed::Terminated);
+        assert_eq!(state.termination.ended.as_ref().unwrap().event_id, "$end");
+    }
+}
+
+#[tokio::test]
+async fn join_discovery_does_not_seed_admission_from_unsynced_room_members() {
+    use matrix_sdk::ruma::serde::Raw;
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use serde_json::json;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = owned_room_id!("!join:example.org");
+    let now = crate::now_ms();
+    let mut remote = member(
+        CallMode::Compatibility,
+        now - 500,
+        &["https://focus.example.org"],
+    );
+    remote.user_id = owned_user_id!("@alice:example.org");
+    let factory = EventFactory::new().room(&room_id).sender(&remote.user_id);
+    let membership = json!({
+        "type": "org.matrix.msc3401.call.member", "event_id": "$call", "sender": remote.user_id,
+        "state_key": format!("_{}_{}_m.call", remote.user_id, remote.own_device_id()),
+        "origin_server_ts": remote.created_ts, "content": super::content(&room_id, &remote, None),
+    });
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(&room_id)
+                .add_state_event(factory.member(&remote.user_id))
+                .add_state_event(Raw::new(&membership).unwrap().cast_unchecked()),
+        )
+        .await;
+    server.mock_room_state_encryption().plain().mount().await;
+    let failed_members = Mock::given(method("GET"))
+        .and(path_regex("/members$"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({"errcode": "M_FORBIDDEN", "error": "unavailable"})),
+        )
+        .expect(1)
+        .mount_as_scoped(server.server())
+        .await;
+    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let session = CallSessionId(1);
+    let (state, _, _) = super::discover_state(
+        &core,
+        &room,
+        session,
+        Some("https://focus.example.org".to_owned()),
+        Some(CallMode::Compatibility),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    drop(failed_members);
+    assert!(!room.are_members_synced());
+    assert_eq!(
+        super::membership::active_members(&room).await[0].user_id,
+        remote.user_id
+    );
+    assert_eq!(
+        room.get_member_no_sync(&remote.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .membership(),
+        &ruma::events::room::member::MembershipState::Join
+    );
+    assert!(super::receive_termination(&core, 1, session, &room, &state, json!({
+        "type": "io.element.call.reaction", "event_id": "$end", "sender": remote.user_id,
+        "origin_server_ts": now,
+        "content": {"io.element.call.terminate": {"terminated_by": remote.user_id, "timestamp": now}},
+    })).await);
+    let leave = factory.member(&remote.user_id).leave().into_raw();
+    server.mock_get_members().ok(vec![leave]).mount().await;
+    assert_eq!(
+        refresh(&core, 1, session, &room, &state).await,
+        Refreshed::Current
+    );
+    assert!(state.lock().await.termination.ended.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture must receive a tombstone while /members is held"
+)]
+async fn a_sticky_member_removed_while_discovery_fetches_room_members_never_gains_end_authority() {
+    use std::time::Duration;
+
+    use matrix_sdk::ruma::{api::client::sync::sync_events::msc4186, serde::Raw};
+    use matrix_sdk_test::event_factory::EventFactory;
+    use serde_json::json;
+    use tokio::sync::Notify;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = owned_room_id!("!join:example.org");
+    let room = server.sync_joined_room(&client, &room_id).await;
+    server.mock_room_state_encryption().plain().mount().await;
+    let now = crate::now_ms();
+    let mut remote = member(CallMode::Matrix2, now - 100, &["https://focus.example.org"]);
+    remote.user_id = owned_user_id!("@alice:example.org");
+    remote.member_id = Some("remote".to_owned());
+    let mut sticky = json!({
+        "type": super::membership::RTC_MEMBER_EVENT_TYPE, "event_id": "$sticky", "sender": remote.user_id,
+        "origin_server_ts": remote.created_ts, "msc4354_sticky": {"duration_ms": 900_000},
+        "content": super::content(&room_id, &remote, None),
+    });
+    let sync_sticky = |value: &serde_json::Value, cursor: &str| {
+        let mut sticky_room = msc4186::response::StickyEventsRoom::default();
+        sticky_room
+            .events
+            .push(Raw::new(value).unwrap().cast_unchecked());
+        let mut response = msc4186::Response::new(cursor.to_owned());
+        response
+            .extensions
+            .sticky_events
+            .rooms
+            .insert(room_id.clone(), sticky_room);
+        response
+    };
+    client
+        .process_sliding_sync_test_helper(
+            &sync_sticky(&sticky, "sticky-join"),
+            &RequestedRequiredStates::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(room.sticky_events().live().len(), 1);
+    let joined = EventFactory::new()
+        .room(&room_id)
+        .sender(&remote.user_id)
+        .member(&remote.user_id)
+        .into_raw::<ruma::events::room::member::RoomMemberEvent>();
+    let started = Arc::new(Notify::new());
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
+    let wait = parking_lot::Mutex::new(wait);
+    let response = ResponseTemplate::new(200).set_body_json(json!({"chunk": [joined]}));
+    Mock::given(method("GET"))
+        .and(path_regex("/members$"))
+        .respond_with({
+            let started = started.clone();
+            move |_: &wiremock::Request| {
+                started.notify_one();
+                wait.lock().recv_timeout(Duration::from_secs(10)).unwrap();
+                response.clone()
+            }
+        })
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let session = CallSessionId(1);
+    let discovery = tokio::spawn({
+        let core = core.clone();
+        let room = room.clone();
+        async move {
+            super::discover_state(
+                &core,
+                &room,
+                session,
+                Some("https://focus.example.org".to_owned()),
+                Some(CallMode::Compatibility),
+                None,
+                false,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(4), started.notified())
+        .await
+        .unwrap();
+    sticky["event_id"] = json!("$left");
+    sticky["origin_server_ts"] = json!(now);
+    sticky["content"] = json!({"msc4354_sticky_key": remote.member_id});
+    client
+        .process_sliding_sync_test_helper(
+            &sync_sticky(&sticky, "sticky-left"),
+            &RequestedRequiredStates::default(),
+        )
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let (state, _, _) = discovery.await.unwrap().unwrap();
+    assert!(room.are_members_synced());
+    assert!(room.sticky_events().live().is_empty());
+    assert_eq!(
+        state.lock().await.members[0].user_id,
+        remote.user_id,
+        "the discovery list predates the tombstone"
+    );
+
+    let end_ts = crate::now_ms();
+    super::receive_termination(&core, 1, session, &room, &state, json!({
+        "type": "io.element.call.reaction", "event_id": "$end", "sender": remote.user_id,
+        "origin_server_ts": end_ts,
+        "content": {"io.element.call.terminate": {"terminated_by": remote.user_id, "timestamp": end_ts}},
+    })).await;
+    assert!(state.lock().await.termination.ended.is_none());
+}
+
+const GET_TOKEN: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+
+fn token(sub: &str, room: &str) -> String {
+    let claims = serde_json::json!({"sub": sub, "video": {"room": room}});
+    format!(
+        "x.{}.x",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    )
+}
+
+async fn provision_backend(
+    room: &matrix_sdk::Room,
+    state: &Mutex<State>,
+    own: &CallMember,
+    backend: (String, String, Option<ruma::OwnedServerName>),
+) {
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    super::provision_missing(&core, 1, CallSessionId(1), room, state, own, vec![backend]).await;
 }
 
 #[tokio::test]
@@ -375,6 +929,7 @@ async fn an_element_call_peers_key_is_emitted_on_the_oldest_members_focus() {
         members,
         emitted_members: None,
         backends: BTreeMap::new(),
+        backend_aliases: BTreeMap::new(),
         latest_keys: HashMap::new(),
         member_first_seen: HashMap::new(),
         silent_reported: HashSet::new(),
@@ -566,6 +1121,7 @@ async fn refresh_fixture(
             members: Vec::new(),
             emitted_members: None,
             backends,
+            backend_aliases: BTreeMap::new(),
             pending_keys: Vec::new(),
             latest_keys: HashMap::new(),
             member_first_seen: HashMap::new(),
@@ -1020,6 +1576,113 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
     assert!(matches!(sync_service.state().get(), SyncState::Idle));
 }
 
+async fn join_on_an_sfu_url_only_homeserver(
+    subject: impl Fn(&ruma::UserId, &str) -> String,
+) -> (
+    MatrixMockServer,
+    Arc<Core>,
+    String,
+    Result<crate::api::calls::JoinOk, crate::protocol::RpcError>,
+) {
+    use std::time::Duration;
+    use wiremock::matchers::{body_partial_json, method, path, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (server, _sfu, room, _, _, _) = legacy_move_fixture(true).await;
+    server
+        .mock_sliding_sync()
+        .with_delay(Duration::from_secs(1))
+        .ok_json(serde_json::json!({"pos": "p", "lists": {}, "rooms": {}}))
+        .mount()
+        .await;
+    server
+        .mock_room_send()
+        .ok(event_id!("$invite"))
+        .mount()
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/rtc/transports$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "rtc_transports": [{"type": "livekit", "url": "wss://sfu.example.org"}],
+        })))
+        .mount(server.server())
+        .await;
+    let client = room.client();
+    let user_id = client.user_id().unwrap().to_owned();
+    let member_id = format!("{user_id}:{}", client.device_id().unwrap());
+    let jwt = token(&subject(&user_id, &member_id), "r");
+    Mock::given(method("POST"))
+        .and(path(GET_TOKEN))
+        .and(body_partial_json(serde_json::json!({
+            "url": "wss://sfu.example.org", "room_id": room.room_id(),
+            "slot_id": "m.call#ROOM", "member_id": member_id,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"jwt": jwt})))
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    *core.session.write().await = Some(Session {
+        account_id: "test".to_owned(),
+        client,
+        sync_service,
+        homeserver: server.server().uri(),
+        oauth: false,
+    });
+    let joined = core
+        .join_call(
+            room.room_id().to_owned(),
+            None,
+            Some(CallMode::Compatibility),
+            None,
+        )
+        .await;
+    (server, core, member_id, joined)
+}
+
+#[tokio::test]
+async fn a_homeserver_with_only_an_sfu_url_is_joined_through_get_token() {
+    let (server, core, member_id, joined) =
+        join_on_an_sfu_url_only_homeserver(super::membership::stable_identity).await;
+    let joined = joined.unwrap();
+    assert_eq!(joined.url, "wss://sfu.example.org");
+
+    let membership = server
+        .server()
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT"
+                && request
+                    .url
+                    .path()
+                    .contains("/state/org.matrix.msc3401.call.member/")
+        })
+        .map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).unwrap())
+        .find(|body| body.get("foci_preferred").is_some())
+        .unwrap();
+    assert_eq!(
+        membership["foci_preferred"],
+        serde_json::json!([{"type": "livekit", "url": "wss://sfu.example.org"}])
+    );
+    assert_eq!(membership["membershipID"], member_id.as_str());
+    core.leave_call(joined.session).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_sfu_token_for_another_identity_aborts_the_join() {
+    let (_server, _core, _member_id, joined) =
+        join_on_an_sfu_url_only_homeserver(|_, _| "someone-else".to_owned()).await;
+    let error = joined.unwrap_err();
+    assert!(
+        format!("{error:?}").contains("identity mismatch"),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_prepared_join_publishes_only_after_the_old_membership_is_retracted() {
     use std::time::Duration;
@@ -1194,6 +1857,137 @@ async fn account_retirement_waits_for_a_membership_put_and_its_abort() {
     );
     assert_ne!(writes.first(), Some(&left));
     assert_eq!(writes.last(), Some(&left));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "exercise the real join through a held announcement and late limited sync"
+)]
+async fn a_limited_sync_end_queued_during_the_announcement_prevents_a_join_grant() {
+    use std::time::Duration;
+
+    use matrix_sdk::ruma::{api::client::sync::sync_events::msc4186, serde::Raw};
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use serde_json::json;
+    use tokio::sync::Notify;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    let (server, sfu, room, _, _, _) = legacy_move_fixture(true).await;
+    let client = room.client();
+    let room_id = room.room_id().to_owned();
+    let remote_user = owned_user_id!("@remote:example.org");
+    let factory = EventFactory::new().room(&room_id).sender(&remote_user);
+    server
+        .mock_sync()
+        .ok_and_run(&client, |sync| {
+            sync.add_joined_room(
+                JoinedRoomBuilder::new(&room_id).add_state_event(factory.member(&remote_user)),
+            );
+            sync.add_global_account_data(factory.direct().add_user(&remote_user, &room_id));
+        })
+        .await;
+    assert!(room.is_direct().await.unwrap());
+    let joined = factory
+        .member(&remote_user)
+        .sender(&remote_user)
+        .into_raw::<ruma::events::room::member::RoomMemberEvent>();
+    Mock::given(method("GET"))
+        .and(path_regex("/members$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [joined]})))
+        .expect(2)
+        .mount(server.server())
+        .await;
+    let announcing = Arc::new(Notify::new());
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
+    let wait = parking_lot::Mutex::new(wait);
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"/send/org\.matrix\.msc4075\.rtc\.notification/",
+        ))
+        .respond_with({
+            let announcing = announcing.clone();
+            move |_: &wiremock::Request| {
+                announcing.notify_one();
+                wait.lock().recv_timeout(Duration::from_secs(10)).unwrap();
+                ResponseTemplate::new(200).set_body_json(json!({"event_id": "$announced"}))
+            }
+        })
+        .expect(1)
+        .mount(server.server())
+        .await;
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    *core.session.write().await = Some(Session {
+        account_id: "test".to_owned(),
+        client: client.clone(),
+        sync_service,
+        homeserver: server.server().uri(),
+        oauth: false,
+    });
+    let prepared = super::prepare_join(
+        &core,
+        room_id.clone(),
+        Some(sfu.uri()),
+        Some(CallMode::Legacy),
+        None,
+    )
+    .await
+    .unwrap();
+    let state = prepared.state.clone();
+    let mut publishing = tokio::spawn({
+        let core = core.clone();
+        async move { prepared.publish(&core).await }
+    });
+    tokio::select! {
+        result = &mut publishing => panic!("join returned before the held announcement: {result:?}"),
+        started = tokio::time::timeout(Duration::from_secs(5), announcing.notified()) => {
+            started.expect("joining must send its announcement");
+        }
+    }
+    assert!(room.are_members_synced());
+    let now = crate::now_ms();
+    let mut remote = member(CallMode::Legacy, now - 100, &[&sfu.uri()]);
+    remote.user_id = remote_user;
+    let membership = json!({
+        "type": "org.matrix.msc3401.call.member", "event_id": "$remote", "sender": remote.user_id,
+        "state_key": format!("_{}_{}_m.call", remote.user_id, remote.own_device_id()),
+        "origin_server_ts": remote.created_ts, "content": super::content(&room_id, &remote, None),
+    });
+    let mut timeline = msc4186::response::Room::default();
+    timeline.limited = true;
+    timeline
+        .required_state
+        .push(Raw::new(&membership).unwrap().cast_unchecked());
+    timeline.timeline.push(Raw::new(&json!({
+        "type": "io.element.call.reaction", "event_id": "$end-during-join", "sender": remote.user_id,
+        "origin_server_ts": now,
+        "content": {"io.element.call.terminate": {"terminated_by": remote.user_id, "timestamp": now}},
+    })).unwrap().cast_unchecked());
+    let mut response = msc4186::Response::new("limited-after-confirm".to_owned());
+    response.rooms.insert(room_id, timeline);
+    tokio::time::timeout(
+        Duration::from_secs(4),
+        client.process_sliding_sync_test_helper(&response, &RequestedRequiredStates::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(state.lock().await.termination.new_membership_candidates());
+    assert!(core.call_sessions.lock().await.is_empty());
+    release.send(()).unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(4), publishing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(err.code, crate::protocol::RpcCode::CallTerminatedDuringJoin { event_id, .. } if event_id == "$end-during-join")
+    );
+    assert!(core.call_sessions.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -1401,6 +2195,7 @@ async fn a_stable_focus_token_is_requested_from_the_homeserver() {
         &room,
         "wss://focus.example.org",
         Some(matrix_sdk::ruma::server_name!("remote.example.org")),
+        "m.call#room",
         "member",
     )
     .await
@@ -1487,6 +2282,338 @@ async fn a_remote_focus_cannot_change_the_participant_identity() {
 }
 
 #[tokio::test]
+async fn a_matrix2_token_comes_from_the_endpoint_that_grants_the_members_identity() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    for (older, endpoint) in [(false, "/sfu/get"), (true, "/get_token")] {
+        let (_homeserver, _sfu, room, mut own, _oldest, _state) = legacy_move_fixture(true).await;
+        own.mode = CallMode::Matrix2;
+        own.member_id = Some("member".to_owned());
+        if older {
+            own.identity =
+                super::membership::sticky_identity(&own.user_id, own.own_device_id(), "member");
+        }
+        let service = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": "wss://sfu.example.org", "jwt": token(&own.identity, "r"),
+            })))
+            .mount(&service)
+            .await;
+
+        let provisioned = super::provision_focus(&room, &own, &service.uri(), None).await;
+
+        assert_eq!(
+            provisioned.map(|provisioned| provisioned.identity).ok(),
+            Some(own.identity.clone()),
+            "{endpoint}"
+        );
+    }
+}
+
+#[test]
+fn legacy_mode_follows_only_jwt_services() {
+    let first = member(CallMode::Legacy, 1, &["wss://sfu.example.org"]);
+    let second = member(CallMode::Legacy, 2, &["wss://other.example.org"]);
+    let third = member(CallMode::Legacy, 3, &["https://focus.example.org"]);
+    let members = [first, second, third];
+    for member in &members {
+        assert_eq!(
+            member_service(member, &members),
+            member.foci.first().map(String::as_str)
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_sfu_focus_token_comes_from_the_homeserver_and_a_shared_room_is_not_joined_twice() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (homeserver, _sfu, room, mut own, _oldest, state) = legacy_move_fixture(true).await;
+    own.mode = CallMode::Compatibility;
+    let member_id = own.member_id.clone().unwrap();
+    let hashed = super::membership::stable_identity(&own.user_id, &member_id);
+    Mock::given(method("POST"))
+        .and(path(GET_TOKEN))
+        .and(body_partial_json(serde_json::json!({
+            "url": "wss://sfu.example.org", "server_name": "example.org",
+            "room_id": room.room_id(), "slot_id": "m.call#ROOM", "member_id": member_id,
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"jwt": token(&hashed, "shared")})),
+        )
+        .expect(2)
+        .mount(homeserver.server())
+        .await;
+    let publisher = backend_id(&room.room_id().to_owned(), "https://old.example.org");
+    state.lock().await.backends.insert(
+        publisher.clone(),
+        CallBackendView {
+            id: publisher.clone(),
+            url: "wss://sfu.example.org/".to_owned(),
+            jwt: token(&own.identity, "shared"),
+            identity: own.identity.clone(),
+        },
+    );
+    let missing = |id: &str| {
+        (
+            id.to_owned(),
+            "wss://sfu.example.org".to_owned(),
+            Some(matrix_sdk::ruma::server_name!("example.org").to_owned()),
+        )
+    };
+
+    provision_backend(&room, &state, &own, missing("element")).await;
+    {
+        let state = state.lock().await;
+        assert!(!state.backends.contains_key("element"));
+        assert_eq!(state.backend_aliases["element"], publisher);
+    }
+
+    state.lock().await.backends.get_mut(&publisher).unwrap().jwt =
+        token(&own.identity, "elsewhere");
+    provision_backend(&room, &state, &own, missing("other")).await;
+    assert_eq!(state.lock().await.backends["other"].identity, hashed);
+}
+
+#[tokio::test]
+async fn a_member_cannot_redirect_the_token_request_for_another_members_sfu() {
+    let (_homeserver, _sfu, room, own, _oldest, _state) = legacy_move_fixture(true).await;
+    let url = "wss://sfu.remote.example";
+    let on_server = |user: ruma::OwnedUserId, server: ruma::OwnedServerName| CallMember {
+        user_id: user,
+        focus_servers: [(url.to_owned(), server)].into(),
+        ..member(CallMode::Compatibility, 1, &[url])
+    };
+    let honest = on_server(
+        owned_user_id!("@honest:remote.example"),
+        ruma::server_name!("remote.example").to_owned(),
+    );
+    let other = on_server(
+        owned_user_id!("@other:other.example"),
+        ruma::server_name!("other.example").to_owned(),
+    );
+
+    let wanted = super::wanted_backends(&room, &[honest, other], &own);
+
+    let servers: HashSet<_> = wanted
+        .values()
+        .filter(|(service, _)| service == url)
+        .filter_map(|(_, server)| server.as_ref().map(ToString::to_string))
+        .collect();
+    assert_eq!(
+        servers,
+        HashSet::from(["remote.example".to_owned(), "other.example".to_owned()])
+    );
+}
+
+#[tokio::test]
+async fn a_focus_cannot_capture_another_members_backend() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (_homeserver, _sfu, room, own, _oldest, state) = legacy_move_fixture(true).await;
+    let jwt = token(&own.identity, "r");
+    let focus = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sfu/get"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"url": "wss://remote.example", "jwt": jwt})),
+        )
+        .mount(&focus)
+        .await;
+    state.lock().await.backends.insert(
+        "another-member".to_owned(),
+        CallBackendView {
+            id: "another-member".to_owned(),
+            url: "wss://remote.example".to_owned(),
+            jwt: jwt.clone(),
+            identity: own.identity.clone(),
+        },
+    );
+
+    provision_backend(
+        &room,
+        &state,
+        &own,
+        ("honest".to_owned(), focus.uri(), None),
+    )
+    .await;
+
+    let state = state.lock().await;
+    assert!(state.backends.contains_key("honest"));
+    assert!(state.backend_aliases.is_empty());
+}
+
+#[tokio::test]
+async fn a_remote_sfu_is_joined_once_for_its_homeservers_url_and_service_members() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    for (service_first, service_user, joined) in [
+        (true, "@service:remote.example", 1),
+        (false, "@service:remote.example", 1),
+        (true, "@service:stranger.example", 2),
+        (false, "@service:stranger.example", 2),
+    ] {
+        let (homeserver, _sfu, room, mut own, _oldest, state) = legacy_move_fixture(true).await;
+        own.mode = CallMode::Compatibility;
+        let url = "wss://sfu.remote.example";
+        let hashed =
+            super::membership::stable_identity(&own.user_id, own.member_id.as_deref().unwrap());
+        Mock::given(method("POST"))
+            .and(path(GET_TOKEN))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jwt": token(&hashed, "shared")})),
+            )
+            .mount(homeserver.server())
+            .await;
+        let service = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sfu/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"url": url, "jwt": token(&own.identity, "shared")}),
+            ))
+            .mount(&service)
+            .await;
+
+        let remote = ruma::server_name!("remote.example").to_owned();
+        let by_url = CallMember {
+            user_id: owned_user_id!("@url:remote.example"),
+            focus_servers: [(url.to_owned(), remote.clone())].into(),
+            ..member(CallMode::Compatibility, 1, &[url])
+        };
+        let by_service = CallMember {
+            user_id: service_user.try_into().unwrap(),
+            ..member(CallMode::Compatibility, 2, &[&service.uri()])
+        };
+        let room_id = room.room_id().to_owned();
+        let url_id = super::focus_backend_id(&room_id, &own, &by_url, url);
+        let service_id = backend_id(&room_id, &service.uri());
+        state.lock().await.members = vec![by_url, by_service];
+        let mut missing = vec![
+            (service_id, service.uri(), None),
+            (url_id.clone(), url.to_owned(), Some(remote)),
+        ];
+        if !service_first {
+            missing.reverse();
+        }
+        for backend in missing {
+            provision_backend(&room, &state, &own, backend).await;
+        }
+
+        let state = state.lock().await;
+        assert_eq!(
+            state.backends.len(),
+            joined,
+            "{service_user} {service_first}"
+        );
+        assert!(state.backends.contains_key(&url_id));
+    }
+}
+
+#[tokio::test]
+async fn a_publisher_refused_on_the_calls_focus_moves_to_its_homeservers_sfu_url() {
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (homeserver, refusing, room, mut own, _oldest, _state) = legacy_move_fixture(false).await;
+    own.mode = CallMode::Compatibility;
+    own.foci = vec![refusing.uri()];
+    let hashed =
+        super::membership::stable_identity(&own.user_id, own.member_id.as_deref().unwrap());
+    let jwt = token(&hashed, "r");
+    Mock::given(method("GET"))
+        .and(path_regex(r"/rtc/transports$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "rtc_transports": [{"type": "livekit", "url": "wss://own.example.org"}],
+        })))
+        .mount(homeserver.server())
+        .await;
+    Mock::given(method("POST"))
+        .and(path(GET_TOKEN))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"jwt": jwt})))
+        .mount(homeserver.server())
+        .await;
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let state = Mutex::new(State::new(
+        own,
+        Vec::new(),
+        super::StickyMemberships::default(),
+        &room.room_id().to_owned(),
+        true,
+        None,
+        false,
+    ));
+
+    let (moved, published) = super::publish_where_allowed(&core, &room, &state, false, None)
+        .await
+        .unwrap();
+
+    assert_eq!(moved.foci, ["wss://own.example.org"]);
+    assert_eq!(moved.identity, hashed);
+    assert!(published.provision.can_publish);
+    let distributor = state.lock().await.distributor.clone().unwrap();
+    assert_eq!(distributor.lock().await.identity(), hashed);
+}
+
+#[tokio::test]
+async fn a_key_from_a_member_on_an_aliased_focus_names_the_connected_backend() {
+    let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let room_id = owned_room_id!("!call:example.org");
+    let mut element = member(CallMode::Compatibility, 1, &["wss://sfu.example.org"]);
+    element.user_id = owned_user_id!("@element:example.org");
+    element.member_id = Some("@element:example.org:DEVICE".to_owned());
+    element.identity = "hashed".to_owned();
+    let mut state = State::new(
+        member(CallMode::Compatibility, 1, &["https://focus.example.org"]),
+        vec![element],
+        super::StickyMemberships::default(),
+        &room_id,
+        false,
+        None,
+        false,
+    );
+    let publisher = backend_id(&room_id, "https://focus.example.org");
+    state.backend_aliases.insert(
+        backend_id(&room_id, "wss://sfu.example.org"),
+        publisher.clone(),
+    );
+    state.pending_keys.push(super::PendingKey {
+        sender: owned_user_id!("@element:example.org"),
+        device: owned_device_id!("DEVICE"),
+        content: super::keys::ToDeviceCallEncryptionKeysEventContent {
+            media_key: None,
+            keys: Some(super::keys::KeyPayload {
+                index: 0,
+                key: base64::engine::general_purpose::STANDARD.encode([1; 16]),
+            }),
+            room_id: room_id.clone(),
+            member_id: None,
+            member: None,
+            session: super::keys::SessionRef::default(),
+            sent_ts: Some(1),
+        },
+        received: crate::now_ms(),
+        reported: false,
+    });
+
+    super::emit_pending(&core, 1, CallSessionId(1), &room_id, &mut state);
+
+    assert!(matches!(
+        events.try_recv(),
+        Ok(crate::protocol::CoreEvent::CallEncryptionKey { identity, backend_id: Some(id), .. })
+            if identity == "hashed" && id == publisher
+    ));
+}
+
+#[tokio::test]
 async fn a_key_without_a_sent_timestamp_is_accepted() {
     let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
     let room_id = owned_room_id!("!call:example.org");
@@ -1558,6 +2685,49 @@ fn a_member_that_sends_no_key_is_reported_once_after_a_wait() {
         .insert((peer.identity, 0), (1, vec![0; 16]));
     super::report_silent_members(&mut state, 1_000 + 2 * super::SILENT_MEMBER_REPORT_MS);
     assert!(state.silent_reported.is_empty(), "its key arrived");
+}
+
+#[tokio::test]
+async fn a_key_follows_a_member_that_moves_to_an_sfu_url() {
+    let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let room_id = owned_room_id!("!call:example.org");
+    let mut before = member(CallMode::Compatibility, 1, &["https://focus.example.org"]);
+    before.user_id = owned_user_id!("@peer:example.org");
+    before.identity = "@peer:example.org:DEVICE".to_owned();
+    before.member_id = Some(before.identity.clone());
+    let mut state = State::new(
+        member(CallMode::Compatibility, 1, &[]),
+        vec![before.clone()],
+        super::StickyMemberships::default(),
+        &room_id,
+        false,
+        None,
+        false,
+    );
+    state
+        .latest_keys
+        .insert((before.identity.clone(), 2), (100, vec![7; 16]));
+    let moved = CallMember {
+        identity: "hashed".to_owned(),
+        foci: vec!["wss://sfu.example.org".to_owned()],
+        ..before
+    };
+
+    super::set_members(
+        &core,
+        1,
+        CallSessionId(1),
+        &room_id,
+        &mut state,
+        vec![moved],
+    );
+
+    assert!(matches!(
+        events.try_recv(),
+        Ok(crate::protocol::CoreEvent::CallEncryptionKey { identity, key_index: 2, key, own: false, .. })
+            if identity == "hashed"
+                && key == base64::engine::general_purpose::STANDARD.encode([7; 16])
+    ));
 }
 
 #[tokio::test]
@@ -1683,6 +2853,79 @@ async fn a_key_older_than_one_already_emitted_for_the_same_index_is_dropped() {
         events.try_recv(),
         Ok(crate::protocol::CoreEvent::CallEncryptionKey { .. })
     ));
+}
+
+#[tokio::test]
+async fn a_jwt_service_from_any_source_is_preferred_to_an_sfu_url() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let sfu = "wss://sfu.example.org";
+    let listed = "https://listed.example.org";
+    let well_known = "https://well-known.example.org";
+    let configured = "https://configured.example.org";
+    let url_only = json!({"type": "livekit", "url": sfu});
+    let cases = [
+        (
+            "a later transport of the endpoint",
+            json!([
+                {"type": "m.livekit", "url": sfu},
+                {"type": "livekit", "url": sfu, "livekit_service_url": listed},
+            ]),
+            Some(well_known),
+            Some(configured),
+            listed,
+        ),
+        (
+            "the well-known",
+            json!([url_only]),
+            Some(well_known),
+            Some(configured),
+            well_known,
+        ),
+        (
+            "the settings",
+            json!([url_only]),
+            None,
+            Some(configured),
+            configured,
+        ),
+        ("no JWT service", json!([url_only]), None, None, sfu),
+    ];
+    for (source, transports, announced, fallback, expected) in cases {
+        let server = MatrixMockServer::new().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/rtc/transports$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"rtc_transports": transports})),
+            )
+            .mount(server.server())
+            .await;
+        let foci: Vec<_> = announced
+            .iter()
+            .map(|service| json!({"type": "livekit", "livekit_service_url": service}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/matrix/client"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "m.homeserver": {"base_url": server.server().uri()},
+                "org.matrix.msc4143.rtc_foci": foci,
+            })))
+            .mount(server.server())
+            .await;
+        let client = server.client_builder().build().await;
+        let room_id = owned_room_id!("!call:example.org");
+        server.sync_joined_room(&client, &room_id).await;
+        let room = client.get_room(&room_id).unwrap();
+        let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+
+        let focus = core
+            .resolve_focus(&[], fallback.map(str::to_owned), &room)
+            .await;
+
+        assert_eq!(focus.as_deref(), Some(expected), "{source}");
+    }
 }
 
 #[tokio::test]

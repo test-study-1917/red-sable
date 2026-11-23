@@ -1,9 +1,9 @@
 <script lang="ts">
-  import ImagesIcon from 'phosphor-svelte/lib/ImagesIcon';
-  import type { MemberView } from '#src/generated/protocol';
+  import type { MemberView, RoomAttachmentKind } from '#src/generated/protocol';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
   import { i18n } from '#lib/i18n.js';
 
+  import RoomAttachmentTabs from './media/RoomAttachmentTabs.svelte';
   import RoomAttachments from './media/RoomAttachments.svelte';
   import RoomSidePanel from './RoomSidePanel.svelte';
 
@@ -17,6 +17,8 @@
   }
 
   let { roomId, members, onJump, onMatrixLink, modal = false, onClose }: Props = $props();
+
+  let kind = $state<RoomAttachmentKind>('media');
 </script>
 
 <RoomSidePanel
@@ -25,12 +27,12 @@
   resizeLabel={i18n.t('timeline.attachmentsResize')}
   widthKey="sable-attachments-width"
   width={22}
-  body="none"
+  body="flush"
   {modal}
   {onClose}
 >
-  {#snippet icon()}
-    <ImagesIcon aria-hidden="true" />
+  {#snippet toolbar()}
+    <RoomAttachmentTabs bind:kind />
   {/snippet}
-  <RoomAttachments {roomId} {members} {modal} {onJump} {onMatrixLink} {onClose} />
+  <RoomAttachments {kind} {roomId} {members} {modal} {onJump} {onMatrixLink} {onClose} />
 </RoomSidePanel>

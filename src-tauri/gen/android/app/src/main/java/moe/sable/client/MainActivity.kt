@@ -13,6 +13,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
@@ -90,40 +92,59 @@ class MainActivity : TauriActivity() {
     heldAnswer?.let { CallAnswer.answerAfterUnlock(this, it, ::deliverIntent) }
   }
 
+  private fun unmetered(capabilities: NetworkCapabilities) =
+    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+      capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+      !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+
+  @Volatile private var defaultNetwork: Network? = null
+
+  private fun reportActiveNetwork() {
+    val connectivity = getSystemService(ConnectivityManager::class.java)
+    val network = connectivity.activeNetwork
+    val capabilities = network?.let(connectivity::getNetworkCapabilities)
+    if (network != null) defaultNetwork = network
+    nativeNetworkChanged(network != null, capabilities != null && unmetered(capabilities))
+  }
+
+  // A callback missed while the process was frozen would leave sync waiting for a network that is back.
+  override fun onResume() {
+    super.onResume()
+    runCatching { reportActiveNetwork() }
+  }
+
   private fun startNetworkMonitor() {
     val connectivity = getSystemService(ConnectivityManager::class.java)
     
     val callback = object : ConnectivityManager.NetworkCallback() {
-      private var current: Network? = null
-
       override fun onAvailable(network: Network) {
         if (instance !== this@MainActivity) return
-        current = network
+        defaultNetwork = network
         nativeNetworkChanged(available = true, unmetered = false)
       }
 
       override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
         if (instance !== this@MainActivity) return
-        if (network != current) return
-        nativeNetworkChanged(
-          true,
-          capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-          capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
-          !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-        )
+        if (network != defaultNetwork) return
+        nativeNetworkChanged(true, unmetered(capabilities))
       }
 
       override fun onLost(network: Network) {
         if (instance !== this@MainActivity) return
-        if (network != current) return
-        current = null
+        if (network != defaultNetwork) return
+        defaultNetwork = null
         nativeNetworkChanged(available = false, unmetered = false)
       }
     }
     
     runCatching {
-      nativeNetworkChanged(connectivity.activeNetwork != null, false)
-      connectivity.registerDefaultNetworkCallback(callback)
+      reportActiveNetwork()
+      // On the main thread where it can be, so a report from onResume never lands after a newer callback.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        connectivity.registerDefaultNetworkCallback(callback, Handler(Looper.getMainLooper()))
+      } else {
+        connectivity.registerDefaultNetworkCallback(callback)
+      }
       networkCallback = callback
     }.onFailure { error ->
       Log.w("SableNetwork", "Could not monitor network cost", error)
@@ -132,6 +153,8 @@ class MainActivity : TauriActivity() {
 
   override fun onWebViewCreate(webView: WebView) {
     mainWebView = webView
+    // The page plays its own long-press feedback; the WebView's would be a second buzz.
+    webView.isHapticFeedbackEnabled = false
     webView.addJavascriptInterface(SystemTheme(), "__sableAndroidSystemTheme")
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
@@ -302,6 +325,20 @@ class MainActivity : TauriActivity() {
     ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
   }
 
+  // A refusal reads as unasked: Android only reports what is granted.
+  private fun mediaAccess(): String {
+    val granted = { permission: String ->
+      ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+    return when {
+      !readsMedia() -> "unasked"
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+        !granted(Manifest.permission.READ_MEDIA_IMAGES) &&
+        !granted(Manifest.permission.READ_MEDIA_VIDEO) -> "limited"
+      else -> "granted"
+    }
+  }
+
   private fun recentMedia(limit: Int): JSONArray {
     val items = JSONArray()
     val timed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -463,9 +500,10 @@ class MainActivity : TauriActivity() {
     @Keep
     @JvmStatic
     @Suppress("unused")
-    fun recentMediaNative(limit: Int): String {
+    fun recentMediaNative(limit: Int, request: Boolean): String {
       val activity = checkNotNull(instance) { "Activity is unavailable" }
-      if (!activity.readsMedia()) {
+      // With only some photos allowed, asking again reopens the system's selection.
+      if (request && activity.mediaAccess() != "granted") {
         val asked = CompletableFuture<Unit>()
         activity.runOnUiThread {
           runCatching {
@@ -475,9 +513,9 @@ class MainActivity : TauriActivity() {
           }.onFailure { asked.completeExceptionally(it) }
         }
         asked.get(2, TimeUnit.MINUTES)
-        check(activity.readsMedia()) { "Media access was denied" }
       }
-      return activity.recentMedia(limit).toString()
+      val items = if (activity.readsMedia()) activity.recentMedia(limit) else JSONArray()
+      return JSONObject().put("access", activity.mediaAccess()).put("items", items).toString()
     }
 
     @Keep

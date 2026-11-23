@@ -10,7 +10,10 @@ import type { RoomSort } from '#lib/rooms/room-sort.js';
 import { SYSTEM_TIME_ZONE, timeZoneValues } from '#lib/ui/time-zones.js';
 import { languageValues, SYSTEM_LANGUAGE } from '#lib/locales.js';
 import { isNightlyBuild } from '#lib/platform/build-channel.js';
-import { customTitleBarDefault } from '#lib/platform/window-decorations.js';
+import {
+  customTitleBarDefault,
+  hardwareVideoEncodeDefault,
+} from '#lib/platform/window-decorations.js';
 import { isNativeMobile } from '#lib/platform/os.js';
 import type { BadgeNotificationMode } from '#lib/rooms/unread.js';
 
@@ -271,6 +274,7 @@ const SETTINGS = {
     { account: true }
   ),
   theme: choice<ThemeMode>(['system', 'dark', 'light'], 'system', { account: true }),
+  deploymentTheme: toggle(true, { account: true }),
   quickCss: text(''),
   fontFamily: text('', { account: true, device: true }),
   fontFamilyMono: text('', { account: true, device: true }),
@@ -293,6 +297,7 @@ const SETTINGS = {
   showRoomIcon: choice<ShowRoomIcon>(['always', 'sometimes', 'collapsed', 'never'], 'always', {
     account: true,
   }),
+  showEncryptionStatusIcon: toggle(true, { account: true }),
   voiceParticipantPlacement: choice(['both', 'below', 'inline'], 'both', { account: true }),
   showRoomBanners: toggle(true, { account: true }),
   bannerFit: choice(['fixed', 'image'], 'fixed', { account: true }),
@@ -337,6 +342,7 @@ const SETTINGS = {
   hideProfileChanges: toggle(true, { account: true }),
   hideTopicChanges: toggle(false, { account: true }),
   hideMemberInReadOnly: toggle(true, { account: true }),
+  hideSentBeforeJoined: toggle(false, { account: true }),
   showTombstoneEvents: toggle(true, { account: true }),
   openRoomsAtUnread: toggle(true, { account: true }),
   jumpToLatestOnSend: toggle(false, { account: true }),
@@ -363,8 +369,12 @@ const SETTINGS = {
   memberSort: choice<MemberSort>(['name-asc', 'name-desc', 'newest', 'oldest'], 'name-asc', {
     account: true,
   }),
-  roomSort: choice<RoomSort>(['recent', 'name-asc', 'name-desc'], 'recent', { account: true }),
-  directSort: choice<RoomSort>(['recent', 'name-asc', 'name-desc'], 'recent', { account: true }),
+  roomSort: choice<RoomSort>(['recent', 'unread-first', 'name-asc', 'name-desc'], 'recent', {
+    account: true,
+  }),
+  directSort: choice<RoomSort>(['recent', 'unread-first', 'name-asc', 'name-desc'], 'recent', {
+    account: true,
+  }),
   groupMembersByPresence: toggle(true, { account: true }),
   filterPronounsByLanguage: toggle(true, { account: true }),
   showPronouns: toggle(true, { account: true }),
@@ -532,7 +542,7 @@ const SETTINGS = {
   showSystemTrayIcon: toggle(true, { device: true }),
   useCustomTitleBar: toggle(customTitleBarDefault(), { device: true }),
   hardwareAcceleration: toggle(true, { device: true }),
-  hardwareVideoEncode: toggle(true, { device: true }),
+  hardwareVideoEncode: toggle(hardwareVideoEncodeDefault(), { device: true }),
   hardwareVideoDecode: toggle(true, { device: true }),
   smoothScrolling: toggle(true, { device: true }),
   webRtcIpPolicy: choice(WEBRTC_IP_POLICIES, 'default', { device: true }),
@@ -573,6 +583,7 @@ export type TimelinePreferences = Pick<
   | 'hideProfileChanges'
   | 'hideTopicChanges'
   | 'hideMemberInReadOnly'
+  | 'hideSentBeforeJoined'
   | 'showTombstoneEvents'
   | 'showHiddenEvents'
   | 'hiddenEventEdits'

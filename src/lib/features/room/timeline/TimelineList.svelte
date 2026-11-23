@@ -1,7 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { onDestroy, untrack, type Snippet } from 'svelte';
-  import { SvelteSet } from 'svelte/reactivity';
+  import { onDestroy, tick, untrack, type Snippet } from 'svelte';
   import { on } from 'svelte/events';
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
@@ -11,17 +10,14 @@
   import AtIcon from 'phosphor-svelte/lib/AtIcon';
   import CheckIcon from 'phosphor-svelte/lib/CheckIcon';
 
-  import type {
-    MemberView,
-    PerMessageProfileView,
-    TimelineItemView,
-  } from '#src/generated/protocol';
+  import type { MemberView, TimelineItemView } from '#src/generated/protocol';
   import { i18n } from '#lib/i18n.js';
   import { dismissKeyboardOnScroll, keepKeyboardOnTap } from '#lib/platform/keyboard.js';
   import { windowActivity } from '#lib/platform/window-activity.js';
   import type { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
+  import { holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
   import { MOTION_MS, motionMs, shouldReduceMotion } from '#lib/ui/motion.js';
   import {
     TimelineWindow,
@@ -47,39 +43,40 @@
 
   import MessageContextMenu from '../messages/MessageContextMenu.svelte';
   import MessageDialogHost from '../messages/MessageDialogHost.svelte';
+  import MessageSelectionBar from '../messages/MessageSelectionBar.svelte';
   import { useEventItems } from '../messages/event-items.svelte.js';
   import { MessageDialogs, provideMessageDialogs } from '../messages/message-dialogs.svelte.js';
   import { OpenMessageMenu, provideMessageMenu } from '../messages/message-menu-open.svelte.js';
+  import {
+    isSelectable,
+    MessageSelection,
+    provideMessageSelection,
+  } from '../messages/message-selection.svelte.js';
   import { LoadRetry } from './load-retry';
   import TimelineItem from './TimelineItem.svelte';
   import TimelineMemberGroup from './TimelineMemberGroup.svelte';
+  import TimelineBeforeJoinGroup from './TimelineBeforeJoinGroup.svelte';
   import TimelineReadReceipt from './TimelineReadReceipt.svelte';
   import TimelineAnnouncements from './TimelineAnnouncements.svelte';
   import TimelineSkeleton from './TimelineSkeleton.svelte';
   import TypingIndicator, { type TypingUser } from './TypingIndicator.svelte';
-  import type { MatrixLink } from '#lib/rooms/matrix-link.js';
-  import { groupMemberEvents } from '../members/member-groups';
   import { TimelineEventIndex } from './timeline-event-index';
   import {
     cumulativeReadBy,
     cumulativeReadTimestamps,
-    isCollapsed,
     latestEventId,
-    mergeAggregations,
     personaLookup,
     replyTarget,
-    unreadCountAfter,
-    visibleAggregations,
-    visibleTimelineItems,
-    withDateDividers,
-    withReadMarkerBefore,
     type ReplyDirection,
   } from './timeline-format';
   import { TimelinePagination } from './timeline-pagination.svelte.js';
   import { TimelineFocus } from './timeline-focus.svelte.js';
+  import { TimelineReadPosition } from './timeline-read-position.svelte.js';
+  import { TimelineReturnStack } from './timeline-return-stack.svelte.js';
+  import { TimelineMentions } from './timeline-mentions.svelte.js';
   import { TimelineFuture } from './timeline-future.svelte.js';
   import { TimelineHistoryController } from './timeline-history';
-  import { TimelineIdentityTracker } from './timeline-identity';
+  import { holdsEvent, TimelineRows, type RowValue } from './timeline-rows.svelte.js';
   import { TimelineUnread } from './timeline-unread.svelte.js';
   import {
     estimatedColumnPx,
@@ -89,11 +86,11 @@
     timelineLayoutStyle,
   } from './timeline-layout';
 
-  import type { MessageCallbacks } from '../messages/message-action-controller.svelte.js';
+  import type { TimelineCallbacks } from './timeline-row.svelte.js';
 
-  interface Props extends MessageCallbacks {
+  interface Props {
     timeline: RoomTimeline;
-    onSwipeMembers?: () => void;
+    callbacks?: TimelineCallbacks;
     focusEventId?: string | null;
     landingEventId?: string | null;
     replyEventId?: string | null;
@@ -114,24 +111,12 @@
     onRequestUnread?: (eventId: string) => Promise<void>;
     onResumeLive?: () => Promise<void>;
     onMarkRead?: () => Promise<void>;
-    onMatrixLink?: (link: MatrixLink, anchor: HTMLAnchorElement) => void;
-    onSenderProfile?: (
-      userId: string,
-      anchor: HTMLElement,
-      pmp?: PerMessageProfileView | null
-    ) => void;
-    onMentionUser?: (userId: string, name: string) => void;
-    onRetrySend?: (transactionId: string) => void;
-    onCancelSend?: (transactionId: string) => void;
     currentUserId?: string | null;
     roomId?: string;
     members?: readonly MemberView[];
     onJumpToEvent?: (eventId: string, origin?: string | null) => void;
     onJumpToLive?: () => void;
     onReturnToPosition?: () => void;
-    onOpenMedia?: (eventId: string) => void;
-    onVotePoll?: (eventId: string, answers: string[]) => void;
-    onEndPoll?: (eventId: string) => void;
     readOnly?: boolean;
     canRedactOwn?: boolean;
     canRedactOthers?: boolean;
@@ -168,30 +153,13 @@
     onRequestUnread,
     onResumeLive,
     onMarkRead,
-    onMatrixLink,
-    onCopyLink,
-    onMarkUnread,
-    onSenderProfile,
-    onMentionUser,
-    onRetrySend,
-    onCancelSend,
+    callbacks = {},
     currentUserId,
-    onToggleReaction,
-    onReply,
-    onQuoteMarkdown,
-    onSwipeMembers,
-    onCancelContext,
-    onOpenThread,
-    onEdit,
-    onDelete,
     roomId,
     members = [],
     onJumpToEvent,
     onJumpToLive,
     onReturnToPosition,
-    onOpenMedia,
-    onVotePoll,
-    onEndPoll,
     readOnly = false,
     canRedactOwn = true,
     canRedactOthers = false,
@@ -210,14 +178,6 @@
   const dialogs = provideMessageDialogs(new MessageDialogs());
   const messageMenu = provideMessageMenu(new OpenMessageMenu());
 
-  interface RowValue {
-    item: TimelineItemView;
-    group: readonly TimelineItemView[] | null;
-    collapsed: boolean;
-    groupStart: boolean;
-    unreadCount: number;
-  }
-  const identity = new TimelineIdentityTracker();
   const unread = new TimelineUnread();
   const appLayout = new AppLayout();
   let unreadNavigation: AbortController | null = null;
@@ -232,95 +192,55 @@
   );
   const readRoomId = untrack(() => roomId);
   const viewScope = readRoomId ? `${readRoomId}:${untrack(() => threadRootId) ?? ''}` : null;
-  let readUpTo: string | null = null;
-  let fullyReadAt: string | null = null;
-  function settleFullyRead(): void {
-    if (!readRoomId || !onFullyRead || readUpTo === null || readUpTo === fullyReadAt) return;
-    fullyReadAt = readUpTo;
-    onFullyRead(readRoomId, readUpTo);
-  }
+  const readPosition = new TimelineReadPosition({
+    roomId: readRoomId ?? null,
+    timeline: () => timeline,
+    windowState: () => windowState,
+    canRead: () => revealed && viewport !== null && !unread.blocking && !markingRead,
+    onFullyRead: () => onFullyRead,
+  });
   $effect(() => {
-    if (!windowActivity.active) untrack(settleFullyRead);
+    if (!windowActivity.active) untrack(() => readPosition.settle());
   });
   const loadRetry = new LoadRetry();
   onDestroy(() => {
     unreadNavigation?.abort();
     unread.destroy();
-    settleFullyRead();
+    readPosition.settle();
     loadRetry.reset();
   });
   let followingRead = $state(false);
-  let eventItems = $derived(visibleTimelineItems(timeline.items, preferences, { readOnly }));
-  let allItems = $derived(
-    withDateDividers(
-      mergeAggregations(eventItems, visibleAggregations(timeline.aggregations, preferences), {
-        start: timeline.backwardPagination === 'end',
-        end: timeline.mode.kind === 'live' || timeline.forwardPagination === 'end',
-      })
-    )
-  );
-  let visibleItems = $derived(
-    unread.firstEventId !== null
-      ? withReadMarkerBefore(allItems, unread.firstEventId)
-      : followingRead
-        ? allItems.filter((item) => item.content.kind !== 'read_marker')
-        : allItems
-  );
-  function sameRow(next: RowValue, previous: RowValue): boolean {
-    const sameItem =
-      next.item === previous.item ||
-      (next.item.event_id === null &&
-        next.item.id === previous.item.id &&
-        next.item.timestamp === previous.item.timestamp);
-    const sameGroup =
-      next.group === previous.group ||
-      (next.group !== null &&
-        previous.group !== null &&
-        next.group.length === previous.group.length &&
-        next.group.every((member, index) => member === previous.group?.[index]));
-    return (
-      sameItem &&
-      sameGroup &&
-      next.collapsed === previous.collapsed &&
-      next.groupStart === previous.groupStart &&
-      next.unreadCount === previous.unreadCount
-    );
-  }
-  let previousEntries = new Map<string, TimelineEntry<RowValue>>();
-  let entries = $derived.by((): readonly TimelineEntry<RowValue>[] => {
-    identity.reconcile(visibleItems);
-    const units = groupMemberEvents(visibleItems);
-    const unitItems = units.map((unit) => unit.item);
-    const next = units.map(({ item, index: source, group }, index) => {
-      const collapsed =
-        !(
-          threadRootId &&
-          (item.event_id === threadRootId || unitItems[index - 1]?.event_id === threadRootId)
-        ) && isCollapsed(unitItems, index, preferences.replyPreviewStyle);
-      const entry = {
-        key: identity.key(visibleItems, source),
-        value: {
-          item,
-          group,
-          collapsed,
-          groupStart: index > 0 && !collapsed,
-          unreadCount:
-            item.content.kind === 'read_marker' ? unreadCountAfter(visibleItems, source) : 0,
-        },
-      };
-      const previous = previousEntries.get(entry.key);
-      return previous && sameRow(entry.value, previous.value) ? previous : entry;
-    });
-    previousEntries = new Map(next.map((entry) => [entry.key, entry]));
-    return next;
+  const rowModel = new TimelineRows({
+    timeline: () => timeline,
+    readOnly: () => readOnly,
+    threadRootId: () => threadRootId,
+    readMarkerBefore: () => unread.firstEventId,
+    followingRead: () => followingRead,
   });
+  const eventItems = $derived(rowModel.eventItems);
+  const visibleItems = $derived(rowModel.visibleItems);
+  const entries = $derived(rowModel.entries);
   let events = $derived(new TimelineEventIndex(timeline.items, timeline.aggregations));
-  function holdsEvent({ item, group }: RowValue, eventId: string | null): boolean {
-    if (eventId === null) return false;
-    return (
-      item.event_id === eventId || (group?.some((member) => member.event_id === eventId) ?? false)
-    );
-  }
+  const selection = provideMessageSelection(new MessageSelection(() => visibleItems));
+  let selectionBar = $state<MessageSelectionBar>();
+  let selectableCount = $derived(visibleItems.filter(isSelectable).length);
+  holdOverlayBack(
+    () => selection.active,
+    () => {
+      selectionBar?.cancelOrClear();
+    }
+  );
+  let selectionAnnouncement = $state('');
+  let previousSelectedCount = 0;
+  $effect(() => {
+    const count = selection.count;
+    if (count === previousSelectedCount) return;
+    previousSelectedCount = count;
+    selectionAnnouncement =
+      count > 0
+        ? i18n.t('timeline.selectionAnnounce', { count })
+        : i18n.t('timeline.selectionCleared');
+  });
   function entryFor(eventId: string | null): TimelineEntry<RowValue> | undefined {
     return entries.find(({ value }) => holdsEvent(value, eventId));
   }
@@ -405,22 +325,6 @@
     loadRetry.schedule(() => void onRetryLoad());
     return () => loadRetry.cancel();
   });
-  let readEventId = $derived.by(() => {
-    if (!revealed || !viewport || unread.blocking || markingRead) return null;
-    if (windowState.pinned) {
-      return (
-        latestEventId(timeline.items) ??
-        latestEventId(windowState.rows.map((row) => row.value.item))
-      );
-    }
-    if (windowState.lastFullyVisible === null) return null;
-    for (let index = windowState.rows.length - 1; index >= 0; index -= 1) {
-      const row = windowState.rows[index];
-      if (row.index <= windowState.lastFullyVisible && row.value.item.event_id)
-        return row.value.item.event_id;
-    }
-    return null;
-  });
   let atLatest = $derived(windowState.pinned && timeline.reachesLatest);
   let unreadCount = $derived(unread.count(eventItems));
   let unreadInView = $derived.by(() => {
@@ -462,26 +366,26 @@
   let futureLoading = $derived(
     revealed && !live && visibleItems.length > 0 && timeline.forwardPagination === 'loading'
   );
-  const seenMentions = new SvelteSet<string>();
-  let pendingMentions = $derived(mentionEventIds.filter((eventId) => !seenMentions.has(eventId)));
-  let mentionTarget = $state<string | null>(null);
-  let jumpingMention = $derived(
-    mentionTarget !== null &&
-      !seenMentions.has(mentionTarget) &&
-      timeline.error === null &&
-      (timeline.loading || !timeline.items.some((item) => item.event_id === mentionTarget))
-  );
+  const mentions = new TimelineMentions({
+    timeline: () => timeline,
+    eventIds: () => mentionEventIds,
+  });
   $effect(() => {
     const { firstVisible, lastVisible, rows } = windowState;
     // The list arrives after its message is on screen, so it has to rerun this too.
-    const mentions = mentionEventIds;
+    const mentionIds = mentionEventIds;
     if (!reading || !revealed || !windowActivity.active) return;
     if (firstVisible === null || lastVisible === null) return;
     untrack(() => {
       for (const { index, value } of rows) {
         const eventId = value.item.event_id;
-        if (index >= firstVisible && index <= lastVisible && eventId && mentions.includes(eventId))
-          seenMentions.add(eventId);
+        if (
+          index >= firstVisible &&
+          index <= lastVisible &&
+          eventId &&
+          mentionIds.includes(eventId)
+        )
+          mentions.markSeen(eventId);
       }
     });
   });
@@ -503,14 +407,10 @@
     if (focused === null || focused === document.body || jumps?.contains(focused))
       articleFor(row.key)?.focus({ preventScroll: true });
   });
-  /** Messages the reader left by following a reply, most recent first. */
-  let returnStack = $state.raw<readonly string[]>([]);
-  let returnEventId = $derived(
-    returnStack.find((eventId) => {
-      const index = entries.findIndex(({ value }) => holdsEvent(value, eventId));
-      return index < 0 || windowState.lastVisible === null || index > windowState.lastVisible;
-    }) ?? null
-  );
+  const returns = new TimelineReturnStack({
+    entries: () => entries,
+    lastVisible: () => windowState.lastVisible,
+  });
   let historyLoadingVisible = $state(false);
   $effect(() => {
     if (historyLoading) {
@@ -550,7 +450,7 @@
   });
   function windowChanged(state: TimelineWindowState<RowValue>): void {
     const wasScrolling = windowState.scrolling;
-    if (state.pinned && !windowState.pinned) returnStack = [];
+    if (state.pinned && !windowState.pinned) returns.clear();
     windowState = state;
     const node = viewport;
     const height = node?.clientHeight ?? 0;
@@ -881,15 +781,81 @@
       })
     );
   }
+  function itemForArticle(article: HTMLElement): TimelineItemView | null {
+    const eventId = article.closest<HTMLElement>('[data-event-id]')?.dataset.eventId;
+    return eventId ? events.get(eventId) : null;
+  }
+  function exitSelection(): void {
+    const activeElement = document.activeElement;
+    const shouldRestore =
+      activeElement === null ||
+      activeElement === document.body ||
+      Boolean(activeElement.closest('.selection-bar, [role="dialog"]'));
+    if (!shouldRestore) return;
+    const fallback =
+      viewport?.querySelector<HTMLElement>(`${ARTICLE}[tabindex="0"]`) ??
+      viewport?.querySelector<HTMLElement>(ARTICLE);
+    void tick().then(() => {
+      if (
+        fallback &&
+        (document.activeElement === null ||
+          document.activeElement === document.body ||
+          !document.activeElement.isConnected)
+      ) {
+        fallback.focus();
+      }
+    });
+  }
+  function onTimelineKeydown(event: KeyboardEvent): void {
+    if (event.defaultPrevented || event.isComposing || !active || !selection.active) return;
+    if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="menu"]')) {
+      return;
+    }
+    const plain = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+    if (event.key === 'Escape' && !event.repeat && plain) {
+      event.preventDefault();
+      selectionBar?.cancelOrClear();
+      return;
+    }
+    const mod = isMacPlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+    if (
+      mod &&
+      !event.altKey &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === 'a' &&
+      !isEditableTarget(event.target) &&
+      !isDialogOpen()
+    ) {
+      event.preventDefault();
+      selection.selectAll();
+    }
+  }
+  function attachTimelineKeys(node: HTMLElement): () => void {
+    return on(node, 'keydown', onTimelineKeydown);
+  }
   function feedKeydown(event: KeyboardEvent): void {
     const target = event.target;
     if (!(target instanceof HTMLElement) || event.defaultPrevented) return;
     const article = target.closest<HTMLElement>(ARTICLE);
     if (!article) return;
     const plain = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
-    if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+    if (
+      !selection.active &&
+      (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))
+    ) {
       event.preventDefault();
       openMenuFromKeyboard(article);
+    } else if (
+      target === article &&
+      (event.key === ' ' || (selection.active && event.key === 'Enter'))
+    ) {
+      const shiftOnly = event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+      if (!plain && !(shiftOnly && selection.active)) return;
+      const item = itemForArticle(article);
+      if (!item || !isSelectable(item)) return;
+      event.preventDefault();
+      if (shiftOnly) selection.selectRange(item);
+      else selection.toggle(item);
     } else if (target === article && plain && (event.key === 'Enter' || event.key === 'F2')) {
       const control =
         article.querySelector<HTMLElement>('.message-actions button') ??
@@ -899,6 +865,7 @@
       control.focus();
     } else if (target !== article && plain && event.key === 'Escape' && !isEditableTarget(target)) {
       event.preventDefault();
+      if (selection.active) selectionBar?.cancelOrClear();
       article.focus();
     }
   }
@@ -1047,10 +1014,10 @@
     if (windowState.pinned) followingRead = true;
     const fullyRead = !holdAtLatest && eventId === latestEventId(timeline.items);
     await onRead(eventId, fullyRead);
-    if (!holdAtLatest) readUpTo = eventId;
-    if (fullyRead) fullyReadAt = eventId;
+    if (!holdAtLatest) readPosition.advance(eventId);
+    if (fullyRead) readPosition.markFullyRead(eventId);
     if (disposed) {
-      settleFullyRead();
+      readPosition.settle();
       return;
     }
     if (!holdAtLatest && eventId === latestEventId(timeline.items)) unread.dismiss();
@@ -1178,35 +1145,27 @@
     return rowRect.top >= viewportRect.top && rowRect.bottom <= viewportRect.bottom;
   }
   function jumpFrom(origin: string | null, target: string): void {
-    if (origin !== null) returnStack = [origin, ...returnStack];
+    if (origin !== null) returns.push(origin);
     onJumpToEvent?.(target, origin);
   }
   function jumpDown(): void {
-    const eventId = returnEventId;
+    const eventId = returns.eventId;
     if (eventId === null || !onJumpToEvent) {
       jumpToLatest();
       return;
     }
-    returnStack = returnStack.slice(returnStack.indexOf(eventId) + 1);
+    returns.popThrough(eventId);
     jumpFocusId = eventId;
     onJumpToEvent(eventId);
   }
   function jumpToMention(): void {
-    if (jumpingMention) return;
-    for (const eventId of pendingMentions) {
-      // A loaded mention this timeline does not show can never reach the screen.
-      if (timeline.items.some((item) => item.event_id === eventId) && !entryFor(eventId)) {
-        seenMentions.add(eventId);
-        continue;
-      }
-      mentionTarget = eventId;
-      jumpFocusId = eventId;
-      onJumpToEvent?.(eventId);
-      return;
-    }
+    const eventId = mentions.next((target) => entryFor(target) !== undefined);
+    if (eventId === null) return;
+    jumpFocusId = eventId;
+    onJumpToEvent?.(eventId);
   }
   function jumpToLatest(): void {
-    returnStack = [];
+    returns.clear();
     focus.cancel();
     unreadNavigation?.abort();
     historyController.finishHistoryFill();
@@ -1230,10 +1189,10 @@
       const binding = bindingFor(id);
       return binding !== undefined && matchesBinding(binding, event, mac);
     };
-    if (pressed('room.nextMention') && pendingMentions.length > 0) {
+    if (pressed('room.nextMention') && mentions.pending.length > 0) {
       event.preventDefault();
       jumpToMention();
-    } else if (pressed('room.jumpBack') && returnEventId !== null) {
+    } else if (pressed('room.jumpBack') && returns.eventId !== null) {
       event.preventDefault();
       jumpDown();
     }
@@ -1248,11 +1207,16 @@
       event.altKey ||
       event.shiftKey ||
       !active ||
-      !onMarkRead ||
       (event.target instanceof Element && event.target.closest('[role="dialog"], [role="menu"]'))
     ) {
       return;
     }
+    if (selection.active) {
+      event.preventDefault();
+      selectionBar?.cancelOrClear();
+      return;
+    }
+    if (!onMarkRead) return;
     event.preventDefault();
     jumpToLatest();
     if (unread.active || hasUnread) {
@@ -1277,22 +1241,8 @@
     selected={replyEventId !== null && item.event_id === replyEventId}
     editing={edited}
     editor={edited ? inlineEditor : undefined}
-    {onMatrixLink}
-    {onCopyLink}
-    {onMarkUnread}
-    {onSenderProfile}
-    {onMentionUser}
-    {onRetrySend}
-    {onCancelSend}
+    {...callbacks}
     {currentUserId}
-    {onToggleReaction}
-    {onReply}
-    {onQuoteMarkdown}
-    {onSwipeMembers}
-    {onCancelContext}
-    {onOpenThread}
-    {onEdit}
-    {onDelete}
     {canRedactOwn}
     {canRedactOthers}
     {canPin}
@@ -1302,9 +1252,6 @@
     alignOwn={preferences.alignOwnMessages}
     avatarsInHeaders={preferences.avatarsInMessageHeaders}
     onJumpToEvent={onJumpToEvent && ((target: string) => jumpFrom(item.event_id, target))}
-    {onOpenMedia}
-    {onVotePoll}
-    {onEndPoll}
     {events}
     onMenuOpenChange={setMenuOpen}
     {roomId}
@@ -1320,7 +1267,7 @@
 
 <TimelineReadReceipt
   {timeline}
-  visibleEventId={readEventId}
+  visibleEventId={readPosition.eventId}
   enabled={reading && !unread.blocking && !markingRead && !timeline.resumingLive}
   {atLatest}
   onRead={markRead}
@@ -1337,12 +1284,12 @@
   receiptTimestamps={(item) => receiptTimestampsByItem.get(item.id) ?? item.read_timestamps}
   {canRedactOwn}
   {canRedactOthers}
-  {onMatrixLink}
-  {onSenderProfile}
-  {onToggleReaction}
-  {onReply}
-  {onOpenThread}
-  {onDelete}
+  onMatrixLink={callbacks.onMatrixLink}
+  onSenderProfile={callbacks.onSenderProfile}
+  onToggleReaction={callbacks.onToggleReaction}
+  onReply={callbacks.onReply}
+  onOpenThread={callbacks.onOpenThread}
+  onDelete={callbacks.onDelete}
 />
 
 {#if timeline.error && !emptyFailure}
@@ -1364,8 +1311,27 @@
 <div
   class={['timeline-content', `spacing-${preferences.messageSpacing}`]}
   style={timelineLayoutStyle(preferences.messageSpacing)}
+  {@attach attachTimelineKeys}
 >
-  {#if revealed && unread.active && !unread.loading && (!unreadInView || unreadError !== null)}
+  <p class="screen-reader-only" role="status" aria-live="polite" aria-atomic="true">
+    {selectionAnnouncement}
+  </p>
+  {#if selection.active}
+    <MessageSelectionBar
+      bind:this={selectionBar}
+      {selection}
+      {events}
+      {roomId}
+      {threadRootId}
+      {members}
+      {selectableCount}
+      canEdit={callbacks.onEdit !== undefined}
+      canDelete={callbacks.onDelete !== undefined}
+      {canRedactOwn}
+      {canRedactOthers}
+      onExit={exitSelection}
+    />
+  {:else if revealed && unread.active && !unread.loading && (!unreadInView || unreadError !== null)}
     <div class="unread-bar">
       <Button
         class="jump-to-unread"
@@ -1457,11 +1423,13 @@
                 {/if}
                 {#if timelineStart && item.content.kind === 'timeline_start'}
                   {@render timelineStart()}
+                {:else if group && row.value.kind === 'before_join'}
+                  <TimelineBeforeJoinGroup items={group} renderItem={timelineItem} />
                 {:else if group}
                   <TimelineMemberGroup
                     items={group}
                     {members}
-                    {onSenderProfile}
+                    onSenderProfile={callbacks.onSenderProfile}
                     renderItem={timelineItem}
                   />
                 {:else}
@@ -1512,9 +1480,9 @@
 
   {#if revealed && visibleItems.length > 0}
     <div class="timeline-jumps" bind:this={jumps}>
-      {#if pendingMentions.length > 0 && onJumpToEvent}
+      {#if mentions.pending.length > 0 && onJumpToEvent}
         {@const mentionLabel = i18n.t('timeline.jumpToMention', {
-          count: pendingMentions.length,
+          count: mentions.pending.length,
         })}
         <div
           class="jump-to-mention-motion"
@@ -1530,24 +1498,24 @@
                 variant="secondary"
                 size="medium"
                 label={mentionLabel}
-                aria-busy={jumpingMention}
+                aria-busy={mentions.jumping}
                 onclick={jumpToMention}
               >
-                {#if jumpingMention}<Spinner />{:else}<AtIcon />{/if}
+                {#if mentions.jumping}<Spinner />{:else}<AtIcon />{/if}
               </IconButton>
             {/snippet}
           </Tooltip>
           <UnreadBadge
             class="mention-count"
-            counts={{ unread: 0, highlight: pendingMentions.length }}
+            counts={{ unread: 0, highlight: mentions.pending.length }}
             aria-hidden="true"
           />
         </div>
       {/if}
       <div class="jump-to-latest-slot">
-        {#if live ? jumpToLatestVisible || returnEventId !== null : onJumpToLive !== undefined}
+        {#if live ? jumpToLatestVisible || returns.eventId !== null : onJumpToLive !== undefined}
           {@const jumpLabel = i18n.t(
-            returnEventId === null ? 'timeline.jumpToLatest' : 'timeline.jumpBack'
+            returns.eventId === null ? 'timeline.jumpToLatest' : 'timeline.jumpBack'
           )}
           <div
             class="jump-to-latest-motion"
@@ -1556,7 +1524,7 @@
           >
             <Tooltip label={jumpLabel}>
               {#snippet trigger({ props })}
-                {#if returnEventId === null}
+                {#if returns.eventId === null}
                   <IconButton
                     {...props}
                     type="button"
@@ -1591,7 +1559,7 @@
 
   {#if typingUsers.length > 0 || footTrailingVisible}
     <div class="timeline-foot">
-      <TypingIndicator users={typingUsers} onProfile={onSenderProfile} />
+      <TypingIndicator users={typingUsers} onProfile={callbacks.onSenderProfile} />
       {#if footTrailing && footTrailingVisible}
         <div class="foot-trailing">{@render footTrailing()}</div>
       {/if}

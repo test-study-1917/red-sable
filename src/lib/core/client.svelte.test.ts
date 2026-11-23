@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { deviceDisplayName } from '#lib/deployment/policy.js';
 import { EMPTY_RUNTIME_CONFIG } from '#lib/config/runtime-config.js';
@@ -42,6 +42,7 @@ const localNetwork = vi.hoisted(() => ({
   gated: false,
   denied: false,
   requestAndroid: vi.fn(() => Promise.resolve(false)),
+  unasked: false,
 }));
 
 vi.mock('#lib/platform/local-network.js', async (importOriginal) => ({
@@ -49,6 +50,7 @@ vi.mock('#lib/platform/local-network.js', async (importOriginal) => ({
   browserGatesCoreNetwork: () => localNetwork.gated,
   localNetworkDenied: () => Promise.resolve(localNetwork.denied),
   requestAndroidLocalNetwork: localNetwork.requestAndroid,
+  androidLocalNetworkUnasked: () => Promise.resolve(localNetwork.unasked),
 }));
 
 const session: SessionInfo = {
@@ -346,6 +348,54 @@ test('logging out selects another saved account instead of returning to sign-in'
     method: 'session.switch_account',
     params: { account_id: otherSession.account_id },
   });
+});
+
+test('logging out skips a saved account whose login cannot be opened', async () => {
+  const broken: SessionInfo = { ...otherSession, account_id: 'account-c', device_id: 'OLD' };
+  const accounts = { accounts: [session, broken, otherSession] };
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': () => accounts.accounts,
+  });
+  const call = fake.call.getMockImplementation();
+  if (!call) throw new Error('missing transport handler');
+  fake.call.mockImplementation((method, params) => {
+    if (method !== 'session.switch_account') return call(method, params);
+    return (params as { account_id: string }).account_id === broken.account_id
+      ? Promise.reject(new CoreError(transportFailure('e16')))
+      : Promise.resolve(otherSession);
+  });
+  const core = createCoreClient(() => fake.transport);
+
+  await core.start();
+  accounts.accounts = [broken, otherSession];
+  await core.logout();
+
+  expect(core.session).toEqual(otherSession);
+  expect(core.status).toBe('ready');
+});
+
+test('logging out ends signed out when no saved account opens', async () => {
+  const accounts = { accounts: [session, otherSession] };
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': () => accounts.accounts,
+  });
+  const call = fake.call.getMockImplementation();
+  if (!call) throw new Error('missing transport handler');
+  fake.call.mockImplementation((method, params) =>
+    method === 'session.switch_account'
+      ? Promise.reject(new CoreError(transportFailure('e16')))
+      : call(method, params)
+  );
+  const core = createCoreClient(() => fake.transport);
+
+  await core.start();
+  accounts.accounts = [otherSession];
+  await core.logout();
+
+  expect(core.session).toBeNull();
+  expect(core.status).toBe('signed-out');
 });
 
 test("logging out forgets that account's recent searches and keeps the others'", async () => {
@@ -1083,6 +1133,13 @@ async function startGated(fetch: () => Promise<unknown>) {
   return { core, fake, fetchMock };
 }
 
+beforeEach(() => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.resolve(Response.json({})))
+  );
+});
+
 afterEach(() => {
   localNetwork.gated = false;
   localNetwork.denied = false;
@@ -1101,24 +1158,53 @@ test('a restored session asks for local network access from the page', async () 
 test('an offline core with a homeserver the page reaches reports the browser blocking it', async () => {
   const { core, fake, fetchMock } = await startGated(() => Promise.resolve(new Response('{}')));
 
+  vi.useFakeTimers();
   fake.emit({ type: 'sync_status', state: 'offline' });
-  await vi.waitFor(() => {
-    expect(core.localNetworkBlocked).toBe('example.org');
-  });
-
-  fetchMock.mockImplementation(() => Promise.reject(new TypeError('offline')));
-  fake.emit({ type: 'sync_status', state: 'live' });
-  fake.emit({ type: 'sync_status', state: 'offline' });
-  await vi.waitFor(() => {
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-  });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await vi.advanceTimersByTimeAsync(5000);
   expect(core.localNetworkBlocked).toBe('example.org');
 
-  vi.useFakeTimers();
+  fake.emit({ type: 'sync_status', state: 'live' });
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(core.localNetworkBlocked).toBe('example.org');
+
   fake.emit({ type: 'sync_status', state: 'live' });
   vi.advanceTimersByTime(30_000);
   expect(core.localNetworkBlocked).toBeNull();
+  vi.useRealTimers();
+});
+
+test('a short offline spell with a homeserver the page reaches is not blamed on the browser', async () => {
+  const { core, fake } = await startGated(() => Promise.resolve(new Response('{}')));
+
+  vi.useFakeTimers();
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.advanceTimersByTimeAsync(1000);
+  fake.emit({ type: 'sync_status', state: 'live' });
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(core.localNetworkBlocked).toBeNull();
+
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(core.localNetworkBlocked).toBe('example.org');
+  vi.useRealTimers();
+});
+
+test('a homeserver the page reaches that keeps dropping sync reports the browser blocking it', async () => {
+  const { core, fake } = await startGated(() => Promise.resolve(new Response('{}')));
+
+  vi.useFakeTimers();
+  for (let spell = 0; spell < 2; spell += 1) {
+    fake.emit({ type: 'sync_status', state: 'offline' });
+    await vi.advanceTimersByTimeAsync(100);
+    fake.emit({ type: 'sync_status', state: 'live' });
+  }
+  expect(core.localNetworkBlocked).toBeNull();
+
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(core.localNetworkBlocked).toBe('example.org');
   vi.useRealTimers();
 });
 
@@ -1126,11 +1212,12 @@ test('an offline core reports the browser blocking it when the permission was de
   localNetwork.denied = true;
   const { core, fake } = await startGated(() => Promise.reject(new TypeError('blocked')));
 
+  vi.useFakeTimers();
   fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.advanceTimersByTimeAsync(5000);
 
-  await vi.waitFor(() => {
-    expect(core.localNetworkBlocked).toBe('example.org');
-  });
+  expect(core.localNetworkBlocked).toBe('example.org');
+  vi.useRealTimers();
 });
 
 test('an offline core the page cannot reach either is just offline', async () => {
@@ -1147,15 +1234,31 @@ test('an offline core the page cannot reach either is just offline', async () =>
   expect(core.localNetworkBlocked).toBeNull();
 });
 
-test('an offline native core asks Android for local network access', async () => {
+test('an offline native core offers Android local network access instead of asking outright', async () => {
   vi.stubGlobal('navigator', { onLine: true });
+  localNetwork.unasked = true;
+  localNetwork.requestAndroid.mockClear();
   const fake = fakeTransport({ 'session.restore': session, 'session.list_accounts': [session] });
   const core = createCoreClient(() => fake.transport);
   await core.start();
 
   fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.waitFor(() => {
+    expect(core.localNetworkOffer).toBe('example.org');
+  });
+  expect(localNetwork.requestAndroid).not.toHaveBeenCalled();
 
+  await core.allowLocalNetwork();
   expect(localNetwork.requestAndroid).toHaveBeenCalledOnce();
+  expect(core.localNetworkOffer).toBeNull();
+
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.waitFor(() => {
+    expect(core.localNetworkOffer).toBe('example.org');
+  });
+  fake.emit({ type: 'sync_status', state: 'live' });
+  expect(core.localNetworkOffer).toBeNull();
+  localNetwork.unasked = false;
 });
 
 test('a cancellation for an unknown verification flow does not open the verification dialog', async () => {
@@ -1354,6 +1457,59 @@ test('failed profile lookups cool down across repeated timeline mounts and retry
     now.mockRestore();
     core.stop();
   }
+});
+
+test('profile lookups that failed offline are retried when sync goes live', async () => {
+  vi.useFakeTimers();
+  const fake = fakeTransport();
+  const core = createCoreClient(() => fake.transport);
+  const failure = new Error('offline');
+  fake.call.mockRejectedValueOnce(failure).mockResolvedValueOnce({ display_name: 'back' });
+  const listener = vi.fn();
+  try {
+    core.onProfileChanged(listener);
+    fake.emit({ type: 'sync_status', state: 'offline' });
+    await expect(core.userProfile('@remote:example.org')).rejects.toBe(failure);
+    await expect(core.userProfile('@remote:example.org')).rejects.toBe(failure);
+
+    fake.emit({ type: 'sync_status', state: 'live' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(listener).toHaveBeenCalledExactlyOnceWith('@remote:example.org');
+    await expect(core.userProfile('@remote:example.org')).resolves.toEqual({
+      display_name: 'back',
+    });
+  } finally {
+    core.stop();
+    vi.useRealTimers();
+  }
+});
+
+test('an own profile that failed to load offline is reloaded when sync goes live', async () => {
+  const fake = fakeTransport({
+    'session.restore': session,
+    'session.list_accounts': [session],
+  });
+  const core = createCoreClient(() => fake.transport);
+  fake.call.mockImplementation((method: string, params: unknown) => {
+    fake.called.push({ method, params });
+    if (method === 'account.user_profile') return Promise.reject(new Error('offline'));
+    return Promise.resolve(method === 'session.list_accounts' ? [session] : session);
+  });
+  const listener = vi.fn();
+  core.onProfileChanged(listener);
+
+  await core.start();
+  fake.emit({ type: 'sync_status', state: 'offline' });
+  await vi.waitFor(() => {
+    expect(fake.called.some((call) => call.method === 'account.user_profile')).toBe(true);
+  });
+  await Promise.resolve();
+
+  fake.emit({ type: 'sync_status', state: 'live' });
+  await vi.waitFor(() => {
+    expect(listener).toHaveBeenCalledWith(session.user_id);
+  });
+  core.stop();
 });
 
 test('a profile change drops the cached profile and tells listeners once', async () => {

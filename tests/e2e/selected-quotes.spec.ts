@@ -361,7 +361,7 @@ test('touch: repeated code quotes exclude controls and survive a collapsed remou
   source.content.html = `<pre><code>${code}</code></pre><pre><code>${code}</code></pre>`;
   await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [source] }]);
   const sourceRow = page.locator('[data-item-id="code-source"]');
-  await sourceRow.locator('[data-code-toggle]').nth(1).click();
+  await sourceRow.getByRole('button', { name: en.timeline.expandCode, exact: true }).nth(1).click();
   const point = await selectPassage(sourceRow.locator('pre code').nth(1), 'line 0', {
     touch: isMobile,
   });

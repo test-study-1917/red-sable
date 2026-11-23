@@ -10,6 +10,7 @@ use crate::store::MemorySessionStore;
 async fn discover_with_peers(
     mode: CallMode,
     peers: &[(u64, &str)],
+    older_peers: bool,
     configured: Option<&str>,
 ) -> Discovered {
     use matrix_sdk::ruma::{events::AnySyncStateEvent, serde::Raw};
@@ -39,7 +40,15 @@ async fn discover_with_peers(
         let mut peer = member(mode, now - age, &[service]);
         peer.user_id = owned_user_id!("@peer:example.org");
         peer.device_id = Some(format!("DEVICE{age}").into());
-        peer.member_id = Some(format!("peer-{age}"));
+        let member_id = format!("peer-{age}");
+        if older_peers {
+            peer.identity = crate::calls::membership::sticky_identity(
+                &peer.user_id,
+                peer.own_device_id(),
+                &member_id,
+            );
+        }
+        peer.member_id = Some(member_id);
         let mut event = json!({
             "type": if mode == CallMode::Matrix2 {
                 crate::calls::membership::RTC_MEMBER_EVENT_TYPE
@@ -92,6 +101,91 @@ async fn discover_with_peers(
     discovered
 }
 
+#[tokio::test]
+async fn an_sdk_tombstone_excludes_an_old_stable_peer_from_join_discovery() {
+    use matrix_sdk::ruma::{api::client::sync::sync_events::msc4186, serde::Raw};
+    use serde_json::json;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    let server = MatrixMockServer::new().await;
+    server
+        .mock_versions()
+        .with_feature("org.matrix.msc4354", true)
+        .with_feature("org.matrix.msc4143.stable", true)
+        .ok()
+        .mount()
+        .await;
+    server.mock_room_state_encryption().plain().mount().await;
+    let client = server
+        .client_builder()
+        .no_server_versions()
+        .on_builder(|builder| builder.disable_well_known_lookup(true))
+        .build()
+        .await;
+    let room_id = owned_room_id!("!call:example.org");
+    let room = server.sync_joined_room(&client, &room_id).await;
+    let now = crate::now_ms();
+    let mut peer = member(CallMode::Matrix2, now - 100, &["wss://old-sfu.example.org"]);
+    peer.member_id = Some("peer".to_owned());
+    peer.wire = crate::calls::membership::RtcWire::Stable;
+    let join = json!({
+        "type": "m.rtc.member", "event_id": "$joined", "sender": peer.user_id,
+        "origin_server_ts": peer.created_ts, "msc4354_sticky": {"duration_ms": 3_600_000},
+        "content": crate::calls::content::content_at(&room_id, &peer, None, now),
+    });
+    let mut leave = join.clone();
+    leave["event_id"] = json!("$left");
+    leave["origin_server_ts"] = json!(now);
+    leave["content"] = json!({"sticky_key": "peer"});
+    let mut sticky_room = msc4186::response::StickyEventsRoom::default();
+    sticky_room
+        .events
+        .push(Raw::new(&leave).unwrap().cast_unchecked());
+    let mut response = msc4186::Response::new("left".to_owned());
+    response
+        .extensions
+        .sticky_events
+        .rooms
+        .insert(room_id.clone(), sticky_room);
+    client
+        .process_sliding_sync_test_helper(
+            &response,
+            &matrix_sdk_base::RequestedRequiredStates::default(),
+        )
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path_regex(".*sync.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pos": "sticky", "extensions": {"org.matrix.msc4354.sticky_events": {
+                "rooms": {room_id.as_str(): {"events": [join]}}
+            }},
+        })))
+        .expect(1)
+        .mount(server.server())
+        .await;
+
+    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let discovered = discover(
+        &core,
+        &room,
+        CallSessionId(1),
+        Some("https://configured.example.org".to_owned()),
+        Some(CallMode::Matrix2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(discovered.members, []);
+    assert_eq!(
+        discovered.own.wire,
+        crate::calls::membership::RtcWire::Deployed
+    );
+    assert_eq!(discovered.own.foci, ["https://configured.example.org"]);
+}
+
 const PEERS: [(u64, &str); 2] = [
     (1_000, "https://later.example.org"),
     (2_000, "https://oldest.example.org"),
@@ -100,7 +194,8 @@ const PEERS: [(u64, &str); 2] = [
 #[tokio::test]
 async fn joining_an_existing_call_uses_the_oldest_focus_in_every_mode() {
     for mode in [CallMode::Legacy, CallMode::Compatibility, CallMode::Matrix2] {
-        let discovered = discover_with_peers(mode, &PEERS, Some("https://own.example.org")).await;
+        let discovered =
+            discover_with_peers(mode, &PEERS, false, Some("https://own.example.org")).await;
         assert_eq!(
             discovered.own.foci,
             vec!["https://oldest.example.org"],
@@ -112,8 +207,34 @@ async fn joining_an_existing_call_uses_the_oldest_focus_in_every_mode() {
 #[tokio::test]
 async fn joining_a_call_without_a_focus_uses_the_configured_fallback() {
     for mode in [CallMode::Legacy, CallMode::Compatibility, CallMode::Matrix2] {
-        let discovered = discover_with_peers(mode, &[], Some("https://own.example.org")).await;
+        let discovered =
+            discover_with_peers(mode, &[], false, Some("https://own.example.org")).await;
         assert_eq!(discovered.own.foci, vec!["https://own.example.org"]);
+    }
+}
+
+#[tokio::test]
+async fn a_matrix2_join_takes_the_identity_of_the_running_call() {
+    for (peers, older_peers) in [(&[][..], false), (&PEERS[..], false), (&PEERS[..], true)] {
+        let own = discover_with_peers(
+            CallMode::Matrix2,
+            peers,
+            older_peers,
+            Some("https://own.example.org"),
+        )
+        .await
+        .own;
+        let device = own.own_device_id();
+        let expected = if older_peers {
+            crate::calls::membership::sticky_identity(
+                &own.user_id,
+                device,
+                own.member_id.as_deref().unwrap(),
+            )
+        } else {
+            format!("{}:{device}", own.user_id)
+        };
+        assert_eq!(own.identity, expected, "{peers:?} {older_peers}");
     }
 }
 

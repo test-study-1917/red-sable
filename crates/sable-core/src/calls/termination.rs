@@ -8,13 +8,57 @@ use std::collections::{HashSet, VecDeque};
 use matrix_sdk::ruma::{OwnedTransactionId, TransactionId};
 use serde_json::{Value, json};
 
-use super::membership::CallMember;
+use super::membership::{CallMember, StickyMemberships};
 
 pub(super) const EVENT_TYPE: &str = "io.element.call.reaction";
 const TERMINATE: &str = "io.element.call.terminate";
 const GRACE_MS: u64 = 30_000;
+const ENCRYPTED_STICKY_WAIT_MS: u64 = 30_000;
 const CLOCK_SKEW_MS: u64 = 5_000;
 const LIMIT: usize = 256;
+
+pub(super) struct Candidate {
+    event_id: String,
+    sender: String,
+    ts: u64,
+    transaction_id: Option<String>,
+}
+
+impl Candidate {
+    pub(super) fn parse(event: &Value) -> Option<Self> {
+        if event.get("state_key").is_some() || event.pointer("/unsigned/redacted_because").is_some()
+        {
+            return None;
+        }
+        let content = event.get("content")?;
+        let payload = match event.get("type")?.as_str()? {
+            EVENT_TYPE => content.get(TERMINATE)?,
+            TERMINATE => content,
+            _ => return None,
+        };
+        let event_id = event.get("event_id")?.as_str()?;
+        let sender = event.get("sender")?.as_str()?;
+        if event_id.is_empty()
+            || sender.is_empty()
+            || payload.get("terminated_by")?.as_str()? != sender
+            || !positive(payload.get("timestamp")?)
+            || payload
+                .get("reason")
+                .is_some_and(|reason| !reason.is_string())
+        {
+            return None;
+        }
+        Some(Self {
+            event_id: event_id.to_owned(),
+            sender: sender.to_owned(),
+            ts: timestamp(event.get("origin_server_ts")?)?,
+            transaction_id: event
+                .pointer("/unsigned/transaction_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Ended {
@@ -26,7 +70,13 @@ pub(super) struct Ended {
 #[derive(Clone)]
 struct Observed {
     member: CallMember,
-    left_at: Option<u64>,
+    departure: Option<Departure>,
+}
+
+#[derive(Clone, Copy)]
+struct Departure {
+    observed_at: u64,
+    server_ts: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -36,11 +86,19 @@ pub(super) struct Attempt {
     pub(super) sending: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum MembershipWait {
+    RoomRoster { encrypted_sticky: bool },
+    EncryptedSticky { since: u64 },
+}
+
 pub(super) struct Reader {
     observed: Vec<Observed>,
     local_joined_at: u64,
     accepted: VecDeque<String>,
     pub(super) pending: VecDeque<Value>,
+    waiting_for_membership: VecDeque<(Candidate, MembershipWait)>,
+    new_membership_candidates: bool,
     pub(super) ended: Option<Ended>,
     pub(super) attempt: Option<Attempt>,
 }
@@ -78,6 +136,8 @@ impl Reader {
             local_joined_at: 0,
             accepted: VecDeque::new(),
             pending: VecDeque::new(),
+            waiting_for_membership: VecDeque::new(),
+            new_membership_candidates: false,
             ended: None,
             attempt: None,
         };
@@ -119,35 +179,64 @@ impl Reader {
                 .find(|(_, old)| old.member.same_generation(member))
             {
                 old.member = member.clone();
-                old.left_at = None;
+                old.departure = None;
                 current.insert(index);
             } else {
                 let index = self.observed.len();
                 self.observed.push(Observed {
                     member: member.clone(),
-                    left_at: None,
+                    departure: None,
                 });
                 current.insert(index);
             }
         }
         for (index, old) in self.observed.iter_mut().enumerate() {
-            if !current.contains(&index) && old.left_at.is_none() {
-                old.left_at = Some(now);
+            if !current.contains(&index) && old.departure.is_none() {
+                old.departure = Some(Departure {
+                    observed_at: now,
+                    server_ts: None,
+                });
             }
         }
         self.prune(now);
     }
 
+    pub(super) fn reconcile_sticky(&mut self, sticky: &StickyMemberships, now: u64) {
+        // Even while the room roster is unsynced, update deadlines only for
+        // sticky events this reader has already observed.
+        for entry in &mut self.observed {
+            let expiry = sticky.observed_expiry(&entry.member);
+            if let Some(expiry) = expiry {
+                entry.member.expires_at_ms = Some(expiry);
+            }
+            let tombstone = sticky.confirmed_departure(&entry.member, now);
+            if tombstone.is_none() && expiry.is_none_or(|at| at > now) {
+                continue;
+            }
+            let departure = entry.departure.get_or_insert(Departure {
+                observed_at: now,
+                server_ts: None,
+            });
+            if let Some(server_ts) = tombstone {
+                departure.server_ts = Some(
+                    departure
+                        .server_ts
+                        .map_or(server_ts, |old| old.min(server_ts)),
+                );
+            }
+        }
+    }
+
     fn prune(&mut self, now: u64) {
         self.observed.retain(|entry| {
             entry
-                .left_at
-                .is_none_or(|left| now.saturating_sub(left) <= GRACE_MS)
+                .departure
+                .is_none_or(|left| now.saturating_sub(left.observed_at) <= GRACE_MS)
         });
         while self
             .observed
             .iter()
-            .filter(|entry| entry.left_at.is_some())
+            .filter(|entry| entry.departure.is_some())
             .count()
             > LIMIT
         {
@@ -155,7 +244,7 @@ impl Reader {
                 .observed
                 .iter()
                 .enumerate()
-                .filter_map(|(index, entry)| entry.left_at.map(|left| (index, left)))
+                .filter_map(|(index, entry)| entry.departure.map(|left| (index, left.observed_at)))
                 .min_by_key(|(_, left)| *left)
             {
                 self.observed.remove(index);
@@ -163,79 +252,124 @@ impl Reader {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn admit(&mut self, value: &Value, now: u64) -> Option<Ended> {
+        self.admit_candidate(Candidate::parse(value)?, now, None)
+    }
+
+    pub(super) fn admit_candidate(
+        &mut self,
+        candidate: Candidate,
+        now: u64,
+        wait: Option<MembershipWait>,
+    ) -> Option<Ended> {
         if self.ended.is_some()
-            || value.get("state_key").is_some()
-            || value.pointer("/unsigned/redacted_because").is_some()
+            || self.accepted.contains(&candidate.event_id)
+            || candidate.ts < self.local_joined_at
         {
             return None;
         }
-        let event_id = value.get("event_id")?.as_str()?.to_owned();
-        if event_id.is_empty() || self.accepted.contains(&event_id) {
-            return None;
-        }
-        let sender = value.get("sender")?.as_str()?;
-        if sender.is_empty() {
-            return None;
-        }
-        let ts = timestamp(value.get("origin_server_ts")?)?;
-        let content = value.get("content")?;
-        let payload = match value.get("type")?.as_str()? {
-            EVENT_TYPE => content.get(TERMINATE)?,
-            TERMINATE => content,
-            _ => return None,
-        };
-        if payload.get("terminated_by")?.as_str()? != sender || !positive(payload.get("timestamp")?)
-        {
-            return None;
-        }
-        if payload
-            .get("reason")
-            .is_some_and(|reason| !reason.is_string())
-        {
-            return None;
-        }
-        if ts < self.local_joined_at {
-            return None;
-        }
+        let sender = candidate.sender.as_str();
+        let ts = candidate.ts;
         self.prune(now);
         let current = self
             .observed
             .iter()
-            .any(|entry| entry.member.user_id.as_str() == sender && entry.left_at.is_none());
-        let authorized = self.observed.iter().any(|entry| {
-            entry.member.user_id.as_str() == sender
-                && (if current {
-                    entry.left_at.is_none()
-                } else {
-                    entry.left_at.is_some_and(|left| {
-                        now.saturating_sub(left) <= GRACE_MS
-                            && ts <= left.saturating_add(CLOCK_SKEW_MS)
+            .any(|entry| entry.member.user_id.as_str() == sender && entry.departure.is_none());
+        let authorized = !matches!(wait, Some(MembershipWait::RoomRoster { .. }))
+            && self.observed.iter().any(|entry| {
+                entry.member.user_id.as_str() == sender
+                    && (if current {
+                        entry.departure.is_none()
+                    } else {
+                        entry.departure.is_some_and(|left| {
+                            let expired_at = entry
+                                .member
+                                .expires_at_ms
+                                .filter(|expiry| *expiry <= left.observed_at);
+                            let cutoff = match (left.server_ts, expired_at) {
+                                (Some(left), Some(expiry)) => left.min(expiry),
+                                (Some(cutoff), None) | (None, Some(cutoff)) => cutoff,
+                                (None, None) => left.observed_at,
+                            };
+                            now.saturating_sub(left.observed_at) <= GRACE_MS
+                                && ts <= cutoff.saturating_add(CLOCK_SKEW_MS)
+                        })
                     })
-                })
-                && (entry.member.created_ts == 0 || ts >= entry.member.created_ts)
-        });
+                    && (entry.member.created_ts == 0 || ts >= entry.member.created_ts)
+            });
         if !authorized {
+            if let Some(wait) = wait
+                && !self
+                    .waiting_for_membership
+                    .iter()
+                    .any(|(queued, _)| queued.event_id == candidate.event_id)
+            {
+                self.waiting_for_membership.push_back((candidate, wait));
+                self.new_membership_candidates = true;
+                while self.waiting_for_membership.len() > LIMIT {
+                    self.waiting_for_membership.pop_front();
+                }
+            }
             return None;
         }
-        let txn = value
-            .pointer("/unsigned/transaction_id")
-            .and_then(Value::as_str);
-        let local = self
-            .attempt
-            .as_ref()
-            .is_some_and(|attempt| txn == Some(attempt.transaction_id.as_str()));
+        let local = self.attempt.as_ref().is_some_and(|attempt| {
+            candidate.transaction_id.as_deref() == Some(attempt.transaction_id.as_str())
+        });
         let ended = Ended {
-            terminated_by: sender.to_owned(),
-            event_id: event_id.clone(),
+            terminated_by: candidate.sender,
+            event_id: candidate.event_id.clone(),
             local,
         };
-        self.accepted.push_back(event_id);
+        self.accepted.push_back(candidate.event_id);
         while self.accepted.len() > LIMIT {
             self.accepted.pop_front();
         }
         self.ended = Some(ended.clone());
         Some(ended)
+    }
+
+    pub(super) fn waits_for_membership(&self) -> bool {
+        !self.waiting_for_membership.is_empty()
+    }
+
+    pub(super) const fn new_membership_candidates(&self) -> bool {
+        self.new_membership_candidates
+    }
+
+    pub(super) const fn membership_check_started(&mut self) {
+        self.new_membership_candidates = false;
+    }
+
+    pub(super) fn retry_membership(&mut self, now: u64) -> Option<Ended> {
+        let ended = std::mem::take(&mut self.waiting_for_membership)
+            .into_iter()
+            .find_map(|(candidate, wait)| {
+                let next_wait = match wait {
+                    // Retry once with a synced room roster even if /members
+                    // took longer than the separate sticky-decryption wait.
+                    MembershipWait::RoomRoster { encrypted_sticky } => {
+                        encrypted_sticky.then_some(MembershipWait::EncryptedSticky { since: now })
+                    }
+                    MembershipWait::EncryptedSticky { since }
+                        if now.saturating_sub(since) <= ENCRYPTED_STICKY_WAIT_MS =>
+                    {
+                        Some(wait)
+                    }
+                    MembershipWait::EncryptedSticky { .. } => return None,
+                };
+                self.admit_candidate(candidate, now, next_wait)
+            });
+        // Requeuing a candidate that still lacks evidence is not new work
+        // for the join handoff. Normal call updates will continue to retry it.
+        self.new_membership_candidates = false;
+        ended
+    }
+
+    pub(super) fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.waiting_for_membership.clear();
+        self.new_membership_candidates = false;
     }
 
     pub(super) fn remember_pending(&mut self, value: Value) {

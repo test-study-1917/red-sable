@@ -27,6 +27,7 @@ use matrix_sdk_base::sync::Notification;
 use matrix_sdk_ui::notification_client::{NotificationClient, NotificationProcessSetup};
 
 use crate::Core;
+use crate::inbox::InboxSource;
 use crate::notifications;
 use crate::search::ignored_user_ids;
 use crate::spaces::{self, SidebarSpacesEvent};
@@ -72,6 +73,24 @@ fn redecrypted_notification(
 }
 
 impl Core {
+    /// A sync that is only waiting for a network would otherwise read as starting.
+    pub(crate) fn shown_sync_status(&self, state: SyncState) -> SyncStatus {
+        if matches!(state, SyncState::Idle)
+            && !self.sync_paused()
+            && !self.activity.network_available()
+        {
+            return SyncStatus::Offline;
+        }
+        sync_status(state)
+    }
+
+    fn emit_sync_status(&self, generation: u64, state: SyncState) {
+        self.emit_if_current(
+            generation,
+            CoreEvent::SyncStatus(self.shown_sync_status(state)),
+        );
+    }
+
     /// Restarts a stalled sync with backoff and reports each state change.
     pub(crate) fn watch_sync_state(
         self: &Arc<Self>,
@@ -84,7 +103,7 @@ impl Core {
         let restarted = sync_service.clone();
         let support_client = client.clone();
         // `Subscriber::next` yields only on *change*, so emit the first by hand.
-        core.emit_if_current(generation, CoreEvent::SyncStatus(sync_status(states.get())));
+        core.emit_sync_status(generation, states.get());
         self.track_session_task(
             spawn(async move {
                 let mut failures = 0u32;
@@ -99,7 +118,7 @@ impl Core {
                     };
                     let Ok(next) = next else {
                         if server_reachable(&support_client).await {
-                            core.resume_sync(&restarted).await;
+                            core.retry_sync(&restarted).await;
                         }
                         continue;
                     };
@@ -120,7 +139,7 @@ impl Core {
                             .take()
                             .is_some_and(|since| since.elapsed() >= SYNC_BACKOFF_RESET)
                     };
-                    core.emit_if_current(generation, CoreEvent::SyncStatus(sync_status(state)));
+                    core.emit_sync_status(generation, state);
                     if running {
                         let core = core.clone();
                         let rules_cleaned = rules_cleaned.clone();
@@ -253,12 +272,17 @@ impl Core {
         client: &matrix_sdk::Client,
         generation: u64,
     ) {
-        // Matrix reactions and keyword matches do not necessarily generate push
-        // notifications. Observe all synced room events independently of push.
+        let Ok(inbox) = self.inbox_source(Some(generation)).await else {
+            return;
+        };
+        // Capture ownership at installation, not in the SDK dispatch path.
+        // Reactions and keyword matches can arrive without a push notification.
         let inbox_handle = client.add_event_handler({
             let core = self.clone();
+            let inbox = inbox.clone();
             move |raw: Raw<AnySyncTimelineEvent>, room: matrix_sdk::Room| {
                 let core = core.clone();
+                let inbox = inbox.clone();
                 async move {
                     if !core.is_current(generation) {
                         return;
@@ -269,16 +293,14 @@ impl Core {
                     ) {
                         // Push rules are checked separately in the normal notification
                         // worker. This path captures explicit mentions/keywords/reactions.
-                        core.record_live_inbox(&room, &raw, &[], generation).await;
+                        core.record_live_inbox(&inbox, &room, &raw, &[]).await;
                     }
                 }
             }
         });
         self.track_session_handler(client, inbox_handle);
         let (sender, mut pending) = tokio::sync::mpsc::unbounded_channel();
-        let Some(account_id) = self.session.current(|session| session.account_id.clone()) else {
-            return;
-        };
+        let account_id = inbox.session.account_id.clone();
         let mut routes = self.notification_routes.lock().await;
         let route = if let Some(route) = routes.get(&account_id) {
             route.clone()
@@ -291,15 +313,13 @@ impl Core {
         let redecrypted = sender.clone();
         let route_guard = NotificationWorkerRoute { route, sender };
         drop(routes);
-        self.watch_redecrypted_notifications(client, redecrypted, generation);
+        self.watch_redecrypted_notifications(client, redecrypted, inbox.clone());
 
         let core = self.clone();
-        let client = client.clone();
         self.track_session_task(
             spawn(async move {
                 let _route_guard = route_guard;
-                let Some(mut notifier) = ForegroundNotifier::new(core, client, generation).await
-                else {
+                let Some(mut notifier) = ForegroundNotifier::new(core, inbox).await else {
                     return;
                 };
                 while let Some((notification, room)) = pending.recv().await {
@@ -314,7 +334,7 @@ impl Core {
         self: &Arc<Self>,
         client: &matrix_sdk::Client,
         notifications: NotificationSender,
-        generation: u64,
+        inbox: Arc<InboxSource>,
     ) {
         let Some(event_cache) = client.event_cache() else {
             return;
@@ -352,7 +372,7 @@ impl Core {
                         };
                         let actions =
                             crate::push_rules::related_actions(&room, event.raw(), actions).await;
-                        core.refresh_undecryptable_inbox_entry(&room, &event, &actions, generation)
+                        core.refresh_undecryptable_inbox_entry(&inbox, &room, &event, &actions)
                             .await;
                         if let Some(notification) = redecrypted_notification(
                             &event,
@@ -822,28 +842,31 @@ async fn register_notification_route(client: &matrix_sdk::Client) -> Notificatio
 /// Turns live sync notifications into in-app alerts, once per event or invite.
 struct ForegroundNotifier {
     core: Arc<Core>,
-    client: matrix_sdk::Client,
+    inbox: Arc<InboxSource>,
     notifications: NotificationClient,
-    generation: u64,
     alerted_invites: std::collections::HashSet<ruma::OwnedRoomId>,
     alerted_events: std::collections::HashMap<OwnedEventId, MilliSecondsSinceUnixEpoch>,
 }
 
 impl ForegroundNotifier {
-    async fn new(core: Arc<Core>, client: matrix_sdk::Client, generation: u64) -> Option<Self> {
-        let sync_service = core.sync_service().await.ok()?;
-        let setup = NotificationProcessSetup::SingleProcess { sync_service };
-        let notifications = NotificationClient::new(client.clone(), setup).await.ok()?;
-        let alerted_invites = client
+    async fn new(core: Arc<Core>, inbox: Arc<InboxSource>) -> Option<Self> {
+        let setup = NotificationProcessSetup::SingleProcess {
+            sync_service: inbox.session.sync_service.clone(),
+        };
+        let notifications = NotificationClient::new(inbox.session.client.clone(), setup)
+            .await
+            .ok()?;
+        let alerted_invites = inbox
+            .session
+            .client
             .invited_rooms()
             .into_iter()
             .map(|room| room.room_id().to_owned())
             .collect();
         Some(Self {
             core,
-            client,
+            inbox,
             notifications,
-            generation,
             alerted_invites,
             alerted_events: std::collections::HashMap::new(),
         })
@@ -862,7 +885,7 @@ impl ForegroundNotifier {
             && !(every_encrypted && notifications::raw_is_encrypted(raw))
         {
             self.core
-                .record_live_inbox(room, raw, &actions, self.generation)
+                .record_live_inbox(&self.inbox, room, raw, &actions)
                 .await;
         }
         if !notifications::notifies(&actions) || self.core.is_read_room(room.room_id()) {
@@ -907,8 +930,10 @@ impl ForegroundNotifier {
             && !read
         {
             self.core.nicknames().apply_notification(&mut notification);
-            self.core
-                .emit_if_current(self.generation, CoreEvent::Notification { notification });
+            self.core.emit_if_current(
+                self.inbox.generation,
+                CoreEvent::Notification { notification },
+            );
         }
     }
 
@@ -924,7 +949,7 @@ impl ForegroundNotifier {
         }
         let event = raw.deserialize().ok()?;
         let now = MilliSecondsSinceUnixEpoch::now();
-        if Some(event.sender()) == self.client.user_id()
+        if Some(event.sender()) == self.inbox.session.client.user_id()
             || notifications::is_backfill(now, event.origin_server_ts())
             || notifications::is_read(room, event.origin_server_ts()).await
             || !first_alert(

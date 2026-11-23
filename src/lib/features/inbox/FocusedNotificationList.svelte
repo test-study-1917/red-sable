@@ -2,7 +2,6 @@
   import type { InboxItemView } from '#src/generated/protocol';
   import { goto } from '$app/navigation';
   import { onDestroy } from 'svelte';
-  import { on } from 'svelte/events';
   import { useCoreClient } from '#lib/core/context.js';
   import { roomSectionPath } from '#lib/rooms/permalink.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
@@ -26,37 +25,31 @@
   // SABLE_NOTIFICATION_HISTORY_V7: default to a persistent all-notifications view.
   let unreadOnly = $state(false);
   let loading = $state(true);
-  let error = $state('');
+  let loadFailed = $state(false);
   let hasOlder = $state(false);
   let historyLoading = $state(false);
+  let historyFailed = $state(false);
+  let markingAll = $state(false);
   let fetchSerial = 0;
   let lastAccount = '';
-  const eligible = (item: InboxItemView): boolean =>
-    item.kind === 'reaction' ||
-    item.kind === 'mention' ||
-    item.kind === 'keyword' ||
-    (!item.kind && item.highlight);
   const kindOf = (item: InboxItemView): Kind =>
     item.kind === 'reaction' || item.kind === 'mention' || item.kind === 'keyword'
       ? item.kind
       : 'mention';
   let visible = $derived(
     items.filter(
-      (item) =>
-        eligible(item) &&
-        (!unreadOnly || !item.read) &&
-        (filter === 'all' || kindOf(item) === filter)
+      (item) => (!unreadOnly || !item.read) && (filter === 'all' || kindOf(item) === filter)
     )
   );
   // Preserve the upstream ability to reach a room counted in the badge even
   // when the compact reaction/mention/keyword history has no matching event.
   let unlisted = $derived(
-    !loading && !error && filter === 'all'
+    !loading && !loadFailed && filter === 'all'
       ? unlistedNotifications(
           roomList.rooms,
           'all',
           roomList.badgeUnreadFor,
-          items.filter((entry) => eligible(entry) && !entry.read).map((entry) => entry.room_id)
+          items.filter((entry) => !entry.read).map((entry) => entry.room_id)
         )
       : []
   );
@@ -67,16 +60,17 @@
       const response = await core.rpc.notifications.inbox({
         filter: 'all',
         include_read: true,
+        focused: true,
         limit: 20000,
         before_ts: null,
       });
       if (serial !== fetchSerial) return;
       items = response.items;
-      error = '';
+      loadFailed = false;
     } catch (cause) {
       if (serial !== fetchSerial) return;
       console.warn('[sable focused inbox] load failed', cause);
-      error = '通知加载失败，可以重试。';
+      loadFailed = true;
     } finally {
       if (serial === fetchSerial) loading = false;
     }
@@ -87,29 +81,25 @@
     try {
       const result = await core.rpc.notifications.backfillInbox({ include_read: true });
       hasOlder = result.has_more;
-      await reload();
+      historyFailed = false;
     } catch (cause) {
       console.warn('[sable focused inbox] backfill failed', cause);
-      error = '读取历史通知失败，可以重试。';
+      historyFailed = true;
     } finally {
       historyLoading = false;
     }
   }
-  async function markOne(item: InboxItemView): Promise<void> {
-    if (item.read) return;
-    await core.rpc.notifications.markNotificationSeen({ event_id: item.event_id });
-    // Do not wait for a remote notification event to remove the red dot.
-    items = items.map((entry) =>
-      entry.event_id === item.event_id ? { ...entry, read: true } : entry
-    );
-    window.dispatchEvent(new Event('sable-focused-inbox-changed'));
+  async function markSeen(eventIds: string[]): Promise<void> {
+    await core.rpc.notifications.markNotificationsSeen({ event_ids: eventIds });
+    const seen = new Set(eventIds);
+    items = items.map((entry) => (seen.has(entry.event_id) ? { ...entry, read: true } : entry));
   }
   async function visit(item: InboxItemView, event: MouseEvent): Promise<void> {
     if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
       return;
     event.preventDefault();
     try {
-      await markOne(item);
+      if (!item.read) await markSeen([item.event_id]);
     } catch (cause) {
       console.warn('[sable focused inbox] mark read failed', cause);
     }
@@ -132,14 +122,14 @@
     }
   }
   async function markAllRead(): Promise<void> {
-    for (const item of items.filter((entry) => eligible(entry) && !entry.read)) {
-      try {
-        await markOne(item);
-      } catch (cause) {
-        console.warn('[sable focused inbox] mark all failed', cause);
-      }
+    markingAll = true;
+    try {
+      await markSeen(items.filter((entry) => !entry.read).map((entry) => entry.event_id));
+    } catch (cause) {
+      console.warn('[sable focused inbox] mark all failed', cause);
+    } finally {
+      markingAll = false;
     }
-    await reload();
   }
   $effect(() => {
     const account = core.session?.account_id ?? '';
@@ -156,17 +146,9 @@
       void reload();
       void backfill();
     }
-    const stop = core.subscribeEvents((event) => {
-      if (event.type === 'inbox_changed' || event.type === 'room_list_diff') void reload();
+    return core.subscribeEvents((event) => {
+      if (event.type === 'inbox_changed') void reload();
     });
-    const localChange = () => {
-      void reload();
-    };
-    const stopLocal = on(window, 'sable-focused-inbox-changed', localChange);
-    return () => {
-      stop();
-      stopLocal();
-    };
   });
   onDestroy(() => {
     fetchSerial += 1;
@@ -205,15 +187,35 @@
         }}>仅未读</button
       >
     </div>
-    {#if items.some((item) => eligible(item) && !item.read)}
-      <button class="mark-all" type="button" onclick={() => void markAllRead()}>全部标为已读</button
+    {#if items.some((item) => !item.read)}
+      <button
+        class="mark-all"
+        type="button"
+        disabled={markingAll}
+        onclick={() => void markAllRead()}
       >
+        全部标为已读
+      </button>
     {/if}
   </div>
 
-  {#if error}<p class="error" role="alert">
-      {error} <button type="button" onclick={() => void reload()}>重试</button>
-    </p>{/if}
+  {#if loadFailed}
+    <p class="error" role="alert">
+      通知加载失败。 <button type="button" aria-label="重试加载通知" onclick={() => void reload()}
+        >重试</button
+      >
+    </p>
+  {/if}
+  {#if historyFailed}
+    <p class="error" role="alert">
+      读取历史通知失败。 <button
+        type="button"
+        aria-label="重试读取历史通知"
+        disabled={historyLoading}
+        onclick={() => void backfill()}>重试</button
+      >
+    </p>
+  {/if}
   {#if loading}<p class="empty">正在读取通知…</p>
   {:else if visible.length === 0 && unlisted.length === 0}
     <p class="empty">这里暂时没有符合条件的通知。</p>
@@ -280,7 +282,7 @@
       </ul>
     {/if}
   {/if}
-  {#if hasOlder}
+  {#if hasOlder && !historyFailed}
     <button
       class="older-button"
       type="button"

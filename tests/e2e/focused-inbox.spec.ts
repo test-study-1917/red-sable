@@ -19,7 +19,7 @@ test('notification history retains a mention after marking it read', async ({
   await expect
     .poll(() =>
       page.evaluate(() =>
-        window.__e2eCalls.some((call) => call.method === 'notifications.mark_notification_seen')
+        window.__e2eCalls.some((call) => call.method === 'notifications.mark_notifications_seen')
       )
     )
     .toBe(true);
@@ -32,4 +32,20 @@ test('notification history retains a mention after marking it read', async ({
   await page.screenshot({ path: 'test-results/focused-inbox.png', fullPage: true });
   await history.getByRole('button', { name: '仅未读', exact: true }).click();
   await expect(history.locator('.notification-entry')).toHaveCount(0);
+});
+
+test('leaving a room removes its notification from the open history and the bell', async ({
+  page,
+  installRoomCore,
+}) => {
+  await installRoomCore('ready');
+  await page.goto('/inbox?tab=notifications');
+  const history = page.getByRole('region', { name: '通知记录', exact: true });
+  await expect(history.locator('.unread-mark')).toHaveCount(1, { timeout: COLD_BOOT_TIMEOUT });
+  await expect(page.getByRole('link', { name: 'Inbox, 1 waiting', exact: true })).toBeVisible();
+
+  await page.evaluate(() => window.__e2eLeaveRoom('!room:example.test'));
+
+  await expect(history.locator('.notification-entry')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Inbox', exact: true })).toBeVisible();
 });

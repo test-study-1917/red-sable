@@ -104,3 +104,14 @@ test('the Meowlnir ban keeps its separator when report is hidden', () => {
     { key: 'meowlnir-ban', destructive: true, separated: false },
   ]);
 });
+
+test('select row appears separated before mark unread when provided', () => {
+  const withUnread = messageMenuRows({ onSelect: () => {}, onMarkUnread: () => {} });
+  expect(withUnread.map((row) => [row.key, row.label, row.separated ?? false])).toEqual([
+    ['select', 'timeline.selectMessage', true],
+    ['mark-unread', 'timeline.markUnread', false],
+  ]);
+
+  const selectOnly = messageMenuRows({ onSelect: () => {} });
+  expect(selectOnly.map((row) => [row.key, row.separated ?? false])).toEqual([['select', true]]);
+});

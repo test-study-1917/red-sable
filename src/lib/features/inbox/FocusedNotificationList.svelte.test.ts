@@ -49,7 +49,7 @@ function notification(kind: string, read = false): InboxItemView {
   };
 }
 
-test('local read changes refresh the inbox, and unmount removes both subscriptions', async () => {
+test('core inbox changes refresh the list, and unmount removes the subscription', async () => {
   core.session = { account_id: 'account' };
   core.rpc.notifications.inbox.mockResolvedValue({ items: [], has_more: false });
   core.rpc.notifications.backfillInbox.mockResolvedValue({ recorded: 0, has_more: false });
@@ -58,14 +58,27 @@ test('local read changes refresh the inbox, and unmount removes both subscriptio
   const view = render(FocusedNotificationList);
   await screen.findByText('这里暂时没有符合条件的通知。');
   const before = core.rpc.notifications.inbox.mock.calls.length;
-  window.dispatchEvent(new Event('sable-focused-inbox-changed'));
-  await vi.waitFor(() => {
-    expect(core.rpc.notifications.inbox).toHaveBeenCalledTimes(before + 1);
-  });
+  const [emit] = core.subscribeEvents.mock.lastCall!;
+  emit({ type: 'room_list_diff', subscription: 1, diffs: [], sections: null });
+  expect(core.rpc.notifications.inbox).toHaveBeenCalledTimes(before);
+  emit({ type: 'inbox_changed' });
+  expect(core.rpc.notifications.inbox).toHaveBeenCalledTimes(before + 1);
   view.unmount();
   expect(unsubscribe).toHaveBeenCalledTimes(core.subscribeEvents.mock.calls.length);
-  window.dispatchEvent(new Event('sable-focused-inbox-changed'));
-  expect(core.rpc.notifications.inbox).toHaveBeenCalledTimes(before + 1);
+});
+
+test('retries a failed initial history backfill without querying the local inbox again', async () => {
+  core.rpc.notifications.inbox.mockResolvedValue({ items: [], has_more: false });
+  core.rpc.notifications.backfillInbox.mockRejectedValueOnce(new Error('offline'));
+  render(FocusedNotificationList);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('读取历史通知失败');
+  await fireEvent.click(screen.getByRole('button', { name: /重试/ }));
+
+  expect(core.rpc.notifications.backfillInbox).toHaveBeenCalledTimes(2);
+  expect(core.rpc.notifications.backfillInbox).toHaveBeenLastCalledWith({ include_read: true });
+  await vi.waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  expect(core.rpc.notifications.inbox).toHaveBeenCalledTimes(1);
 });
 
 test('filters persistent reaction, mention and keyword history, including read records', async () => {
@@ -90,7 +103,7 @@ test('filters persistent reaction, mention and keyword history, including read r
   expect(screen.queryByText('mention preview')).not.toBeInTheDocument();
 });
 
-test('mark-all persists each notification without changing ordinary room receipts', async () => {
+test('mark-all writes one batch and reloads once without changing ordinary room receipts', async () => {
   roomList.rooms = [
     {
       room_id: '!ordinary:example.org',
@@ -101,21 +114,28 @@ test('mark-all persists each notification without changing ordinary room receipt
     } as unknown as RoomListItemView,
   ];
   let records = [notification('reaction'), notification('mention'), notification('keyword', true)];
-  core.rpc.notifications.inbox.mockImplementation(() => Promise.resolve({
-    items: records,
-    has_more: false,
-  }));
-  core.rpc.notifications.markNotificationSeen.mockImplementation(({ event_id }) => {
-    records = records.map((item) => (item.event_id === event_id ? { ...item, read: true } : item));
-    return Promise.resolve(null);
-  });
+  core.rpc.notifications.inbox.mockImplementation(() =>
+    Promise.resolve({ items: records, has_more: false })
+  );
   render(FocusedNotificationList);
   await screen.findByText('reaction preview');
+  const before = core.rpc.notifications.inbox.mock.calls.length;
+  const [emit] = core.subscribeEvents.mock.lastCall!;
+  core.rpc.notifications.markNotificationsSeen.mockImplementation(({ event_ids }) => {
+    records = records.map((item) =>
+      event_ids.includes(item.event_id) ? { ...item, read: true } : item
+    );
+    emit({ type: 'inbox_changed' });
+    return Promise.resolve(null);
+  });
   await fireEvent.click(screen.getByRole('button', { name: '全部标为已读' }));
   await vi.waitFor(() => {
     expect(screen.queryByLabelText('未读')).not.toBeInTheDocument();
   });
-  expect(core.rpc.notifications.markNotificationSeen).toHaveBeenCalledTimes(2);
+  expect(core.rpc.notifications.markNotificationsSeen).toHaveBeenCalledExactlyOnceWith({
+    event_ids: ['$reaction', '$mention'],
+  });
+  expect(core.rpc.notifications.inbox).toHaveBeenCalledTimes(before + 1);
   expect(core.rpc.timeline.markRead).not.toHaveBeenCalled();
   expect(screen.getByText('reaction preview')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Mark Room as read/ })).toBeInTheDocument();

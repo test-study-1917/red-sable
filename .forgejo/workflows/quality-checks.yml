@@ -2,22 +2,30 @@ name: Quality checks
 
 on:
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.changeset/**'
-      - 'fastlane/**'
-      - 'src-tauri/**'
-      - 'electron/**'
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!**/*.md'
+      - '!.changeset/**'
+      - '!fastlane/**'
+      - '!src-tauri/**'
+      # Tests and the Vite config read these.
+      - 'docs/settings.md'
+      - 'src-tauri/tauri.conf.json'
+      - 'src-tauri/ios-project.yml'
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.changeset/**'
-      - 'fastlane/**'
-      - 'src-tauri/**'
-      - 'electron/**'
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!**/*.md'
+      - '!.changeset/**'
+      - '!fastlane/**'
+      - '!src-tauri/**'
+      # Tests and the Vite config read these.
+      - 'docs/settings.md'
+      - 'src-tauri/tauri.conf.json'
+      - 'src-tauri/ios-project.yml'
 
 concurrency:
   group: quality-checks-${{ github.workflow }}-${{ github.ref }}
@@ -26,10 +34,10 @@ concurrency:
 env:
   MISE_GITHUB_TOKEN: ${{ secrets.MISE_GITHUB_TOKEN }}
   CARGO_INCREMENTAL: 0
-  SCCACHE_BUCKET: sccache
+  SCCACHE_BUCKET: ow-oops-sccache
   SCCACHE_S3_KEY_PREFIX: sable-next
-  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: us-east-1
+  SCCACHE_ENDPOINT: https://s3.gra.io.cloud.ovh.net
+  SCCACHE_REGION: gra
   SCCACHE_S3_USE_SSL: 'true'
 jobs:
   build:
@@ -66,6 +74,15 @@ jobs:
             src/generated/wasm
           if-no-files-found: error
           retention-days: 7
+
+  deploy:
+    name: Deploy to Cloudflare
+    needs: build
+    # Forgejo copies this condition onto the called jobs, where the event is
+    # workflow_call, so it tests the ref.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    uses: ./.forgejo/workflows/cloudflare-web.yml
+    secrets: inherit
 
   format:
     name: Format and Stylelint

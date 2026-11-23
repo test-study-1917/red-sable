@@ -55,13 +55,14 @@ import {
   resolveUrlPreview,
   usesTunnel,
 } from '#lib/features/room/media/link-preview-cache.js';
-import { projectPersona } from '#lib/personas/persona.js';
+import { projectPersona, senderDisplayName } from '#lib/personas/persona.js';
 import type { PersonaStore } from '#lib/personas/personas.svelte.js';
 import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
 import type { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
 import { stateEventText } from '#lib/features/room/timeline/state-event-text.js';
 import { isMessageRow } from '#lib/features/room/timeline/timeline-format.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 
 const NO_MENTIONS: OutgoingMentions = { user_ids: [], room: false };
 
@@ -78,6 +79,7 @@ export type ConversationDeps = {
   beforeSend?: () => Promise<void>;
   afterSend?: (roomId: string) => void;
   threadRoot?: string | null;
+  canRedactOwn?: () => boolean;
 };
 
 function failed(action: string): (error: unknown) => void {
@@ -101,6 +103,7 @@ export class Conversation {
   readonly #encrypted: () => boolean | null;
   readonly #publicRoom: () => boolean;
   readonly #threadRoot: string | null;
+  readonly #canRedactOwn: () => boolean;
   readonly #beforeSend: () => Promise<void>;
   readonly #afterSend: (roomId: string) => void;
   /* eslint-disable-next-line svelte/prefer-svelte-reactivity */
@@ -117,6 +120,7 @@ export class Conversation {
     beforeSend = () => Promise.resolve(),
     afterSend = () => {},
     threadRoot = null,
+    canRedactOwn = () => true,
   }: ConversationDeps) {
     this.#core = core;
     this.#personas = personas;
@@ -126,6 +130,7 @@ export class Conversation {
     this.#encrypted = encrypted ?? (() => null);
     this.#publicRoom = publicRoom ?? (() => false);
     this.#threadRoot = threadRoot;
+    this.#canRedactOwn = canRedactOwn;
     this.#beforeSend = beforeSend;
     this.#afterSend = afterSend;
     this.restored = readReply(this.#replyKey(), this.#accountId()) ?? null;
@@ -254,6 +259,7 @@ export class Conversation {
       persona: () => this.#personaFor(targetRoomId, '', null).persona,
     });
     if (outcome.kind === 'done') {
+      if (outcome.notice) toasts.info(t(outcome.notice.key, outcome.notice.values));
       this.context = null;
       return;
     }
@@ -614,6 +620,7 @@ export class Conversation {
         (reaction) =>
           reaction.key === key && reaction.senders.includes(this.#core.session?.user_id ?? '')
       );
+    if (mine && !this.#canRedactOwn()) return;
     await this.#core.rpc.messages.react({
       room_id: this.#roomId(),
       event_id: eventId,
@@ -670,7 +677,7 @@ export class Conversation {
     this.context = {
       kind: 'reply',
       eventId,
-      sender: item.per_message_profile?.display_name ?? item.sender_name ?? item.sender,
+      sender: senderDisplayName(item),
       silentReply: item.sender === this.#core.session?.user_id || !preferences.mentionInReplies,
       body:
         version?.selectedQuote?.text ??

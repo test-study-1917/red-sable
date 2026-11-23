@@ -156,7 +156,7 @@
   {/snippet}
 
   {#snippet suffix()}
-    {#if encryptionLabel !== null}
+    {#if preferences.showEncryptionStatusIcon && encryptionLabel !== null}
       <Tooltip label={encryptionLabel}>
         {#snippet trigger({ props })}
           <span
@@ -213,8 +213,9 @@
     {/if}
     {#if onCall}
       <PanelHeaderButton
+        class="call-button"
         label={inVoice.length > 0 ? i18n.t('call.join') : i18n.t('call.start')}
-        onclick={() => onCall?.()}
+        onclick={onCall}
       >
         <PhoneIcon />
       </PanelHeaderButton>

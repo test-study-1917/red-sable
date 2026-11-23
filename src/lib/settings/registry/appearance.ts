@@ -9,6 +9,7 @@ import EyeIcon from 'phosphor-svelte/lib/EyeIcon';
 import HouseIcon from 'phosphor-svelte/lib/HouseIcon';
 import ImageIcon from 'phosphor-svelte/lib/ImageIcon';
 import LinkIcon from 'phosphor-svelte/lib/LinkIcon';
+import LockSimpleIcon from 'phosphor-svelte/lib/LockSimpleIcon';
 import MagnifyingGlassPlusIcon from 'phosphor-svelte/lib/MagnifyingGlassPlusIcon';
 import MegaphoneIcon from 'phosphor-svelte/lib/MegaphoneIcon';
 import SquaresFourIcon from 'phosphor-svelte/lib/SquaresFourIcon';
@@ -21,6 +22,7 @@ import TranslateIcon from 'phosphor-svelte/lib/TranslateIcon';
 import TreeStructureIcon from 'phosphor-svelte/lib/TreeStructureIcon';
 import UsersIcon from 'phosphor-svelte/lib/UsersIcon';
 import WheelchairMotionIcon from 'phosphor-svelte/lib/WheelchairMotionIcon';
+import { hasDeploymentTheme } from '#lib/deployment/theme.svelte.js';
 import { setLanguage } from '#lib/i18n.js';
 import { availableLocales, localeLabel, SYSTEM_LANGUAGE } from '#lib/locales.js';
 import { SUBSPACE_DEPTHS } from '../definitions';
@@ -35,6 +37,7 @@ export const appearanceCategory: SettingsCategory = {
     { id: 'font', name: 'settings.groups.font' },
     { id: 'app-language', name: 'settings.groups.language' },
     { id: 'sidebar', name: 'settings.groups.sidebar' },
+    { id: 'room-header', name: 'settings.groups.roomHeader' },
     { id: 'unread-badges', name: 'settings.groups.unreadBadges' },
     { id: 'accessibility', name: 'settings.accessibilityTitle' },
   ],
@@ -70,6 +73,15 @@ export const appearanceCategory: SettingsCategory = {
         { value: 'dark', label: 'common.dark' },
         { value: 'light', label: 'common.light' },
       ],
+    },
+    {
+      key: 'deploymentTheme',
+      supported: hasDeploymentTheme,
+      section: 'themes',
+      icon: PaintBrushIcon,
+      name: 'settings.deploymentTheme',
+      description: 'settings.deploymentThemeHint',
+      type: 'boolean',
     },
     {
       key: 'showRoomIcon',
@@ -187,6 +199,13 @@ export const appearanceCategory: SettingsCategory = {
       icon: ClockIcon,
       name: 'settings.restoreLastRoom',
       description: 'settings.restoreLastRoomHint',
+      type: 'boolean',
+    },
+    {
+      key: 'showEncryptionStatusIcon',
+      section: 'room-header',
+      icon: LockSimpleIcon,
+      name: 'settings.showEncryptionStatusIcon',
       type: 'boolean',
     },
     {
