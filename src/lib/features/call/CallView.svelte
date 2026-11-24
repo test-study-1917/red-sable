@@ -391,6 +391,19 @@
 
   <div class="notices" bind:clientHeight={noticeHeight}>
     <CallEndNotice {session} />
+    {#if session.moderationError}
+      <Alert variant="critical" role="alert">
+        {i18n.t(
+          session.moderationError === 'denied'
+            ? 'call.moderationDenied'
+            : session.moderationError === 'gone'
+              ? 'call.moderationGone'
+              : session.moderationError === 'unavailable'
+                ? 'call.moderationUnavailable'
+                : 'call.moderationFailed'
+        )}
+      </Alert>
+    {/if}
     {#if session.desktopShortcutStatus === 'error'}
       <Alert variant="warning" class="notice">
         <p>{i18n.t('call.desktopShortcutsUnavailable')}</p>
@@ -536,6 +549,10 @@
     name={tileNames.get(item.participant.identity) ?? profile.name}
     userId={profile.userId}
     avatar={profile.avatar}
+    onModerate={session.canModerateParticipant(item.participant)
+      ? (action) => void session.moderateParticipant(item.participant, action)
+      : undefined}
+    moderationPending={session.moderationPending}
     featured={large}
     pinned={featured.length === 1 && featured[0].key === item.key}
     onPin={tiles.length > 1 && (item.source === 'camera' || item.watching)

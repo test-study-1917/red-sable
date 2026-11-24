@@ -28,6 +28,47 @@ async function openFromContextMenu(user: ReturnType<typeof userEvent.setup>): Pr
 
 const panel = () => screen.queryByRole('slider', { name: 'Volume for Bob' });
 
+test('call controls mute the microphone separately from local playback volume', async () => {
+  const onModerate = vi.fn();
+  render(CallParticipantTile, {
+    participant: { identity: 'bob', microphone: { id: 'mic', muted: false, subscribed: true } },
+    source: 'camera',
+    room: undefined,
+    name: 'Bob',
+    userId: '@bob:example.org',
+    avatar: null,
+    onModerate,
+  });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'Call controls for Bob' }));
+  await user.click(screen.getByText('Turn off Bob’s microphone'));
+  expect(onModerate).toHaveBeenCalledExactlyOnceWith('mute');
+});
+
+test('removing a call participant requires confirmation', async () => {
+  const onModerate = vi.fn();
+  render(CallParticipantTile, {
+    participant: { identity: 'bob' },
+    source: 'camera',
+    room: undefined,
+    name: 'Bob',
+    userId: '@bob:example.org',
+    avatar: null,
+    onModerate,
+  });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'Call controls for Bob' }));
+  await user.click(screen.getByText('Remove Bob from call'));
+  expect(onModerate).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: 'Remove from call' }));
+  expect(onModerate).toHaveBeenCalledExactlyOnceWith('remove');
+});
+
+test('ordinary participants only have local playback controls', () => {
+  mountTile();
+  expect(screen.queryByRole('button', { name: 'Call controls for Bob' })).not.toBeInTheDocument();
+});
+
 test('closes the volume panel on a pointer down outside it', async () => {
   const user = mountTile();
   await openFromContextMenu(user);

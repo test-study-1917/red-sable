@@ -211,6 +211,133 @@ afterEach(() => {
   sentry.captureException.mockClear();
 });
 
+async function moderationHarness() {
+  const h = harness();
+  const makeBackend = (id: string) => ({
+    id,
+    url: `wss://${id}.example.org`,
+    identity: defaultGrant.identity,
+    jwt: `header.${Buffer.from(
+      JSON.stringify({
+        sub: defaultGrant.identity,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        video: { room: `${id}-room`, roomAdmin: true },
+      })
+    ).toString('base64url')}.signature`,
+  });
+  h.joinCall.mockResolvedValueOnce({
+    ...defaultGrant,
+    backends: [makeBackend('publisher'), makeBackend('remote')],
+  });
+  const session = new CallSession(h.client, { createTransport: () => h.transport });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  const participant = {
+    identity: 'another-frontend',
+    backendId: 'remote',
+    microphone: { id: 'mic', muted: false, subscribed: true },
+  };
+  h.emit({
+    type: 'call_members',
+    session: 7,
+    members: [
+      {
+        identity: participant.identity,
+        user_id: '@bob:example.org',
+        device_id: 'PHONE',
+        backend_id: 'remote',
+        joined_ts: 1,
+        screen_sharing: false,
+      },
+    ],
+  });
+  h.emitTransportState({
+    ...idleTransportState(),
+    connection: 'connected',
+    participants: [participant],
+  });
+  return { ...h, session, participant };
+}
+
+test('call moderation chooses the participant SFU and its SFU room', async () => {
+  const { session, participant } = await moderationHarness();
+  expect(session.canModerateParticipant(participant)).toBe(true);
+  const fetcher = vi.fn().mockResolvedValue(Response.json({}));
+  globalThis.fetch = fetcher;
+  await session.moderateParticipant(participant, 'remove');
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(fetcher.mock.calls[0][0]).toBe(
+    'https://remote.example.org/twirp/livekit.RoomService/RemoveParticipant'
+  );
+  expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+    room: 'remote-room',
+    identity: participant.identity,
+  });
+  expect(session.moderationError).toBeNull();
+  await session.leave();
+});
+
+test('call moderation refuses stale tiles, missing backends and revoked grants', async () => {
+  const { session, participant, emit, emitTransportState } = await moderationHarness();
+  expect(session.canModerateParticipant({ ...participant, local: true })).toBe(false);
+  expect(session.canModerateParticipant({ ...participant, backendId: 'unknown' })).toBe(false);
+  emitTransportState({ ...idleTransportState(), connection: 'connected' });
+  expect(session.canModerateParticipant(participant)).toBe(false);
+  emitTransportState({
+    ...idleTransportState(),
+    connection: 'connected',
+    participants: [participant],
+  });
+  expect(session.canModerateParticipant(participant)).toBe(true);
+  emit({ type: 'call_backends', session: 7, revision: 1, publisher_id: 'publisher', backends: [] });
+  await session.moderateParticipant(participant, 'remove');
+  expect(session.moderationError).toBe('unavailable');
+  await session.leave();
+});
+
+test('leaving cancels moderation, ignores late failure, and prevents duplicate requests', async () => {
+  const { session, participant } = await moderationHarness();
+  let reject!: (reason: Error) => void;
+  let signal!: AbortSignal;
+  const fetcher = vi.fn((_url, options) => {
+    signal = options.signal;
+    return new Promise<Response>((_resolve, fail) => {
+      reject = fail;
+    });
+  });
+  globalThis.fetch = fetcher;
+  const pending = session.moderateParticipant(participant, 'remove');
+  expect(session.moderationPending).toBe(true);
+  await session.moderateParticipant(participant, 'remove');
+  expect(fetcher).toHaveBeenCalledOnce();
+  await session.leave();
+  expect(signal.aborted).toBe(true);
+  reject(new Error('late network failure'));
+  await pending;
+  expect(session.moderationPending).toBe(false);
+  expect(session.moderationError).toBeNull();
+});
+
+test('a server microphone mute updates local controls and permits explicit unmute', async () => {
+  const h = harness();
+  const session = new CallSession(h.client, { createTransport: () => h.transport });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  h.emitTransportState({
+    ...idleTransportState(),
+    connection: 'connected',
+    microphoneEnabled: false,
+    self: {
+      identity: defaultGrant.identity,
+      local: true,
+      microphone: { id: 'own-mic', muted: true, subscribed: true },
+    },
+  });
+  expect(session.microphoneEnabled).toBe(false);
+  await session.setMicrophoneEnabled(true);
+  expect(session.microphoneEnabled).toBe(true);
+  expect(h.transport.setMicrophoneEnabled).toHaveBeenCalledWith(true);
+  await session.leave();
+});
+
 test('an unencrypted call connects without waiting for a key', async () => {
   const { client, transport } = harness();
   const session = new CallSession(client, { createTransport: () => transport });
