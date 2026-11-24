@@ -37,6 +37,7 @@ import type {
   CallTransportState,
 } from './call-transport';
 import { idleTransportState, ignoreError, ScreenAudioError } from './call-transport';
+import { createPeerCallModeration } from './peer-call-moderation';
 import { MatrixKeyProvider } from './key-provider';
 import { followMicrophoneVolume } from './microphone-volume.svelte';
 import { createMicrophoneProcessor, microphoneProcessing } from './voice-filter';
@@ -193,6 +194,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     ...(keyProvider && worker ? { encryption: { keyProvider, worker } } : {}),
   });
 
+  const moderation = createPeerCallModeration(room);
   let state: CallTransportState = idleTransportState();
   const listeners = new Set<(state: CallTransportState) => void>();
   let connected: Promise<void> | undefined;
@@ -659,6 +661,7 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
     connect,
     disconnect: async () => {
       disposed = true;
+      moderation.dispose();
       stopMicrophoneVolume();
       voiceActivity.dispose();
       healthGeneration += 1;
@@ -696,6 +699,10 @@ export function createLivekitTransport(options: LivekitTransportOptions): Liveki
       return () => listeners.delete(listener);
     },
     getState: () => ({ ...state, participants: [...state.participants] }),
+    moderateParticipant: (identity, action, signal) => moderation.request(identity, action, signal),
+    setModerationHandler: (handler) => {
+      moderation.setHandler(handler);
+    },
     capabilities: {
       screenShare: {
         setEnabled: async (enabled, audio) => {
