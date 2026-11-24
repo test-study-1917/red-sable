@@ -52,7 +52,10 @@ export function timelineMessage(
   return { ...timelineItem(id, body), sender, sender_name: sender, timestamp };
 }
 
-export function timelineImage(id: string): TimelineItemView {
+export function timelineImage(
+  id: string,
+  source = 'mxc://example.test/history-image'
+): TimelineItemView {
   return {
     ...timelineItem(id, 'History image'),
     content: {
@@ -60,7 +63,7 @@ export function timelineImage(id: string): TimelineItemView {
       filename: 'History image',
       caption: null,
       html: null,
-      source: 'mxc://example.test/history-image',
+      source,
       external_url: null,
       mime: 'image/png',
       size: null,

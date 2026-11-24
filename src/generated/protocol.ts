@@ -482,6 +482,11 @@ export type HierarchySection = {
 	space_action: LobbyAction | null,
 };
 
+export type HistoryPageCursor = {
+	from: string,
+	stop_at: string | null,
+};
+
 export type HistoryVisibilityView = "shared" | "invited" | "joined" | "world_readable";
 
 export type HomeserverSoftwareView = {
@@ -3833,6 +3838,15 @@ export type Rpc = {
 	ts: number,
 	direction: PaginationDirection,
 }) => Promise<string | null>;
+    historyPage: (params: {
+	room_id: string,
+	after: number | null,
+	before: number | null,
+	cursor: HistoryPageCursor | null,
+}) => Promise<{
+	items: TimelineItemView[],
+	cursor: HistoryPageCursor | null,
+}>;
     listThreads: (params: {
 	room_id: string,
 	from?: string | null,
@@ -4271,6 +4285,7 @@ export type RpcMethods = {
   'timeline.event_items': Rpc['timeline']['eventItems'];
   'timeline.events': Rpc['timeline']['events'];
   'timeline.timestamp_to_event': Rpc['timeline']['timestampToEvent'];
+  'timeline.history_page': Rpc['timeline']['historyPage'];
   'timeline.list_threads': Rpc['timeline']['listThreads'];
   'timeline.event_source': Rpc['timeline']['eventSource'];
   'timeline.unredacted_event': Rpc['timeline']['unredactedEvent'];
@@ -4658,6 +4673,7 @@ export function createRpc(call: RpcCall): Rpc {
       eventItems: (params) => call('timeline.event_items', params) as ReturnType<Rpc['timeline']['eventItems']>,
       events: (params) => call('timeline.events', params) as ReturnType<Rpc['timeline']['events']>,
       timestampToEvent: (params) => call('timeline.timestamp_to_event', params) as ReturnType<Rpc['timeline']['timestampToEvent']>,
+      historyPage: (params) => call('timeline.history_page', params) as ReturnType<Rpc['timeline']['historyPage']>,
       listThreads: (params) => call('timeline.list_threads', params) as ReturnType<Rpc['timeline']['listThreads']>,
       eventSource: (params) => call('timeline.event_source', params) as ReturnType<Rpc['timeline']['eventSource']>,
       unredactedEvent: (params) => call('timeline.unredacted_event', params) as ReturnType<Rpc['timeline']['unredactedEvent']>,

@@ -820,6 +820,105 @@ async fn permalink_timeline_loads_and_contains_its_target() {
 }
 
 #[tokio::test]
+async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times() {
+    use wiremock::matchers::query_param;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!dated:example.org");
+    server.sync_joined_room(&client, room_id).await;
+    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
+    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    *core.session.write().await = Some(Session {
+        account_id: "test".to_owned(),
+        client,
+        sync_service,
+        homeserver: server.server().uri(),
+        oauth: false,
+    });
+
+    let room_path = format!("/_matrix/client/v1/rooms/{room_id}");
+    for (ts, dir, id) in [("3001", "f", "$above"), ("1999", "b", "$below")] {
+        Mock::given(method("GET"))
+            .and(path(format!("{room_path}/timestamp_to_event")))
+            .and(query_param("ts", ts))
+            .and(query_param("dir", dir))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "event_id": id, "origin_server_ts": ts.parse::<u64>().unwrap(),
+            })))
+            .expect(1)
+            .mount(server.server())
+            .await;
+    }
+
+    let room_path = format!("/_matrix/client/v3/rooms/{room_id}");
+    Mock::given(method("GET"))
+        .and(path(format!("{room_path}/context/$above")))
+        .and(query_param("limit", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "start": "dated" })))
+        .expect(1)
+        .mount(server.server())
+        .await;
+
+    let message = |id: &str, ts: u64| {
+        json!({
+            "type": "m.room.message", "event_id": id, "sender": "@alice:example.org",
+            "room_id": room_id, "origin_server_ts": ts,
+            "content": { "msgtype": "m.text", "body": id },
+        })
+    };
+    let mut edited = message("$first", 2000);
+    edited["unsigned"] = json!({ "m.relations": { "m.replace": {
+        "type": "m.room.message", "event_id": "$edit", "sender": "@alice:example.org",
+        "room_id": room_id, "origin_server_ts": 3200,
+        "content": {
+            "msgtype": "m.text", "body": "* Edited text",
+            "m.new_content": { "msgtype": "m.text", "body": "Edited text" },
+            "m.relates_to": { "rel_type": "m.replace", "event_id": "$first" }
+        }
+    } } });
+    for (from, end, events) in [
+        (
+            "dated",
+            "older",
+            vec![message("$too-late", 3100), message("$last", 3000)],
+        ),
+        ("older", "skip", vec![edited, message("$below", 1999)]),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("{room_path}/messages")))
+            .and(query_param("from", from))
+            .and(query_param("dir", "b"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "start": from, "end": end, "chunk": events,
+            })))
+            .expect(1)
+            .mount(server.server())
+            .await;
+    }
+
+    let mut params = json!({ "room_id": room_id, "after": 2000, "before": 3000, "cursor": null });
+    let page = core
+        .call("timeline.history_page", &params.to_string())
+        .await
+        .unwrap();
+    let page: serde_json::Value = serde_json::from_str(page.get()).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["event_id"], "$last");
+    params["cursor"] = page["cursor"].clone();
+
+    let page = core
+        .call("timeline.history_page", &params.to_string())
+        .await
+        .unwrap();
+    let page: serde_json::Value = serde_json::from_str(page.get()).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["event_id"], "$first");
+    assert_eq!(page["items"][0]["content"]["body"], "Edited text");
+    assert!(page["cursor"].is_null());
+}
+
+#[tokio::test]
 async fn custom_room_state_reads_from_the_server_when_not_in_the_store() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;

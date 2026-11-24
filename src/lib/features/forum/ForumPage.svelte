@@ -406,7 +406,7 @@
       {roomAvatar}
       onBack={backToRoomList}
       {backUnread}
-      onSearch={() => searchInRoom(resolvedRoom, resolvedRoomId)}
+      onSearch={() => searchInRoom(resolvedRoomId)}
       onEventTimeline={preferences.developerTools
         ? () => {
             // eslint-disable-next-line svelte/no-navigation-without-resolve -- eventTimelinePath() resolves the route itself

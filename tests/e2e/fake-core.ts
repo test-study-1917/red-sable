@@ -79,6 +79,8 @@ declare global {
     __e2eTimelineRooms: string[];
     __e2eTimelineSubscriptions: number[];
     __e2eTimelineFocus: TimelineFocusView[];
+    __e2eHistoryPages?: RpcResult<Rpc['timeline']['historyPage']>[];
+    __e2eHistoryPageDelayMs?: number;
     __e2ePaginationDirections: string[];
     __e2eRefreshRoom: () => void;
     __e2eLeaveRoom: (roomId: string) => void;
@@ -1678,6 +1680,8 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
         );
       },
       'timeline.events': () => [],
+      'timeline.history_page': () =>
+        window.__e2eHistoryPages?.shift() ?? { items: [], cursor: null },
       'timeline.unread_diagnostics': () => ({
         main: { unread: 0, notifying: 0, highlight: 0, receipt_event_id: null },
         server_notifications: 0,
@@ -1960,6 +1964,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
 
     const replyDelay = (type: string, params: unknown): number => {
       if (type === 'session.switch_account') return window.__e2eSwitchAccountDelayMs ?? 0;
+      if (type === 'timeline.history_page') return window.__e2eHistoryPageDelayMs ?? 0;
       if (workerMode === 'forward_history' && type === 'timeline.paginate') return 0;
       if (
         type === 'timeline.subscribe' &&

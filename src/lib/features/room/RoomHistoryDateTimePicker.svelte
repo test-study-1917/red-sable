@@ -76,9 +76,17 @@
 </script>
 
 <div class="date-time-field">
-  <span class="field-label">{label}</span>
-  <button type="button" class="date-trigger" aria-expanded={pickerOpen} onclick={openPicker}>
-    <span>{value ? value.replace('T', ' ') : '选择日期与时间'}</span>
+  <button
+    type="button"
+    class="date-trigger"
+    aria-label={`${label}：${value ? value.replace('T', ' ') : '选择日期与时间'}`}
+    aria-expanded={pickerOpen}
+    onclick={openPicker}
+  >
+    <span class="date-label">{label}</span>
+    {#if value}
+      <span class="date-value">{value.replace('T', ' ')}</span>
+    {/if}
     <span aria-hidden="true">▦</span>
   </button>
   {#if pickerOpen}
@@ -134,15 +142,9 @@
 
 <style>
   .date-time-field {
-    display: grid;
-    gap: var(--space-100);
+    flex: 1 1 min(100%, 15rem);
     min-width: 0;
     position: relative;
-  }
-
-  .field-label {
-    color: var(--surface-on-container);
-    font-size: var(--font-size-small);
   }
 
   button,
@@ -159,18 +161,40 @@
     cursor: pointer;
     display: flex;
     gap: var(--space-200);
-    justify-content: space-between;
+    height: 100%;
     min-width: 0;
     padding: var(--space-200);
     text-align: start;
     width: 100%;
   }
 
-  .date-trigger span:first-child {
+  .date-trigger:hover,
+  .date-trigger[aria-expanded='true'] {
+    background: var(--surface-var-container-hover);
+  }
+
+  .date-trigger[aria-expanded='true'] {
+    border-color: var(--primary-main);
+  }
+
+  .date-trigger:active {
+    background: var(--surface-var-container-active);
+  }
+
+  .date-label {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .date-value {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .date-trigger > [aria-hidden] {
+    margin-inline-start: auto;
   }
 
   .calendar-popover {
@@ -288,5 +312,38 @@
   .picker-actions button:disabled {
     cursor: not-allowed;
     opacity: 0.5;
+  }
+
+  @media (width <= 36rem) {
+    .date-trigger {
+      align-content: center;
+      box-sizing: border-box;
+      display: grid;
+      font-size: var(--font-size-small);
+      gap: var(--space-050) var(--space-100);
+      grid-template-columns: minmax(0, 1fr) auto;
+      min-height: 3.25rem;
+      padding-block: var(--space-100);
+    }
+
+    .date-value {
+      font-size: var(--font-size-label);
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
+
+    .date-trigger > [aria-hidden] {
+      grid-column: 2;
+      grid-row: 1;
+    }
+
+    .calendar-popover,
+    .calendar-popover.align-end {
+      inset: 50% auto auto 50%;
+      max-height: calc(100dvh - 2 * var(--space-300));
+      overflow-y: auto;
+      position: fixed;
+      translate: -50% -50%;
+    }
   }
 </style>

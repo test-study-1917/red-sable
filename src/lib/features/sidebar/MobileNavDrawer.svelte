@@ -10,7 +10,7 @@
   import PanelHeaderButton from '#lib/ui/primitives/PanelHeaderButton.svelte';
   import SidebarNav from '#lib/features/sidebar/SidebarNav.svelte';
   import UserQuickTools from '#lib/features/sidebar/UserQuickTools.svelte';
-  import { providePageMeta } from '#lib/core/page-meta.js';
+  import { providePageMeta, type PageMeta } from '#lib/core/page-meta.js';
   import { HorizontalSwipe } from '#lib/ui/horizontal-swipe.svelte.js';
   import { currentDirection } from '#lib/language.svelte.js';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
@@ -101,8 +101,12 @@
     };
   });
 
-  const pageMeta = $state({
+  const pageMeta = $state<PageMeta>({
     title: '',
+    get mobileHeader() {
+      return showMobileBackBar;
+    },
+    mobileActions: undefined,
   });
   providePageMeta(pageMeta);
   let pageTitle = $derived(pageMeta.title);
@@ -275,7 +279,7 @@
     >
       <CoreHealthBanner />
       {#if showMobileBackBar}
-        <PanelHeader class="mobile-back-bar" title={pageTitle}>
+        <PanelHeader class="mobile-back-bar" title={pageTitle} suffix={pageMeta.mobileActions}>
           {#snippet prefix()}
             <PanelHeaderButton
               class="back-button"

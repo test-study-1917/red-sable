@@ -153,10 +153,10 @@ test('the preview and all downloads use the same reconciled messages', async () 
     roomId: () => '!room:example.org',
     roomName: () => 'Room',
     timelineItems: () => timeline.current,
+    reachesStart: () => true,
     reachesLatest: () => true,
     members: () => [],
-    loadOlder: () => Promise.resolve(true),
-    openMedia: () => {},
+    readPage: () => Promise.resolve({ items: [], cursor: null }),
     jumpToMessage: () => {},
   };
   const download = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:history');
@@ -164,8 +164,7 @@ test('the preview and all downloads use the same reconciled messages', async () 
   render(RoomHistoryExportTools, { context: new Map([[HISTORY_EXPORT_CONTEXT, source]]) });
   await fireEvent.click(screen.getByRole('button', { name: '查看及导出聊天记录' }));
   const dialog = within(screen.getByRole('dialog', { name: '聊天记录' }));
-  await dialog.findByText('已读到最早和最新可读取的记录', { exact: false });
-  expect(dialog.getByText(originalBody)).toBeVisible();
+  expect(await dialog.findByText(originalBody)).toBeVisible();
 
   const body = 'Edited https://example.org/new';
   pages.set([
@@ -183,7 +182,7 @@ test('the preview and all downloads use the same reconciled messages', async () 
     ['Markdown (.md)', 'text/markdown'],
     ['HTML (.html)', 'text/html'],
   ]) {
-    await fireEvent.click(dialog.getByRole('button', { name: '导出聊天记录 ▾' }));
+    await fireEvent.click(dialog.getByRole('button', { name: '导出已载入记录 ▾' }));
     await fireEvent.click(dialog.getByRole('button', { name }));
     const blob = download.mock.lastCall?.[0];
     if (!(blob instanceof Blob)) throw new Error(`${name} did not generate a file`);

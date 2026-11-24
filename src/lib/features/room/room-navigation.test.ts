@@ -72,10 +72,11 @@ test('leaving a space room on desktop opens the lobby rather than the index', as
   expect(goto).toHaveBeenCalledWith('/space/param:!space/lobby');
 });
 
-test('searching quotes a room label with a space in it', () => {
-  searchInRoom({ canonical_alias: null, name: 'My room' } as RoomListItemView, '!room');
-
-  expect(goto).toHaveBeenCalledWith(`/search?q=${encodeURIComponent('in:"My room" ')}`);
+test('a labelled search path quotes names containing spaces', () => {
+  const room = { canonical_alias: null, name: 'My room' } as RoomListItemView;
+  expect(scopedSearchPath('in', room, '!room')).toBe(
+    `/search?q=${encodeURIComponent('in:"My room" ')}`
+  );
 });
 
 test('a failed search navigation does not force a page load', async () => {
@@ -84,14 +85,14 @@ test('a failed search navigation does not force a page load', async () => {
   vi.spyOn(console, 'debug').mockImplementation(() => undefined);
   vi.mocked(goto).mockRejectedValueOnce(new Error('offline'));
 
-  searchInRoom(undefined, '!room');
+  searchInRoom('!room');
   await Promise.resolve();
 
   expect(assign).not.toHaveBeenCalled();
 });
 
-test('searching an unknown room scopes by its id', () => {
-  searchInRoom(undefined, '!room');
+test('a search opened from a room scopes to its exact ID', () => {
+  searchInRoom('!room');
 
   expect(goto).toHaveBeenCalledWith(`/search?q=${encodeURIComponent('in:!room ')}`);
 });
@@ -113,7 +114,7 @@ test('searching from a room scopes to it, from a space to the space, and elsewhe
   ] as RoomListItemView[];
 
   expect(contextSearchPath(rooms, '!room', '!space')).toBe(
-    `/search?q=${encodeURIComponent('in:#dev:example.org ')}`
+    `/search?q=${encodeURIComponent('in:!room ')}`
   );
   expect(contextSearchPath(rooms, undefined, '!space')).toBe(
     `/search?q=${encodeURIComponent('space:Eng ')}`
