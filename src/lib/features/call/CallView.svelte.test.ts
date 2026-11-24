@@ -100,6 +100,7 @@ function mountBothSharing(
       participants: others,
     },
     roomFor: () => undefined,
+    canModerateParticipant: () => false,
     toggleWatchScreenShare,
   } as unknown as CallSession;
   return { session, toggleWatchScreenShare, ...render(CallViewHarness, { session, members: [] }) };

@@ -2,6 +2,8 @@ import { base64ToUint8Array } from 'uint8array-extras';
 
 import type { CallBackendView } from '#src/generated/protocol';
 import type { ScreenAudioChoice } from '#lib/platform/screen-audio-stream.js';
+import type { CallModerationAction } from './call-moderation';
+import type { CallModerationHandler } from './peer-call-moderation';
 
 export type CallEncryptionKey = {
   backendId?: string;
@@ -115,6 +117,13 @@ export type CallTransport = {
   reconcileBackends?: (backends: CallBackendGrant[], publisherId?: string) => Promise<void>;
   rooms?: () => readonly CallTransportRoom[];
   roomFor?: (backendId: string | undefined) => import('livekit-client').Room | undefined;
+  moderateParticipant?: (
+    identity: string,
+    action: CallModerationAction,
+    signal: AbortSignal,
+    backendId?: string
+  ) => Promise<void>;
+  setModerationHandler?: (handler: CallModerationHandler | undefined) => void;
 };
 
 export function ignoreError(error?: unknown): void {
