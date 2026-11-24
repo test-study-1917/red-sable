@@ -45,16 +45,16 @@ test('files are grouped by month, page on demand and open in the viewer', async 
     });
   const openPanelSpy = vi.spyOn(mediaViewerState, 'openPanel');
   setup();
-  expect(await screen.findByRole('button', { name: /notes\.pdf/ })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: /^notes\.pdf,/ })).toBeInTheDocument();
   expect(roomAttachments).toHaveBeenLastCalledWith(request(null));
 
   await user.click(screen.getByRole('button', { name: 'Load more' }));
-  expect(await screen.findByRole('button', { name: /slides\.pdf/ })).toBeInTheDocument();
+  const preview = await screen.findByRole('button', { name: /^slides\.pdf,/ });
   expect(roomAttachments).toHaveBeenLastCalledWith(request('next'));
   expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(2);
   expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole('button', { name: /slides\.pdf/ }));
+  await user.click(preview);
   expect(openPanelSpy).toHaveBeenCalledWith(
     [
       expect.objectContaining({ eventId: '$a', kind: 'file', filename: 'notes.pdf' }),
@@ -73,7 +73,7 @@ test('an audio file opens in the viewer as audio', async () => {
   const openPanelSpy = vi.spyOn(mediaViewerState, 'openPanel');
   setup();
 
-  await user.click(await screen.findByRole('button', { name: /memo\.ogg/ }));
+  await user.click(await screen.findByRole('button', { name: /^memo\.ogg,/ }));
   expect(openPanelSpy).toHaveBeenCalledWith(
     [expect.objectContaining({ kind: 'audio', filename: 'memo.ogg' })],
     '$voice',

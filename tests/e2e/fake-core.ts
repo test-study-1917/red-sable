@@ -79,6 +79,7 @@ declare global {
     __e2eTimelineRooms: string[];
     __e2eTimelineSubscriptions: number[];
     __e2eTimelineFocus: TimelineFocusView[];
+    __e2eRoomAttachments?: RpcResult<Rpc['rooms']['attachments']>['items'];
     __e2eHistoryPages?: RpcResult<Rpc['timeline']['historyPage']>[];
     __e2eHistoryPageDelayMs?: number;
     __e2ePaginationDirections: string[];
@@ -1935,7 +1936,10 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'rooms.public_rooms': () => ({ rooms: [], next_batch: null, total: 0 }),
       'rooms.directory_visibility': () => false,
       'rooms.upgrade': () => successorRoom.room_id,
-      'rooms.attachments': () => ({ items: [], next_batch: null }),
+      'rooms.attachments': ({ kind }) => ({
+        items: kind === 'file' ? (window.__e2eRoomAttachments ?? []) : [],
+        next_batch: null,
+      }),
       'rooms.cosmetics': () => ({ space_id: null, users: [] }),
       'rooms.create': () => '!created:example.test',
       'rooms.create_dm': () => '!dm:example.test',

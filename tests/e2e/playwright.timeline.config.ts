@@ -29,6 +29,7 @@ export default defineConfig({
     'reaction-sheet.spec.ts',
     'overlay-stacking.spec.ts',
     'profile-mobile.spec.ts',
+    'room-file-attachments.spec.ts',
     'room-settings-mobile.spec.ts',
     'room-settings-context.spec.ts',
     'mobile-drawer.spec.ts',
