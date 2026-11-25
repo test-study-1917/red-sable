@@ -3,45 +3,6 @@ import { expect, test, vi } from 'vitest';
 import type { LivekitTransport } from './livekit-transport';
 import { createMultiSfuTransport } from './multi-sfu-transport';
 import { idleTransportState, type CallTransportState } from './call-transport';
-import type { CallModerationHandler } from './peer-call-moderation';
-
-test('peer control follows the selected SFU and forwards the receiver handler to new backends', async () => {
-  const created: LivekitTransport[] = [];
-  const transport = createMultiSfuTransport(false, undefined, {
-    createTransport: () => {
-      const next = {
-        ...fakeTransport(),
-        moderateParticipant: vi.fn(() => Promise.resolve()),
-        setModerationHandler: vi.fn(),
-      };
-      created.push(next);
-      return next;
-    },
-  });
-  const handler: CallModerationHandler = () => Promise.resolve({});
-  transport.setModerationHandler?.(handler);
-  await transport.connect({
-    url: '',
-    token: '',
-    microphoneEnabled: false,
-    cameraEnabled: false,
-    encryptionKeys: [],
-    publisherId: 'one',
-    backends: [
-      { id: 'one', url: 'wss://one', jwt: 'one', identity: 'me' },
-      { id: 'two', url: 'wss://two', jwt: 'two', identity: 'me' },
-    ],
-  });
-  const signal = new AbortController().signal;
-  await transport.moderateParticipant?.('peer', 'mute', signal, 'two');
-  expect(created[0].moderateParticipant).not.toHaveBeenCalled();
-  expect(created[1].moderateParticipant).toHaveBeenCalledWith('peer', 'mute', signal);
-  for (const child of created) expect(child.setModerationHandler).toHaveBeenCalledWith(handler);
-  await expect(
-    transport.moderateParticipant?.('peer', 'remove', signal, 'unknown')
-  ).rejects.toMatchObject({ code: 'unavailable' });
-  await transport.disconnect();
-});
 
 test('connects each backend while publishing media only on the publisher and shares every key', async () => {
   const created: { publishMedia?: boolean; transport: ReturnType<typeof fakeTransport> }[] = [];

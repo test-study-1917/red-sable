@@ -23,7 +23,9 @@ mod room_memberships;
 pub(crate) use room_memberships::{RoomMembership, RoomMemberships};
 mod runtime;
 mod termination;
+
 pub(crate) use runtime::State as CallRuntimeState;
+pub(crate) use termination::MODERATE as MODERATION_EVENT_KEY;
 mod sfu;
 pub(crate) mod sticky;
 
@@ -628,6 +630,7 @@ fn member_views(members: &[CallMember]) -> Vec<CallMemberView> {
                 .as_ref()
                 .map_or_else(String::new, ToString::to_string),
             identity: member.identity.clone(),
+            member_id: member.member_id.clone(),
             backend_id: None,
             joined_ts: member.joined_ts,
             screen_sharing: member.screen_sharing,

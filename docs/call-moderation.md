@@ -1,69 +1,50 @@
 # Voice call participant controls
 
-Open **Room settings → Permissions → Voice call controls** to configure
-**Allow all call participants to mute and remove others**. The switch defaults
-to off. Room administrators (power level 100 or higher, including founders)
-who can edit room power levels can change it.
+In an active call, open the menu on another participant's avatar or camera tile.
+Choose **Turn off microphone**, or choose **Remove from call** and confirm. Any
+current call participant may request either action, subject to the Matrix room's
+existing permissions for sending call events.
 
-- Off: only room administrators currently in the call can operate the controls.
-- On: every joined room member currently in the call can operate them.
+The other device needs an updated Sable or the matching custom Element Call
+frontend. The request affects only the selected device's current call. That
+device can turn its microphone back on or join again. Removal does not change
+Matrix chat membership. **Mute for me** affects only your own playback.
 
-On another participant's avatar/camera tile, **Turn off microphone** closes
-that device's microphone for the call. **Remove from call** asks for confirmation,
-then makes the target device leave the current call. The target can unmute or
-join again. Chat room membership, camera and screen-share audio are not changed
-by microphone mute. **Mute for me** remains a separate playback control.
+If the other client does not acknowledge the request within 10 seconds, you see
+that it did not respond. Receiving an acknowledgement does not require changing
+the LiveKit deployment or signing admin tokens for participants.
 
-## Shared setting and authorization
+## Protocol
 
-The setting uses `m.room.power_levels.events["moe.sable.call.moderation"]`:
-`0` enables everyone; `100`, a missing entry, or an unrecognized value means
-administrators only. The homeserver enforces changes to the power-level event.
-The switch changes this one entry using the core's existing power-level API.
-It is a room setting, not a per-device preference.
+Like **End for everyone**, both actions use live Matrix
+`io.element.call.reaction` events. The existing `io.element.call.terminate`
+payload is unchanged. A directed control uses the `io.element.call.moderate`
+payload:
 
-The sender checks room membership and the current policy before sending. The
-receiving Sable client independently checks the authenticated media participant
-against its Matrix RTC roster, reads the room policy and the caller's current
-room membership/power level, and rejects unauthorized requests. Permission load
-failures deny the action. UI eligibility refreshes every five seconds while the
-call is active; requests always recheck permissions.
+- Requests include a unique `id`, `kind: "request"`, and
+  `action: "mute" | "remove"`.
+- Replies copy the request ID, swap `from` and `to`, and carry
+  `kind: "response"` and `result: "ok" | "failed"`.
+- When Matrix omits the event's age, the recipient first sends
+  `kind: "challenge"` with the request ID and a random `nonce`. The requester
+  echoes that nonce in `kind: "confirm"` only while the original request is
+  still pending. Each message identifies the sending and receiving memberships.
+- All four message kinds carry `from` and `to` with `user_id`, `member_id` and `joined_ts`.
+  Sticky memberships have a fresh member ID each time and set `joined_ts: null`.
+  Compatibility and legacy memberships reuse an ID and carry that membership's
+  creation timestamp in `joined_ts`.
 
-## Same-client transport
+The recipient compares the packet sender to the Matrix event sender and checks
+both membership addresses against the current call. Old, invalid, wrong-device
+and duplicate requests do not run. If the server supplies an age, the recipient
+allows up to 30 seconds including time waiting for decryption, without comparing
+device and server clocks. Without an age, a matching confirmation must arrive
+within 10 seconds of the challenge. An older sender that does not support this
+exchange will time out rather than have an unverified request applied. A matched reply may arrive after the target
+has already left RTC. Encrypted rooms use the Matrix SDK's existing room-event
+encryption and live-event decryption path.
 
-Sable web calls use reliable, targeted LiveKit data packets on
-`moe.sable.call.control.v1`. The selected device and its publishing SFU are used.
-Connection SIDs bind packets to the current connection; malformed packets,
-unknown senders, duplicate requests and requests for an old connection are ignored.
-Leaving or disconnecting cancels pending work. The target acknowledges microphone
-mute after applying it, or acknowledges accepted removal before disconnecting.
-
-Both participants must use this feature in Sable. Older Sable versions and other
-frontends that do not implement the protocol return no acknowledgement and the
-caller sees an unavailable message after ten seconds. An acknowledgement timeout
-does not prove an action was never applied. No LiveKit `roomAdmin` grant or new
-server component is needed for this path. LiveKit data publishing must be allowed.
-
-This is cooperative client behavior, not a server-enforced ban: modified clients
-can ignore control requests. Receivers do not trust caller-supplied user IDs or
-power levels. Only verified current participants may initiate controls.
-
-## Retained server integration
-
-The earlier LiveKit `GetParticipant`, `MutePublishedTrack` and `RemoveParticipant`
-integration remains for transports without the Sable data-channel capability,
-such as the native mobile plugin. That fallback still needs a valid, room-scoped
-LiveKit `roomAdmin` grant and a reachable HTTPS RoomService endpoint with CORS.
-The sender's room policy is checked before using it. The native plugin does not
-yet receive Sable peer-control packets; the no-server-configuration path is for
-web media transports. API secrets must never be put in client configuration.
-
-## Validation
-
-Tests cover administrator-only and everyone policies, rejected/non-member
-callers, settings saves, receiver-side permission changes, mute/removal, packet
-replay and old connections, unsupported peers, cancellation and multiple SFUs.
-Transport tests connect two in-memory endpoints; they are not live-account tests.
-Real deployment verification should use two updated Sable web clients, exercise
-both switch states in encrypted and unencrypted calls, and confirm that users
-can unmute/rejoin and remain members of their chat room.
+The previous room permission toggle, private LiveKit data packets, and LiveKit
+RoomService fallback are no longer used. Existing room power-level data is not
+changed. A client that ignores the request cannot be forced off the call by
+this protocol.

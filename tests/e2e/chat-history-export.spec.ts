@@ -109,6 +109,7 @@ test('date query reads its own pages and applies message type to preview and dow
       {
         items: [{ ...timelineImage('dated-image'), timestamp: yesterday.end }],
         cursor: { from: 'older', stop_at: '$previous:example.test' },
+        has_undecryptable_events: true,
       },
       {
         items: [
@@ -118,6 +119,7 @@ test('date query reads its own pages and applies message type to preview and dow
           },
         ],
         cursor: null,
+        has_undecryptable_events: false,
       },
     ]
   );
@@ -167,7 +169,9 @@ test('date query reads its own pages and applies message type to preview and dow
   await expect(dialog.locator('.history-stat')).toContainText('正在读取历史');
   expect(await dateControlsHeight()).toBe(idleHeight);
   await page.screenshot({ path: testInfo.outputPath('history-date-reading.png') });
-  await expect(dialog.locator('.history-stat')).toContainText('查询完成 · 共 2 条');
+  await expect(dialog.locator('.history-stat')).toHaveText(
+    '查询完成 · 可读 2 条 · 有加密事件无法解密，未纳入结果'
+  );
   await expect(dialog.getByRole('button', { name: '导出 2 条 ▾' })).toBeEnabled();
   const msgType = dialog.getByRole('combobox', { name: '消息类型' });
   await msgType.selectOption('media');
@@ -190,6 +194,8 @@ test('date query reads its own pages and applies message type to preview and dow
   await dialog.getByRole('button', { name: 'TXT (.txt)' }).click();
   const content = await readFile(await (await downloaded).path(), 'utf8');
   expect(content).toContain('Read https://example.test/dated');
+  expect(content).toContain('有加密事件无法解密，未纳入结果');
+  expect(content).not.toContain('未读完');
   expect(content).not.toContain('History image');
   expect(await core.timelineCommands()).toEqual(before);
   expect(
@@ -344,7 +350,11 @@ test.describe('phone room search', () => {
         const now = new Date();
         const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12);
         window.__e2eHistoryPages = [
-          { cursor: null, items: [{ ...image, timestamp: date.getTime() }] },
+          {
+            cursor: null,
+            items: [{ ...image, timestamp: date.getTime() }],
+            has_undecryptable_events: false,
+          },
         ];
         window.__e2eHistoryPageDelayMs = 750;
       },
@@ -443,9 +453,13 @@ test.describe('phone room search', () => {
           ms
         ).getTime();
       window.__e2eHistoryPages = [
-        { cursor: null, items: [] },
-        { cursor: null, items: [] },
-        { cursor: null, items: [{ ...image, timestamp: dayAt(-3, 12) }] },
+        { cursor: null, items: [], has_undecryptable_events: true },
+        { cursor: null, items: [], has_undecryptable_events: true },
+        {
+          cursor: null,
+          items: [{ ...image, timestamp: dayAt(-3, 12) }],
+          has_undecryptable_events: false,
+        },
       ];
       return [
         { after: dayAt(0, 0), before: dayAt(0, 23, 59, 59, 999) },
@@ -457,7 +471,11 @@ test.describe('phone room search', () => {
     await today.tap();
     await expect(summary).toHaveAttribute('aria-expanded', 'false');
     await expect(today).toHaveAttribute('aria-pressed', 'true');
-    await expect(status).toHaveText('查询完成 · 共 0 条');
+    await expect(status).toBeVisible();
+    await expect(status).toHaveText('查询完成 · 可读 0 条 · 有加密事件无法解密，未纳入结果');
+    await expect(dialog.getByText('当前筛选条件下没有可显示的聊天记录。')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '导出 0 条 ▾' })).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath('phone-history-encrypted-gap.png') });
     await expect(preview).not.toBeVisible();
     await yesterday.tap();
     await expect(dialog.getByRole('button', { name: '停止读取', exact: true })).toBeVisible();
@@ -466,6 +484,7 @@ test.describe('phone room search', () => {
     await expect(yesterday).toHaveAttribute('aria-pressed', 'false');
     await expect(summary).toHaveAttribute('aria-expanded', 'false');
     await expect(preview).toBeVisible();
+    await expect(status).toHaveText('查询完成 · 共 1 条');
     await expect(summaryText).toHaveText(/^\d{4}-\d\d-\d\d 00:00 – \d{4}-\d\d-\d\d 23:59$/);
     await page.screenshot({ path: testInfo.outputPath('phone-history-quick-result.png') });
     expect(

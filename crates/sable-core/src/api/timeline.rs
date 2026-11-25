@@ -358,6 +358,8 @@ pub struct HistoryPageParams {
 pub struct HistoryPageOk {
     items: Vec<TimelineItemView>,
     cursor: Option<HistoryPageCursor>,
+    /// At least one unredacted event in the requested range could not be decrypted.
+    has_undecryptable_events: bool,
 }
 
 impl Handler for HistoryPageParams {
@@ -428,6 +430,7 @@ impl Handler for HistoryPageParams {
         };
 
         let push = room.push_context().await.ok().flatten();
+        let mut has_undecryptable_events = false;
         let candidates = messages.chunk.into_iter().filter(|event| {
             let Some(timestamp) = event.timestamp() else {
                 return false;
@@ -438,15 +441,23 @@ impl Handler for HistoryPageParams {
             {
                 return false;
             }
-            matches!(
-                event
-                    .raw()
-                    .get_field::<String>("type")
-                    .ok()
-                    .flatten()
-                    .as_deref(),
-                Some("m.room.message" | "m.sticker")
-            ) && crate::messages::replaced_event(event).is_none()
+            let raw = event.raw();
+            match raw.get_field::<String>("type").ok().flatten().as_deref() {
+                Some("m.room.message" | "m.sticker") => {
+                    crate::messages::replaced_event(event).is_none()
+                }
+                Some("m.room.encrypted") => {
+                    // Room::messages has already tried to decrypt the event.
+                    let redacted = raw
+                        .get_field::<serde_json::Value>("unsigned")
+                        .ok()
+                        .flatten()
+                        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some());
+                    has_undecryptable_events |= !redacted;
+                    false
+                }
+                _ => false,
+            }
         });
         let items = futures_util::future::join_all(candidates.map(|event| {
             let room = &room;
@@ -481,7 +492,11 @@ impl Handler for HistoryPageParams {
         .into_iter()
         .flatten()
         .collect();
-        Ok(HistoryPageOk { items, cursor })
+        Ok(HistoryPageOk {
+            items,
+            cursor,
+            has_undecryptable_events,
+        })
     }
 }
 

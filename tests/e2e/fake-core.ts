@@ -1682,7 +1682,11 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       },
       'timeline.events': () => [],
       'timeline.history_page': () =>
-        window.__e2eHistoryPages?.shift() ?? { items: [], cursor: null },
+        window.__e2eHistoryPages?.shift() ?? {
+          items: [],
+          cursor: null,
+          has_undecryptable_events: false,
+        },
       'timeline.unread_diagnostics': () => ({
         main: { unread: 0, notifying: 0, highlight: 0, receipt_event_id: null },
         server_notifications: 0,

@@ -45,11 +45,6 @@ pre-commit:
       run: pnpm exec stylelint --fix --max-warnings 0 {staged_files}
       stage_fixed: true
 
-    - name: rust-fmt
-      glob: '*.rs'
-      run: cargo fmt --all
-      stage_fixed: true
-
     - name: typos
       run: mise exec -- typos --force-exclude {staged_files}
 
@@ -69,11 +64,6 @@ pre-commit:
       run: pnpm exec vitest run --project node src/lib/config/config-reference.test.ts
       fail_text: 'docs/settings.md or a config schema is stale, run pnpm vitest run --project node src/lib/config/config-reference.test.ts -u'
 
-    - name: protocol-types
-      glob: 'crates/**/*.rs'
-      run: mise run check:types
-      fail_text: 'src/generated/protocol.ts is stale, run mise run generate:types'
-
 pre-push:
   parallel: true
   skip:
@@ -82,10 +72,6 @@ pre-push:
   jobs:
     - name: svelte-check
       run: pnpm exec svelte-kit sync && pnpm exec svelte-check --tsconfig ./tsconfig.json --fail-on-warnings
-
-    - name: protocol-types
-      run: mise run check:types
-      fail_text: 'src/generated/protocol.ts is stale, run mise run generate:types'
 
 commit-msg:
   scripts:

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, assert, beforeEach, expect, test, vi } from 'vitest';
 
 import type { CoreEvent } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
@@ -59,7 +59,7 @@ import type { CallTransportConnectOptions } from './call-transport';
 import { resetCallOwner } from './call-owner';
 import type { CallTransport, CallTransportState } from './call-transport';
 import { idleTransportState, ScreenAudioError } from './call-transport';
-import type { CallModerationHandler } from './peer-call-moderation';
+import { CALL_CONTROL_KEY } from './call-moderation';
 
 type Harness = {
   client: CoreClient;
@@ -209,35 +209,23 @@ afterEach(() => {
   sentry.captureException.mockClear();
 });
 
-async function moderationHarness(peer = false) {
+const ownControl = {
+  user_id: '@kris:example.org',
+  member_id: '@kris:example.org:LAPTOP',
+  joined_ts: 1000,
+};
+const peerControl = {
+  user_id: '@bob:example.org',
+  member_id: 'peer-per-join-id',
+  joined_ts: null,
+};
+
+async function moderationHarness() {
   const h = harness();
-  let receive: CallModerationHandler | undefined;
-  if (peer) {
-    h.transport.moderateParticipant = vi.fn(async () => {});
-    h.transport.setModerationHandler = (handler) => {
-      receive = handler;
-    };
-  }
-  h.client.rpc.members = {
-    powerLevels: vi.fn(() => Promise.resolve({ events: {} })),
-    member: vi.fn(() => Promise.resolve({ membership: 'join', power_level: 100 })),
-  } as unknown as CoreClient['rpc']['members'];
-  const makeBackend = (id: string) => ({
-    id,
-    url: `wss://${id}.example.org`,
-    identity: defaultGrant.identity,
-    jwt: `header.${Buffer.from(
-      JSON.stringify({
-        sub: defaultGrant.identity,
-        exp: Math.floor(Date.now() / 1000) + 3600,
-        video: { room: `${id}-room`, roomAdmin: true },
-      })
-    ).toString('base64url')}.signature`,
-  });
-  h.joinCall.mockResolvedValueOnce({
-    ...defaultGrant,
-    backends: [makeBackend('publisher'), makeBackend('remote')],
-  });
+  const sendRawEvent = vi
+    .fn<CoreClient['rpc']['messages']['sendRawEvent']>()
+    .mockResolvedValue('$control');
+  h.client.rpc.messages = { ...h.client.rpc.messages, sendRawEvent };
   const session = new CallSession(h.client, { createTransport: () => h.transport });
   await session.join('!room:example.org', { microphone: true, camera: false });
   const participant = {
@@ -250,201 +238,156 @@ async function moderationHarness(peer = false) {
     session: 7,
     members: [
       {
-        identity: participant.identity,
-        user_id: '@bob:example.org',
+        ...ownControl,
+        device_id: 'LAPTOP',
+        backend_id: null,
+        identity: defaultGrant.identity,
+        screen_sharing: false,
+      },
+      {
+        ...peerControl,
+        joined_ts: 2000,
         device_id: 'PHONE',
         backend_id: 'remote',
-        joined_ts: 1,
+        identity: participant.identity,
         screen_sharing: false,
       },
     ],
   });
   h.emitTransportState({
-    ...idleTransportState(),
-    connection: 'connected',
+    ...h.transport.getState(),
     participants: [participant],
   });
-  await vi.waitFor(() => {
-    expect(session.canModerateParticipant(participant)).toBe(true);
-  });
-  return { ...h, session, participant, receive: () => receive };
+  const receive = (
+    content: unknown,
+    sender = peerControl.user_id,
+    requires_confirmation = false
+  ) => {
+    h.emit({
+      type: 'call_control_signal',
+      session: 7,
+      sender,
+      origin_server_ts: 10_000,
+      requires_confirmation,
+      content,
+    });
+  };
+  return { ...h, session, participant, sendRawEvent, receive };
 }
 
-test('peer call controls work without a LiveKit roomAdmin grant', async () => {
-  const h = await moderationHarness(true);
-  h.emit({
-    type: 'call_backends',
-    session: 7,
-    revision: 1,
-    publisher_id: 'publisher',
-    backends: [
-      {
-        id: 'remote',
-        url: 'wss://remote.example.org',
-        identity: defaultGrant.identity,
-        jwt: 'ordinary-join-token',
+test('a Matrix acknowledgement from the selected participant confirms the call action', async () => {
+  const h = await moderationHarness();
+  const control = h.session.participantControl(h.participant);
+  assert(control);
+  const pending = control('mute');
+  expect(h.session.moderationPending).toBe(true);
+  const [request] = h.sendRawEvent.mock.calls;
+  const content = request[0].content as Record<string, { id: string }>;
+  const { id } = content[CALL_CONTROL_KEY];
+  expect(id).toEqual(expect.any(String));
+  expect(h.sendRawEvent).toHaveBeenCalledWith({
+    room_id: '!room:example.org',
+    event_type: 'io.element.call.reaction',
+    content: {
+      [CALL_CONTROL_KEY]: {
+        id,
+        from: ownControl,
+        to: peerControl,
+        kind: 'request',
+        action: 'mute',
       },
-    ],
-  });
-  expect(h.session.canModerateParticipant(h.participant)).toBe(true);
-  await h.session.moderateParticipant(h.participant, 'mute');
-  expect(h.transport.moderateParticipant).toHaveBeenCalledWith(
-    h.participant.identity,
-    'mute',
-    expect.any(AbortSignal),
-    'remote'
-  );
-  await h.session.leave();
-});
-
-test('the receiver rejects an ordinary caller when the room switch is off', async () => {
-  const h = await moderationHarness(true);
-  vi.mocked(h.client.rpc.members.member).mockResolvedValue({
-    membership: 'join',
-    power_level: 0,
-  } as never);
-  await expect(
-    h.receive()?.('mute', h.participant.identity, new AbortController().signal)
-  ).rejects.toMatchObject({ code: 'denied' });
-  expect(h.session.microphoneEnabled).toBe(true);
-  await h.session.leave();
-});
-
-test('an open room allows a joined caller to mute and remove the receiver', async () => {
-  const h = await moderationHarness(true);
-  vi.mocked(h.client.rpc.members.member).mockResolvedValue({
-    membership: 'join',
-    power_level: 0,
-  } as never);
-  vi.mocked(h.client.rpc.members.powerLevels).mockResolvedValue({
-    events: { 'moe.sable.call.moderation': 0 },
-  } as never);
-  await h.receive()?.('mute', h.participant.identity, new AbortController().signal);
-  expect(h.session.microphoneEnabled).toBe(false);
-  expect(h.transport.setMicrophoneEnabled).toHaveBeenCalledWith(false);
-  const finish = await h.receive()?.(
-    'remove',
-    h.participant.identity,
-    new AbortController().signal
-  );
-  expect(h.leaveCall).not.toHaveBeenCalled();
-  await finish?.afterAcknowledged?.();
-  expect(h.leaveCall).toHaveBeenCalledOnce();
-  expect(h.session.lifecycle).toBe('idle');
-});
-
-test('even an administrator must be a current call participant', async () => {
-  const h = await moderationHarness(true);
-  await expect(
-    h.receive()?.('remove', 'not-in-call', new AbortController().signal)
-  ).rejects.toMatchObject({ code: 'gone' });
-  expect(h.leaveCall).not.toHaveBeenCalled();
-  await h.session.leave();
-});
-
-test('the receiver checks current permission after the room switch is closed', async () => {
-  const h = await moderationHarness(true);
-  vi.mocked(h.client.rpc.members.member).mockResolvedValue({
-    membership: 'join',
-    power_level: 0,
-  } as never);
-  vi.mocked(h.client.rpc.members.powerLevels)
-    .mockResolvedValueOnce({ events: { 'moe.sable.call.moderation': 0 } } as never)
-    .mockResolvedValue({ events: { 'moe.sable.call.moderation': 100 } } as never);
-  await h.receive()?.('mute', h.participant.identity, new AbortController().signal);
-  await expect(
-    h.receive()?.('remove', h.participant.identity, new AbortController().signal)
-  ).rejects.toMatchObject({ code: 'denied' });
-  expect(h.leaveCall).not.toHaveBeenCalled();
-  await h.session.leave();
-});
-
-test('call moderation chooses the participant SFU and its SFU room', async () => {
-  const { session, participant } = await moderationHarness();
-  expect(session.canModerateParticipant(participant)).toBe(true);
-  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({}));
-  globalThis.fetch = fetcher;
-  await session.moderateParticipant(participant, 'remove');
-  await vi.waitFor(() => {
-    expect(fetcher).toHaveBeenCalledOnce();
-  });
-  expect(fetcher).toHaveBeenCalledOnce();
-  expect(fetcher.mock.calls[0][0]).toBe(
-    'https://remote.example.org/twirp/livekit.RoomService/RemoveParticipant'
-  );
-  const body = fetcher.mock.calls[0][1]?.body;
-  if (typeof body !== 'string') throw new Error('expected JSON request body');
-  expect(JSON.parse(body)).toEqual({
-    room: 'remote-room',
-    identity: participant.identity,
-  });
-  expect(session.moderationError).toBeNull();
-  await session.leave();
-});
-
-test('call moderation refuses stale tiles, missing backends and revoked grants', async () => {
-  const { session, participant, emit, emitTransportState } = await moderationHarness();
-  expect(session.canModerateParticipant({ ...participant, local: true })).toBe(false);
-  expect(session.canModerateParticipant({ ...participant, backendId: 'unknown' })).toBe(false);
-  emitTransportState({ ...idleTransportState(), connection: 'connected' });
-  expect(session.canModerateParticipant(participant)).toBe(false);
-  emitTransportState({
-    ...idleTransportState(),
-    connection: 'connected',
-    participants: [participant],
-  });
-  expect(session.canModerateParticipant(participant)).toBe(true);
-  emit({ type: 'call_backends', session: 7, revision: 1, publisher_id: 'publisher', backends: [] });
-  await session.moderateParticipant(participant, 'remove');
-  expect(session.moderationError).toBe('unavailable');
-  await session.leave();
-});
-
-test('leaving cancels moderation, ignores late failure, and prevents duplicate requests', async () => {
-  const { session, participant } = await moderationHarness();
-  let reject!: (reason: Error) => void;
-  let signal!: AbortSignal;
-  const fetcher = vi.fn<typeof fetch>((_url, options) => {
-    if (!options?.signal) throw new Error('missing cancellation signal');
-    signal = options.signal;
-    return new Promise<Response>((_resolve, fail) => {
-      reject = fail;
-    });
-  });
-  globalThis.fetch = fetcher;
-  const pending = session.moderateParticipant(participant, 'remove');
-  expect(session.moderationPending).toBe(true);
-  await session.moderateParticipant(participant, 'remove');
-  await vi.waitFor(() => {
-    expect(fetcher).toHaveBeenCalledOnce();
-  });
-  await session.leave();
-  expect(signal.aborted).toBe(true);
-  reject(new Error('late network failure'));
-  await pending;
-  expect(session.moderationPending).toBe(false);
-  expect(session.moderationError).toBeNull();
-});
-
-test('a server microphone mute updates local controls and permits explicit unmute', async () => {
-  const h = harness();
-  const session = new CallSession(h.client, { createTransport: () => h.transport });
-  await session.join('!room:example.org', { microphone: true, camera: false });
-  h.emitTransportState({
-    ...idleTransportState(),
-    connection: 'connected',
-    microphoneEnabled: false,
-    self: {
-      identity: defaultGrant.identity,
-      local: true,
-      microphone: { id: 'own-mic', muted: true, subscribed: true },
     },
   });
-  expect(session.microphoneEnabled).toBe(false);
-  await session.setMicrophoneEnabled(true);
-  expect(session.microphoneEnabled).toBe(true);
-  expect(h.transport.setMicrophoneEnabled).toHaveBeenCalledWith(true);
-  await session.leave();
+  const response = {
+    id,
+    from: peerControl,
+    to: ownControl,
+    kind: 'response',
+    result: 'ok',
+  };
+  h.receive(response, '@somebody:example.org');
+  expect(h.session.moderationPending).toBe(true);
+  h.receive(response, peerControl.user_id, true);
+  await pending;
+  expect(h.session.moderationPending).toBe(false);
+  expect(h.session.moderationError).toBeNull();
+  await h.session.leave();
+});
+
+test('a current peer can mute or remove this device without ending the call for everyone', async () => {
+  const h = await moderationHarness();
+  const packet = {
+    id: 'sable-control',
+    from: peerControl,
+    to: ownControl,
+    kind: 'request',
+    action: 'mute',
+  };
+  h.receive(packet);
+  await vi.waitFor(() => {
+    expect(h.sendRawEvent).toHaveBeenCalledOnce();
+  });
+  expect(h.session.microphoneEnabled).toBe(false);
+  expect(h.transport.setMicrophoneEnabled).toHaveBeenCalledWith(false);
+  await h.session.setMicrophoneEnabled(true);
+  h.receive(packet);
+  expect(h.session.microphoneEnabled).toBe(true);
+  h.receive({ ...packet, id: 'remove', action: 'remove' });
+  await vi.waitFor(() => {
+    expect(h.session.lifecycle).toBe('idle');
+  });
+  expect(h.leaveCall).toHaveBeenCalledOnce();
+  expect(h.endCall).not.toHaveBeenCalled();
+  expect(h.sendRawEvent).toHaveBeenCalledTimes(2);
+});
+
+test('unmatched targets, nonparticipants, and previous join generations cannot affect a call', async () => {
+  const h = await moderationHarness();
+  const packet = {
+    id: 'sable-control',
+    from: peerControl,
+    to: ownControl,
+    kind: 'request',
+    action: 'mute',
+  };
+  h.receive({ ...packet, to: { ...ownControl, joined_ts: 900 } });
+  h.receive({ ...packet, to: { ...ownControl, member_id: '@kris:example.org:PHONE' } });
+  h.receive({ ...packet, from: { ...peerControl, member_id: 'left-call' } });
+  expect(h.session.microphoneEnabled).toBe(true);
+  expect(h.sendRawEvent).not.toHaveBeenCalled();
+  await h.session.leave();
+});
+
+test('a removal confirmed after the target rejoins cannot act on the new membership', async () => {
+  const h = await moderationHarness();
+  const confirmRemove = h.session.participantControl(h.participant);
+  assert(confirmRemove);
+  h.emit({
+    type: 'call_members',
+    session: 7,
+    members: h.session.members.map((member) =>
+      member.identity === h.participant.identity
+        ? { ...member, member_id: 'new-membership', joined_ts: 3000 }
+        : member
+    ),
+  });
+  await confirmRemove('remove');
+  expect(h.sendRawEvent).not.toHaveBeenCalled();
+  expect(h.session.moderationError).toBe('gone');
+  await h.session.leave();
+});
+
+test('leaving cancels a pending control and ignores its late response', async () => {
+  const h = await moderationHarness();
+  const control = h.session.participantControl(h.participant);
+  assert(control);
+  const pending = control('remove');
+  await control('remove');
+  expect(h.sendRawEvent).toHaveBeenCalledOnce();
+  await h.session.leave();
+  await pending;
+  expect(h.session.moderationPending).toBe(false);
+  expect(h.session.moderationError).toBeNull();
 });
 
 test('an unencrypted call connects without waiting for a key', async () => {
@@ -751,6 +694,7 @@ test('a key for another session is ignored', async () => {
         device_id: 'X',
         identity: '@bob:example.org:X',
         backend_id: null,
+        member_id: null,
         joined_ts: 0,
         screen_sharing: false,
       },
@@ -770,6 +714,7 @@ test('the call is timed from the earliest member still in it', async () => {
     device_id: device,
     identity: `@bob:example.org:${device}`,
     backend_id: null,
+    member_id: null,
     joined_ts: joined,
     screen_sharing: false,
   });
@@ -1564,6 +1509,7 @@ test('two devices of one account keep their own voice state', () => {
     device_id: device,
     identity: `@me:x:${device}`,
     backend_id: null,
+    member_id: null,
     joined_ts: 0,
     screen_sharing: false,
   });
@@ -1795,6 +1741,7 @@ function observeAnotherDevice(h: Harness): void {
         device_id: 'PHONE',
         identity: '@kris:example.org:PHONE',
         backend_id: null,
+        member_id: null,
         joined_ts: 1,
         screen_sharing: false,
       },
@@ -1820,6 +1767,7 @@ test('end call waits for the core event, retries failures and never changes ordi
         device_id: 'LAPTOP',
         identity: 'other-wire-identity-for-this-device',
         backend_id: null,
+        member_id: null,
         joined_ts: 1,
         screen_sharing: false,
       },

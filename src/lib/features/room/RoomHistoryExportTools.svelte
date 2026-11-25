@@ -51,6 +51,7 @@
     category: 'all',
   });
   let result = $state<'loaded' | 'pending' | 'reading' | 'complete' | 'partial'>('loaded');
+  let hasUndecryptableEvents = $state(false);
   let feedback = $state('');
   let requestId = 0;
   let visibleCount = $state(100);
@@ -136,6 +137,7 @@
     partialScope: '仅含已读取且符合筛选条件的记录',
     missingOlder: '较早的记录尚未读完',
     missingNewer: '尚未读到最新的记录',
+    undecryptableEvents: '有加密事件无法解密，未纳入结果',
   } as const;
 
   const types: { value: HistoryCategory; label: string }[] = [
@@ -166,7 +168,7 @@
     return `${start} – ${start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end}`;
   });
   const showCollapsedStatus = $derived(
-    result === 'pending' || result === 'reading' || result === 'partial'
+    result === 'pending' || result === 'reading' || result === 'partial' || hasUndecryptableEvents
   );
   let records = $derived(result === 'loaded' ? loadedRecords : queryRecords);
   let matching = $derived(filterHistory(records, filters));
@@ -265,6 +267,7 @@
     requestId += 1;
     queryRecords = [];
     queryMedia = [];
+    hasUndecryptableEvents = false;
     result = after || before ? 'pending' : 'loaded';
     visibleCount = 100;
     feedback = '';
@@ -302,6 +305,7 @@
     let cursor: HistoryPageCursor | null = null;
     queryRecords = [];
     queryMedia = [];
+    hasUndecryptableEvents = false;
     result = 'reading';
     visibleCount = 100;
     feedback = '';
@@ -320,6 +324,7 @@
           cursor,
         });
         if (serial !== requestId) return;
+        hasUndecryptableEvents ||= response.has_undecryptable_events;
         queryRecords = cache.collect(response.items, nameMap(source.members()));
         for (const item of response.items) {
           if (!item.event_id) continue;
@@ -355,7 +360,13 @@
     const period = hasDates
       ? `${filters.after.replace('T', ' ') || '最早可读记录'} 至 ${filters.before.replace('T', ' ') || '查询时刻'}`
       : '';
-    const scope = [historyGaps ? `${L.partialScope}；${historyGaps}` : L.loadedScope, period]
+    const partial = Boolean(historyGaps) || hasUndecryptableEvents;
+    const scope = [
+      partial ? L.partialScope : L.loadedScope,
+      historyGaps,
+      hasUndecryptableEvents && L.undecryptableEvents,
+      period,
+    ]
       .filter(Boolean)
       .join('；');
     const roomName = source.roomName();
@@ -366,7 +377,7 @@
           ? createHistoryMarkdown(roomName, source.roomId(), items, scope)
           : createHistoryHtml(roomName, source.roomId(), items, scope);
     saveHistoryFile(roomName, format, data);
-    feedback = `已导出 ${items.length} 条 ${format.toUpperCase()}${historyGaps ? '（部分历史）' : ''}`;
+    feedback = `已导出 ${items.length} 条 ${format.toUpperCase()}${partial ? '（部分历史）' : ''}`;
   }
 </script>
 
@@ -520,7 +531,8 @@
               {:else if result === 'partial'}
                 {historyGaps} · 符合筛选条件 {matching.length} 条
               {:else if result === 'complete'}
-                查询完成 · 共 {records.length} 条{matching.length === records.length
+                查询完成 · {hasUndecryptableEvents ? '可读' : '共'}
+                {records.length} 条{matching.length === records.length
                   ? ''
                   : ` · 符合筛选条件 ${matching.length} 条`}
               {:else}
@@ -528,6 +540,7 @@
                   ? ` · ${historyGaps}`
                   : ''}
               {/if}
+              {hasUndecryptableEvents ? ` · ${L.undecryptableEvents}` : ''}
             </div>
             {#if filtersCollapsed && result === 'reading'}
               <button class="action compact-stop" type="button" onclick={stopReading}
@@ -549,7 +562,9 @@
             <div class="empty-history">
               {result === 'partial' && records.length === 0
                 ? '尚未读取到记录，可重新查询。'
-                : '当前筛选条件下没有聊天记录。'}
+                : hasUndecryptableEvents
+                  ? '当前筛选条件下没有可显示的聊天记录。'
+                  : '当前筛选条件下没有聊天记录。'}
             </div>
           {/if}
         {:else}

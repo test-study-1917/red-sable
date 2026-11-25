@@ -453,10 +453,13 @@ pub(crate) fn hidden_event_filter(event: &AnySyncTimelineEvent, rules: &RoomVers
 // Ruma's parsed custom-event content drops unknown fields. Test the raw
 // content when building hidden aggregation rows instead of hiding every
 // io.element.call.reaction (which would also hide ordinary reactions).
-fn is_call_termination(event_type: &str, content: Option<&serde_json::Value>) -> bool {
+fn is_call_control(event_type: &str, content: Option<&serde_json::Value>) -> bool {
     event_type == "io.element.call.terminate"
         || (event_type == "io.element.call.reaction"
-            && content.is_some_and(|content| content.get("io.element.call.terminate").is_some()))
+            && content.is_some_and(|content| {
+                content.get("io.element.call.terminate").is_some()
+                    || content.get(crate::calls::MODERATION_EVENT_KEY).is_some()
+            }))
 }
 
 pub(crate) fn aggregation_items(
@@ -472,7 +475,7 @@ pub(crate) fn aggregation_items(
                 return None;
             }
             let content = event.raw().get_field::<serde_json::Value>("content").ok()?;
-            if is_call_termination(&parsed.event_type().to_string(), content.as_ref()) {
+            if is_call_control(&parsed.event_type().to_string(), content.as_ref()) {
                 return None;
             }
             let redacts = match &parsed {
@@ -651,6 +654,10 @@ mod tests {
             raw(
                 "io.element.call.reaction",
                 serde_json::json!({"io.element.call.terminate":{"terminated_by":"@alice:example.org","timestamp":1}}),
+            ),
+            raw(
+                "io.element.call.reaction",
+                serde_json::json!({"io.element.call.moderate":{"kind":"request"}}),
             ),
         ];
         for control in &controls {

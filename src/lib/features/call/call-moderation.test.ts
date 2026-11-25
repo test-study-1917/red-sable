@@ -1,143 +1,86 @@
-import { afterEach, expect, test, vi } from 'vitest';
-import type { CallBackendView } from '#src/generated/protocol';
+import { expect, test, vi } from 'vitest';
 
-import { callModerationGrant, moderateCallParticipant } from './call-moderation';
+import { CALL_CONTROL_KEY, callControlMember, createCallModeration } from './call-moderation';
 
-function backend(
-  video: Record<string, unknown> = { room: 'rtc-room', roomAdmin: true }
-): CallBackendView {
-  const payload = Buffer.from(
-    JSON.stringify({
-      sub: 'moderator',
-      exp: Math.floor(Date.now() / 1000) + 3600,
-      video,
-    })
-  ).toString('base64url');
-  return {
-    id: 'sfu',
-    url: 'wss://sfu.example.org',
-    jwt: `header.${payload}.signature`,
-    identity: 'moderator',
-  };
-}
-
-afterEach(() => vi.unstubAllGlobals());
-
-test('only exposes controls for a room-scoped admin grant, with a safe HTTP endpoint', () => {
-  expect(callModerationGrant(backend())).toEqual({
-    endpoint: 'https://sfu.example.org/twirp/livekit.RoomService/',
-    room: 'rtc-room',
-  });
-  expect(callModerationGrant(backend({ room: 'rtc-room', roomJoin: true }))).toBeNull();
-  expect(callModerationGrant(backend({ roomAdmin: true }))).toBeNull();
-  expect(callModerationGrant({ ...backend(), identity: 'different-user' })).toBeNull();
-  expect(callModerationGrant({ ...backend(), jwt: 'invalid' })).toBeNull();
-  expect(callModerationGrant({ ...backend(), url: 'ws://sfu.example.org' })).toBeNull();
-  expect(callModerationGrant({ ...backend(), url: 'https://sfu.example.org?token=x' })).toBeNull();
-  const expired = Buffer.from(
-    JSON.stringify({ sub: 'moderator', exp: 1, video: { room: 'rtc-room', roomAdmin: true } })
-  ).toString('base64url');
-  expect(callModerationGrant({ ...backend(), jwt: `h.${expired}.s` })).toBeNull();
-});
-
-test('mutes only current microphone publications at the server, for any target client', async () => {
-  const fetcher = vi
-    .fn<typeof fetch>()
-    .mockResolvedValueOnce(
-      Response.json({
-        tracks: [
-          { sid: 'camera', source: 'CAMERA' },
-          { sid: 'screen-audio', source: 'SCREEN_SHARE_AUDIO' },
-          { sid: 'microphone-new', source: 'MICROPHONE', muted: false },
-          { sid: 'microphone-already-muted', source: 2, muted: true },
-        ],
-      })
-    )
-    .mockResolvedValueOnce(Response.json({}));
-  vi.stubGlobal('fetch', fetcher);
-  const grant = backend();
-  await moderateCallParticipant(grant, 'other-frontend', 'mute', new AbortController().signal);
-  expect(fetcher).toHaveBeenCalledTimes(2);
-  const [url, options] = fetcher.mock.calls[1];
-  expect(url).toBe('https://sfu.example.org/twirp/livekit.RoomService/MutePublishedTrack');
-  if (typeof options?.body !== 'string') throw new Error('expected JSON request body');
-  expect(JSON.parse(options.body)).toEqual({
-    room: 'rtc-room',
-    identity: 'other-frontend',
-    track_sid: 'microphone-new',
-    muted: true,
-  });
-  expect(new Headers(options.headers).get('Authorization')).toBe(`Bearer ${grant.jwt}`);
-  expect(options.redirect).toBe('error');
-});
-
-test('removes only the selected SFU participant without Matrix room membership operations', async () => {
-  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({}));
-  vi.stubGlobal('fetch', fetcher);
-  await moderateCallParticipant(backend(), 'other-device', 'remove', new AbortController().signal);
-  expect(fetcher).toHaveBeenCalledOnce();
-  expect(fetcher.mock.calls[0][0]).toContain('/RemoveParticipant');
-  const body = fetcher.mock.calls[0][1]?.body;
-  if (typeof body !== 'string') throw new Error('expected JSON request body');
-  expect(JSON.parse(body)).toEqual({
-    room: 'rtc-room',
-    identity: 'other-device',
-  });
-});
-
-test.each([401, 403, 404, 500])(
-  'reports server rejection %s without falling back to local volume or signaling',
-  async (status) => {
-    const fetcher = vi.fn().mockResolvedValue(new Response('{}', { status }));
-    vi.stubGlobal('fetch', fetcher);
-    await expect(
-      moderateCallParticipant(backend(), 'target', 'mute', new AbortController().signal)
-    ).rejects.toMatchObject({
-      code: status === 401 || status === 403 ? 'denied' : status === 404 ? 'gone' : 'failed',
+test('a room send is not success without the other client acknowledging the action', async () => {
+  vi.useFakeTimers();
+  try {
+    const self = callControlMember('@a:test', 'DEVICE', '@a:test:DEVICE', 1);
+    const target = callControlMember('@b:test', 'DEVICE', 'per-join-id', 1);
+    const send = vi
+      .fn<Parameters<typeof createCallModeration>[0]['send']>()
+      .mockResolvedValue(null);
+    const control = createCallModeration({
+      local: () => self,
+      members: () => [self, target],
+      send,
+      mute: vi.fn<() => Promise<boolean>>().mockResolvedValue(true),
+      remove: () => {},
     });
-    expect(fetcher).toHaveBeenCalledOnce();
+    const request = control.request(target, 'mute');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await request).toBe('unavailable');
+    const { id } = send.mock.calls[0][0][CALL_CONTROL_KEY];
+    expect(id).toEqual(expect.any(String));
+    expect(send).toHaveBeenCalledWith({
+      [CALL_CONTROL_KEY]: {
+        id,
+        kind: 'request',
+        action: 'mute',
+        from: self,
+        to: target,
+      },
+    });
+  } finally {
+    vi.useRealTimers();
   }
-);
-
-test('refuses self-targeting and missing privileges before any request', async () => {
-  const fetcher = vi.fn();
-  vi.stubGlobal('fetch', fetcher);
-  await expect(
-    moderateCallParticipant(backend(), 'moderator', 'remove', new AbortController().signal)
-  ).rejects.toMatchObject({ code: 'unavailable' });
-  await expect(
-    moderateCallParticipant(
-      backend({ room: 'rtc-room' }),
-      'target',
-      'remove',
-      new AbortController().signal
-    )
-  ).rejects.toMatchObject({ code: 'unavailable' });
-  expect(fetcher).not.toHaveBeenCalled();
 });
 
-test('does not treat screen audio or a missing microphone as a successful mute', async () => {
-  const fetcher = vi
-    .fn()
-    .mockResolvedValue(
-      Response.json({ tracks: [{ source: 'SCREEN_SHARE_AUDIO', sid: 'screen' }] })
+test('a request without server age needs a fresh confirmation and can run only once', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+  try {
+    const self = callControlMember('@a:test', 'DEVICE', '@a:test:DEVICE', 1);
+    const peer = callControlMember('@b:test', 'DEVICE', 'per-join-id', 1);
+    const send = vi
+      .fn<Parameters<typeof createCallModeration>[0]['send']>()
+      .mockResolvedValue(null);
+    const mute = vi.fn<() => Promise<boolean>>().mockResolvedValue(true);
+    const control = createCallModeration({
+      local: () => self,
+      members: () => [self, peer],
+      send,
+      mute,
+      remove: () => {},
+    });
+    const request = { id: 'old', from: peer, to: self, kind: 'request', action: 'mute' };
+    await control.receive(request, peer.user_id, true);
+    await control.receive(request, peer.user_id, true);
+    expect(send).toHaveBeenCalledOnce();
+    const firstChallenge = send.mock.calls[0][0][CALL_CONTROL_KEY];
+    if (firstChallenge.kind !== 'challenge') throw new Error('Expected a challenge');
+    await control.receive(
+      { ...request, kind: 'confirm', nonce: crypto.randomUUID() },
+      peer.user_id,
+      true
     );
-  vi.stubGlobal('fetch', fetcher);
-  await expect(
-    moderateCallParticipant(backend(), 'target', 'mute', new AbortController().signal)
-  ).rejects.toMatchObject({ code: 'gone' });
-  expect(fetcher).toHaveBeenCalledOnce();
-});
+    vi.advanceTimersByTime(10_001);
+    await control.receive(
+      { ...request, kind: 'confirm', nonce: firstChallenge.nonce },
+      peer.user_id,
+      true
+    );
+    expect(mute).not.toHaveBeenCalled();
 
-test('passes cancellation through to the SFU request', async () => {
-  const controller = new AbortController();
-  controller.abort();
-  const fetcher = vi.fn<typeof fetch>((_url, options) => {
-    options?.signal?.throwIfAborted();
-    return Promise.resolve(Response.json({}));
-  });
-  vi.stubGlobal('fetch', fetcher);
-  await expect(
-    moderateCallParticipant(backend(), 'target', 'remove', controller.signal)
-  ).rejects.toMatchObject({ name: 'AbortError' });
+    const currentRequest = { ...request, id: 'current' };
+    await control.receive(currentRequest, peer.user_id, true);
+    const nextChallenge = send.mock.calls[1][0][CALL_CONTROL_KEY];
+    if (nextChallenge.kind !== 'challenge') throw new Error('Expected a challenge');
+    const confirmation = { ...currentRequest, kind: 'confirm', nonce: nextChallenge.nonce };
+    vi.setSystemTime(Date.now() + 3_600_000);
+    await control.receive(confirmation, peer.user_id, true);
+    await control.receive(confirmation, peer.user_id, true);
+    expect(mute).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -820,13 +820,52 @@ async fn permalink_timeline_loads_and_contains_its_target() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one two-page RPC flow with both readable and unreadable encrypted events"
+)]
 async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times() {
+    use matrix_sdk::ruma::owned_device_id;
+    use matrix_sdk_base::crypto::{
+        olm::{Account, EncryptionSettings, InboundGroupSession, OutboundGroupSession, SenderData},
+        types::EventEncryptionAlgorithm,
+    };
     use wiremock::matchers::query_param;
 
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let room_id = room_id!("!dated:example.org");
     server.sync_joined_room(&client, room_id).await;
+    let sender = Account::new(user_id!("@alice:example.org"));
+    let keys = sender.identity_keys();
+    let outbound = OutboundGroupSession::new(
+        owned_device_id!("SENDER"),
+        Arc::new(keys),
+        room_id,
+        EncryptionSettings::default(),
+    )
+    .unwrap();
+    let inbound = InboundGroupSession::new(
+        outbound.sender_key(),
+        keys.ed25519,
+        room_id,
+        &outbound.session_key().await,
+        SenderData::unknown(),
+        None,
+        EventEncryptionAlgorithm::MegolmV1AesSha2,
+        None,
+        false,
+    )
+    .unwrap();
+    client
+        .olm_machine_for_testing()
+        .await
+        .as_ref()
+        .unwrap()
+        .store()
+        .import_room_keys(vec![inbound.export().await], None, |_, _| ())
+        .await
+        .unwrap();
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
     *core.session.write().await = Some(Session {
@@ -867,6 +906,32 @@ async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times
             "content": { "msgtype": "m.text", "body": id },
         })
     };
+    let content = outbound
+        .encrypt(
+            "m.room.message",
+            &serde_json::from_value(json!({ "msgtype": "m.text", "body": "Decrypted text" }))
+                .unwrap(),
+        )
+        .await
+        .content;
+    let mut last = message("$last", 3000);
+    last["type"] = json!("m.room.encrypted");
+    last["content"] = json!(content);
+    let mut too_late = last.clone();
+    too_late["origin_server_ts"] = json!(3001);
+    too_late["event_id"] = json!("$too-late");
+    too_late["content"]["session_id"] = json!("missing");
+    let mut unreadable = too_late.clone();
+    unreadable["origin_server_ts"] = json!(2000);
+    unreadable["event_id"] = json!("$unreadable");
+    let mut redacted = unreadable.clone();
+    redacted["event_id"] = json!("$redacted");
+    redacted["content"] = json!({});
+    redacted["unsigned"] = json!({ "redacted_because": {
+        "type": "m.room.redaction", "event_id": "$redaction", "sender": "@alice:example.org",
+        "origin_server_ts": 2001, "content": { "redacts": "$redacted" },
+    } });
+
     let mut edited = message("$first", 2000);
     edited["unsigned"] = json!({ "m.relations": { "m.replace": {
         "type": "m.room.message", "event_id": "$edit", "sender": "@alice:example.org",
@@ -878,12 +943,12 @@ async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times
         }
     } } });
     for (from, end, events) in [
+        ("dated", "older", vec![too_late, last, redacted]),
         (
-            "dated",
             "older",
-            vec![message("$too-late", 3100), message("$last", 3000)],
+            "skip",
+            vec![edited, unreadable, message("$below", 1999)],
         ),
-        ("older", "skip", vec![edited, message("$below", 1999)]),
     ] {
         Mock::given(method("GET"))
             .and(path(format!("{room_path}/messages")))
@@ -905,6 +970,8 @@ async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times
     let page: serde_json::Value = serde_json::from_str(page.get()).unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
     assert_eq!(page["items"][0]["event_id"], "$last");
+    assert_eq!(page["items"][0]["content"]["body"], "Decrypted text");
+    assert_eq!(page["has_undecryptable_events"], false);
     params["cursor"] = page["cursor"].clone();
 
     let page = core
@@ -916,6 +983,7 @@ async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times
     assert_eq!(page["items"][0]["event_id"], "$first");
     assert_eq!(page["items"][0]["content"]["body"], "Edited text");
     assert!(page["cursor"].is_null());
+    assert_eq!(page["has_undecryptable_events"], true);
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Candidate, EVENT_TYPE, MembershipWait, Reader, local_members};
+use super::{Candidate, EVENT_TYPE, LiveEnvelope, MembershipWait, Reader, local_members};
 use crate::calls::{
     membership::{CallMember, StickyMemberships},
     runtime::tests::member,
@@ -239,7 +239,10 @@ fn sticky_renewal_advances_membership_boundary_and_pending_is_bounded() {
     other.created_ts = 250; // refresh of the same sticky membership
     reader.observe(&own, &[own.clone(), other.clone()], 250);
     for i in 0..300 {
-        reader.remember_pending(json!({"event_id":format!("${i}")}));
+        reader.remember_pending(LiveEnvelope {
+            value: json!({"event_id":format!("${i}")}),
+            received_at: web_time::Instant::now(),
+        });
     }
     assert_eq!(reader.pending.len(), 256);
     assert!(
@@ -253,6 +256,45 @@ fn sticky_renewal_advances_membership_boundary_and_pending_is_bounded() {
             .is_some()
     );
     assert_eq!(own.user_id, owned_user_id!("@me:example.org"));
+}
+
+#[test]
+fn moderation_uses_server_age_and_elapsed_delivery_time_not_wall_clock() {
+    use crate::protocol::{CallSessionId, CoreEvent};
+    use std::time::Duration;
+    use web_time::Instant;
+
+    let envelope = json!({
+        "type": EVENT_TYPE, "event_id": "$control", "sender": "@alice:example.org",
+        "origin_server_ts": 1000, "content": { (super::MODERATE): {} },
+    });
+    let now = Instant::now();
+    let received = now.checked_sub(Duration::from_secs(2)).unwrap();
+    let signal = |age| super::moderation(&envelope, CallSessionId(1), age, received);
+    assert!(matches!(
+        signal(Some(10_000)),
+        Some(CoreEvent::CallControlSignal {
+            requires_confirmation: false,
+            ..
+        })
+    ));
+    assert!(signal(Some(29_000)).is_none());
+    assert!(matches!(
+        signal(None),
+        Some(CoreEvent::CallControlSignal {
+            requires_confirmation: true,
+            ..
+        })
+    ));
+    assert!(
+        super::moderation(
+            &envelope,
+            CallSessionId(1),
+            None,
+            now.checked_sub(Duration::from_secs(31)).unwrap(),
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -753,7 +795,7 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
         )
         .with_admission_roster(),
     ));
-    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
     let (_wake, _handlers, _keys) =
         join_handlers(&core, 1, CallSessionId(1), &room, &state, false).await;
     let encrypted = json!({"type":"m.room.encrypted", "sender":alice.user_id().unwrap(),
@@ -809,6 +851,71 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
         state.lock().await.termination.ended.is_none(),
         "stale decrypted event must not end a rejoined call"
     );
+    // Directed controls use the encrypted live path but are not terminations.
+    let content = json!({
+        "id": "directed-control",
+        "kind": "request",
+        "from": {"user_id": alice.user_id().unwrap(), "member_id": "alice-member", "joined_ts": null},
+        "to": {"user_id": bob.user_id().unwrap(), "member_id": "bob-member", "joined_ts": null},
+        "action": "mute"
+    });
+    alice_room
+        .send_raw(EVENT_TYPE, json!({ (super::MODERATE): content }))
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let control_ciphertext = requests
+        .iter()
+        .filter(|request| request.url.path().contains("/send/m.room.encrypted/"))
+        .last()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&control_ciphertext.body).contains(super::MODERATE));
+    let mut control_event = encrypted.clone();
+    control_event["event_id"] = json!("$call-control:example.org");
+    control_event["origin_server_ts"] = json!(399);
+    control_event["content"] = serde_json::from_slice(&control_ciphertext.body).unwrap();
+    server
+        .sync_room(
+            &bob,
+            JoinedRoomBuilder::new(room_id).add_timeline_event(
+                Raw::<AnySyncTimelineEvent>::from_json_string(control_event.to_string()).unwrap(),
+            ),
+        )
+        .await;
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let crate::protocol::CoreEvent::CallControlSignal {
+                session,
+                sender,
+                origin_server_ts,
+                requires_confirmation,
+                content,
+            } = events.recv().await.unwrap()
+            {
+                break (
+                    session,
+                    sender,
+                    origin_server_ts,
+                    requires_confirmation,
+                    content,
+                );
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        received,
+        (
+            CallSessionId(1),
+            alice.user_id().unwrap().to_string(),
+            399,
+            true,
+            content
+        )
+    );
+    assert!(state.lock().await.termination.ended.is_none());
+
     // Send a fresh encrypted message (a fresh Megolm index, not a replay).
     alice_room.send_raw(EVENT_TYPE, payload).await.unwrap();
     let requests = server.received_requests().await.unwrap();

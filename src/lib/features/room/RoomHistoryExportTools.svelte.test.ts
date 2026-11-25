@@ -47,7 +47,11 @@ test('opening history allows immediate export of the current window without fetc
   expect(await file.text()).toContain('较早的记录尚未读完；尚未读到最新的记录');
   expect(await file.text()).toContain('Current message');
 
-  readPage.mockResolvedValue({ cursor: null, items: [timelineItem('all', 'All history')] });
+  readPage.mockResolvedValue({
+    cursor: null,
+    items: [timelineItem('all', 'All history')],
+    has_undecryptable_events: false,
+  });
   await fireEvent.click(dialog.getByRole('button', { name: '读取全部历史' }));
   await dialog.findByText('All history');
   expect(readPage).toHaveBeenCalledExactlyOnceWith({
@@ -68,6 +72,7 @@ test('the selected date range governs the same preview and export', async () => 
     .mockResolvedValueOnce({
       items: [timelineItem('upper', 'Last message', { timestamp: end.getTime() })],
       cursor: { from: 'older', stop_at: '$stop' },
+      has_undecryptable_events: true,
     })
     .mockReturnValueOnce(next.promise);
   const { panel, download } = openRoomHistory(readPage);
@@ -91,18 +96,25 @@ test('the selected date range governs the same preview and export', async () => 
       }),
     ],
     cursor: null,
+    has_undecryptable_events: false,
   });
   await dialog.findByText('First message https://example.org/first');
   expect(dialog.getByText('Last message')).toBeVisible();
   expect(dialog.getByRole('button', { name: '导出 2 条 ▾' })).toBeEnabled();
+  expect(dialog.getByText(/查询完成 · 可读 2 条 · 有加密事件无法解密/)).toBeVisible();
 
-  await fireEvent.click(dialog.getByRole('button', { name: '导出 2 条 ▾' }));
-  await fireEvent.click(dialog.getByRole('button', { name: 'TXT (.txt)' }));
-  const file = download.mock.calls[0]?.[0];
-  assert(file instanceof Blob);
-  expect(await file.text()).toContain('First message https://example.org/first');
-  expect(await file.text()).toContain('Last message');
-  expect(await file.text()).toContain('00:00 至');
+  for (const format of ['TXT (.txt)', 'Markdown (.md)', 'HTML (.html)']) {
+    await fireEvent.click(dialog.getByRole('button', { name: '导出 2 条 ▾' }));
+    await fireEvent.click(dialog.getByRole('button', { name: format }));
+    const file = download.mock.lastCall?.[0];
+    assert(file instanceof Blob);
+    const text = await file.text();
+    expect(text).toContain('First message https://example.org/first');
+    expect(text).toContain('Last message');
+    expect(text).toContain('00:00 至');
+    expect(text).toContain('有加密事件无法解密，未纳入结果');
+    expect(text).not.toContain('未读完');
+  }
   expect(readPage).toHaveBeenCalledTimes(2);
 });
 
@@ -115,8 +127,14 @@ test('cancelled and stale results cannot complete or expand a partial export', a
     .mockResolvedValueOnce({
       items: [timelineItem('partial', 'Partial result', { timestamp: yesterday.getTime() })],
       cursor: { from: 'older', stop_at: '$stop' },
+      has_undecryptable_events: true,
     })
-    .mockReturnValueOnce(next.promise);
+    .mockReturnValueOnce(next.promise)
+    .mockResolvedValueOnce({
+      items: [timelineItem('new', 'New result', { timestamp: Date.now() })],
+      cursor: null,
+      has_undecryptable_events: false,
+    });
   const { panel, download } = openRoomHistory(readPage);
   await fireEvent.click(panel.getByRole('button', { name: '查看及导出聊天记录' }));
   const dialog = within(panel.getByRole('dialog'));
@@ -129,15 +147,21 @@ test('cancelled and stale results cannot complete or expand a partial export', a
   const file = download.mock.calls[0]?.[0];
   assert(file instanceof Blob);
   expect(await file.text()).toContain('所选时段未读完');
+  expect(await file.text()).toContain('有加密事件无法解密，未纳入结果');
 
   await fireEvent.click(dialog.getByRole('button', { name: '今天' }));
   expect(dialog.queryByText('Partial result')).toBeNull();
+  expect(dialog.getByText('查询后显示所选时段的记录')).toBeVisible();
+  await fireEvent.click(dialog.getByRole('button', { name: '查询' }));
+  await dialog.findByText('New result');
   await act(() => {
     next.resolve({
       items: [timelineItem('stale', 'Stale result', { timestamp: Date.now() })],
       cursor: null,
+      has_undecryptable_events: true,
     });
   });
-  expect(dialog.getByText('查询后显示所选时段的记录')).toBeVisible();
+  expect(dialog.getByText('查询完成 · 共 1 条')).toBeVisible();
   expect(dialog.queryByText('Stale result')).toBeNull();
+  expect(dialog.queryByText(/无法解密/)).toBeNull();
 });

@@ -156,7 +156,7 @@ test('the preview and all downloads use the same reconciled messages', async () 
     reachesStart: () => true,
     reachesLatest: () => true,
     members: () => [],
-    readPage: () => Promise.resolve({ items: [], cursor: null }),
+    readPage: () => Promise.resolve({ items: [], cursor: null, has_undecryptable_events: false }),
     jumpToMessage: () => {},
   };
   const download = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:history');

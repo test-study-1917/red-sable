@@ -36,7 +36,7 @@
       participants: [{ identity: '@alice:matrix.org', camera: undefined, microphone: track }],
     },
     roomFor: () => undefined,
-    canModerateParticipant: () => false,
+    participantControl: () => undefined,
   } as unknown as CallSession;
   const members: MemberView[] = [
     {

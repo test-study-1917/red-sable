@@ -12,8 +12,6 @@ import type {
 } from './call-transport';
 import { idleTransportState, ignoreError } from './call-transport';
 import { createLivekitTransport, type LivekitTransport } from './livekit-transport';
-import type { CallModerationHandler } from './peer-call-moderation';
-import { CallModerationError } from './call-moderation';
 
 export type MultiSfuTransportDeps = {
   createTransport?: (options: Parameters<typeof createLivekitTransport>[0]) => LivekitTransport;
@@ -44,7 +42,6 @@ export function createMultiSfuTransport(
   let queue = Promise.resolve();
   let disposed = false;
   let desiredBackends = new Map<string, CallBackendGrant>();
-  let moderationHandler: CallModerationHandler | undefined;
   const unreachable = new Set<string>();
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryDelay = RETRY_FIRST_MS;
@@ -138,7 +135,6 @@ export function createMultiSfuTransport(
       telemetryAttributes,
     });
     transports.set(backend.id, transport);
-    transport.setModerationHandler?.(moderationHandler);
     const forget = (): void => {
       if (transports.get(backend.id) !== transport) return;
       transports.delete(backend.id);
@@ -290,15 +286,6 @@ export function createMultiSfuTransport(
       return () => listeners.delete(listener);
     },
     getState: () => ({ ...state, participants: [...state.participants] }),
-    moderateParticipant: async (identity, action, signal, backendId) => {
-      const transport = backendId ? transports.get(backendId) : undefined;
-      if (!transport?.moderateParticipant) throw new CallModerationError('unavailable');
-      await transport.moderateParticipant(identity, action, signal);
-    },
-    setModerationHandler: (handler) => {
-      moderationHandler = handler;
-      for (const transport of transports.values()) transport.setModerationHandler?.(handler);
-    },
     capabilities: {
       screenShare: {
         setEnabled: async (enabled, audio) =>

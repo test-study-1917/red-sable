@@ -497,6 +497,16 @@ pub enum CoreEvent {
         local: bool,
     },
 
+    CallControlSignal {
+        session: CallSessionId,
+        sender: String,
+        #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
+        origin_server_ts: u64,
+        requires_confirmation: bool,
+        #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Unknown))]
+        content: serde_json::Value,
+    },
+
     CallMembers {
         session: CallSessionId,
         members: Vec<CallMemberView>,
@@ -886,6 +896,7 @@ pub struct CallMemberView {
     pub user_id: OwnedUserId,
     pub device_id: String,
     pub identity: String,
+    pub member_id: Option<String>,
     pub backend_id: Option<String>,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub joined_ts: u64,

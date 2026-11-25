@@ -4,6 +4,12 @@ import { render } from 'vitest-browser-svelte';
 import { expectNoA11yViolations } from '#lib/test-support/a11y.js';
 
 import CallEndHarness from './CallEndHarness.test.svelte';
+import CallParticipantActions from './CallParticipantActions.svelte';
+
+vi.hoisted(() => {
+  Object.defineProperty(navigator, 'languages', { configurable: true, value: ['en-US'] });
+  Object.defineProperty(navigator, 'language', { configurable: true, value: 'en-US' });
+});
 
 for (const { name, width, compact, collapsed } of [
   { name: 'main call', width: 1200, compact: false, collapsed: false },
@@ -112,3 +118,24 @@ for (const compact of [false, true]) {
     release();
   });
 }
+
+test('confirming removal keeps the action selected before a roster update', async () => {
+  await page.viewport(1200, 800);
+  const oldMembership = vi.fn();
+  const newMembership = vi.fn();
+  const screen = await render(CallParticipantActions, {
+    name: 'Bob',
+    muted: false,
+    busy: false,
+    onModerate: oldMembership,
+  });
+  await userEvent.click(screen.getByRole('button', { name: 'Call controls for Bob' }));
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Remove Bob from call' }));
+  await expect
+    .element(screen.getByRole('dialog', { name: 'Remove Bob from this call?' }))
+    .toBeVisible();
+  await screen.rerender({ onModerate: newMembership });
+  await userEvent.click(screen.getByRole('button', { name: 'Remove from call' }));
+  expect(oldMembership).toHaveBeenCalledExactlyOnceWith('remove');
+  expect(newMembership).not.toHaveBeenCalled();
+});
