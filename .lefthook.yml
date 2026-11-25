@@ -45,13 +45,24 @@ pre-commit:
       run: pnpm exec stylelint --fix --max-warnings 0 {staged_files}
       stage_fixed: true
 
-    - name: rust-fmt
-      glob: '*.rs'
-      run: cargo fmt --all
-      stage_fixed: true
-
     - name: typos
       run: mise exec -- typos --force-exclude {staged_files}
+
+    - name: settings-changes
+      glob:
+        - 'src/lib/settings/registry/*'
+        - 'src/lib/settings/registry.ts'
+        - 'src/lib/settings/preferences.svelte.ts'
+        - 'package.json'
+      run: node scripts/generate/settings-changes.mjs --check
+
+    - name: config-reference
+      glob:
+        - 'src/lib/settings/**'
+        - 'src/lib/config/**'
+        - 'src/locales/en.json'
+      run: pnpm exec vitest run --project node src/lib/config/config-reference.test.ts
+      fail_text: 'docs/settings.md or a config schema is stale, run pnpm vitest run --project node src/lib/config/config-reference.test.ts -u'
 
 pre-push:
   parallel: true

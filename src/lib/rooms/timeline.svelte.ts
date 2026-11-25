@@ -131,6 +131,11 @@ export class RoomTimeline {
     );
   }
 
+  loadedItems(roomId: string, hiddenEvents: boolean): readonly TimelineItemView[] {
+    if (this.serves(roomId, hiddenEvents)) return this.items;
+    return this.snapshots?.get(`${roomId}/${hiddenEvents}`)?.items ?? [];
+  }
+
   private subscription: SubscriptionId | null = null;
   private target: { roomId: string; mode: TimelineMode; hiddenEvents: boolean } | null = null;
   private unsubscribeEvents: (() => void) | null = null;

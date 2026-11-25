@@ -80,6 +80,7 @@
 
   let roomName = $derived.by(() => {
     const member = findMember(members, sender);
+    // eslint-disable-next-line no-restricted-properties -- before the profile name
     return member ? member.display_name : (reply.sender_name ?? target?.sender_name ?? null);
   });
   let nameBase = $derived(
@@ -329,12 +330,13 @@
     white-space: normal;
   }
 
-  .reply-expanded .reply-copy > span {
+  .reply-expanded .reply-body {
     -webkit-box-orient: vertical;
     display: -webkit-box;
-    -webkit-line-clamp: 6;
-    line-clamp: 6;
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
     overflow: hidden;
+    white-space: pre-wrap;
   }
 
   .reply-preview:is(:hover, :focus-visible) .reply-body {

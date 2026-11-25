@@ -18,6 +18,7 @@ const storybookProject = (theme: 'light' | 'dark') => ({
   ...mergeConfig(
     viteConfig,
     defineProject({
+      optimizeDeps: { include: ['katex'] },
       plugins: [
         storybookTest({ configDir: '.storybook', initialGlobals: { theme } }),
         {
@@ -34,7 +35,7 @@ const storybookProject = (theme: 'light' | 'dark') => ({
       ],
       test: {
         name: `storybook-${theme}`,
-        setupFiles: ['./.storybook/vitest.setup.ts'],
+        maxWorkers: 4,
         browser: {
           enabled: true,
           headless: true,
@@ -78,6 +79,7 @@ export default mergeConfig(
     resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
     test: {
       maxWorkers: 4,
+      silent: 'passed-only',
       setupFiles: ['./tests/vitest-setup.ts'],
       // Async mode schedules updates on animation frames, which would never fire if faked.
       fakeTimers: {
@@ -174,7 +176,7 @@ export default mergeConfig(
       ],
       coverage: {
         provider: 'v8',
-        reporter: ['text', 'html', 'lcov'],
+        reporter: ['text-summary', 'html', 'lcov'],
         include: ['src/**/*.{ts,svelte}'],
         exclude: [
           'src/**/*.d.ts',

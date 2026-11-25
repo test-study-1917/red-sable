@@ -3,7 +3,7 @@ use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::TimelineEventType;
-use matrix_sdk::ruma::push::Action;
+use matrix_sdk::ruma::push::{Action, Ruleset};
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{EventId, MilliSecondsSinceUnixEpoch, OwnedUserId, RoomId};
 use matrix_sdk_ui::notification_client::{
@@ -81,7 +81,9 @@ pub(super) async fn fetch_push_event_with(
             if event.sender_display_name.is_none() {
                 event.sender_display_name = Some(sender_name(client, room_id, &event.sender).await);
             }
-            PushFetchView::Event { event }
+            PushFetchView::Event {
+                event: Box::new(event),
+            }
         }
         Ok(NotificationStatus::EventFilteredOut | NotificationStatus::EventRedacted) => {
             PushFetchView::Discard
@@ -148,7 +150,8 @@ fn push_event_view(item: NotificationItem) -> Option<PushEventView> {
         RawNotificationEvent::Invite(raw) => raw.json().get(),
     };
     let mut event: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let noisy = item.is_noisy == Some(true) || item.has_mention == Some(true);
+    let mention = item.has_mention == Some(true);
+    let noisy = item.is_noisy == Some(true) || mention;
     Some(PushEventView {
         event_type: event.get("type")?.as_str()?.to_owned(),
         content: event
@@ -157,18 +160,24 @@ fn push_event_view(item: NotificationItem) -> Option<PushEventView> {
             .unwrap_or_default(),
         sender: item.event.sender().to_string(),
         sender_display_name: item.sender_display_name.and_then(visible_name),
+        sender_avatar_url: item.sender_avatar_url,
         room_name: item.room_computed_display_name,
         room_avatar_url: item.room_avatar_url,
         encrypted: item.is_room_encrypted == Some(true),
         noisy,
+        mention,
     })
 }
 
 pub use crate::push_rules::notifies;
 
 #[must_use]
-pub fn uses_direct_push_rules(room: &matrix_sdk::Room) -> bool {
-    room.joined_members_count() == 2
+pub fn uses_direct_push_rules(rules: &Ruleset, room: &matrix_sdk::Room) -> bool {
+    crate::push_rules::direct_defaults(
+        rules,
+        room.direct_targets_length() != 0,
+        room.joined_members_count() == 2,
+    )
 }
 
 pub async fn every_encrypted_event_pushed(client: &Client) -> bool {

@@ -99,6 +99,7 @@ async fn setup_room(
         created_ts: crate::now_ms(),
         joined_ts: crate::now_ms(),
         expires_at_ms: None,
+        sticky_event_id: None,
         foci: vec!["wss://focus.example.org".to_owned()],
         screen_sharing: false,
         wire,

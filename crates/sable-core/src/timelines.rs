@@ -25,7 +25,7 @@ use matrix_sdk_common::serde_helpers::{extract_relation, extract_thread_root};
 
 use crate::ResultExt;
 use crate::protocol::{RpcCode, RpcError, SubscriptionId, TimelineItemView};
-use crate::view::{CUTE_EVENT_MSGTYPE, aggregation_item};
+use crate::view::aggregation_item;
 
 use crate::{CachedTimeline, Core, SubscriptionKind, ThreadKey};
 
@@ -453,10 +453,13 @@ pub(crate) fn hidden_event_filter(event: &AnySyncTimelineEvent, rules: &RoomVers
 // Ruma's parsed custom-event content drops unknown fields. Test the raw
 // content when building hidden aggregation rows instead of hiding every
 // io.element.call.reaction (which would also hide ordinary reactions).
-fn is_call_termination(event_type: &str, content: Option<&serde_json::Value>) -> bool {
+fn is_call_control(event_type: &str, content: Option<&serde_json::Value>) -> bool {
     event_type == "io.element.call.terminate"
         || (event_type == "io.element.call.reaction"
-            && content.is_some_and(|content| content.get("io.element.call.terminate").is_some()))
+            && content.is_some_and(|content| {
+                content.get("io.element.call.terminate").is_some()
+                    || content.get(crate::calls::MODERATION_EVENT_KEY).is_some()
+            }))
 }
 
 pub(crate) fn aggregation_items(
@@ -472,7 +475,7 @@ pub(crate) fn aggregation_items(
                 return None;
             }
             let content = event.raw().get_field::<serde_json::Value>("content").ok()?;
-            if is_call_termination(&parsed.event_type().to_string(), content.as_ref()) {
+            if is_call_control(&parsed.event_type().to_string(), content.as_ref()) {
                 return None;
             }
             let redacts = match &parsed {
@@ -487,17 +490,16 @@ pub(crate) fn aggregation_items(
 }
 
 fn timeline_event_filter(event: &AnySyncTimelineEvent, rules: &RoomVersionRules) -> bool {
-    !is_signaling_event(event) && (default_event_filter(event, rules) || is_cute_event(event))
+    !is_signaling_event(event) && (default_event_filter(event, rules) || is_original_message(event))
 }
 
-fn is_cute_event(event: &AnySyncTimelineEvent) -> bool {
+fn is_original_message(event: &AnySyncTimelineEvent) -> bool {
     let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(message)) = event
     else {
         return false;
     };
     message.as_original().is_some_and(|message| {
-        message.content.msgtype.msgtype() == CUTE_EVENT_MSGTYPE
-            && !matches!(message.content.relates_to, Some(Relation::Replacement(_)))
+        !matches!(message.content.relates_to, Some(Relation::Replacement(_)))
     })
 }
 
@@ -653,6 +655,10 @@ mod tests {
                 "io.element.call.reaction",
                 serde_json::json!({"io.element.call.terminate":{"terminated_by":"@alice:example.org","timestamp":1}}),
             ),
+            raw(
+                "io.element.call.reaction",
+                serde_json::json!({"io.element.call.moderate":{"kind":"request"}}),
+            ),
         ];
         for control in &controls {
             let parsed = control.deserialize().unwrap();
@@ -675,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn fluffychat_cute_events_reach_the_timeline() {
+    fn custom_msgtypes_reach_the_timeline() {
         let rules = ruma::room_version_rules::RoomVersionRules::V11;
         let event = |content: &str| {
             Raw::<ruma::events::AnySyncTimelineEvent>::from_json_string(format!(
@@ -690,7 +696,15 @@ mod tests {
         assert!(super::timeline_event_filter(&hug, &rules));
 
         let other = event(r#"{"msgtype":"com.example.custom","body":"x"}"#);
-        assert!(!super::timeline_event_filter(&other, &rules));
+        assert!(super::timeline_event_filter(&other, &rules));
+
+        let effect = event(r#"{"msgtype":"nic.custom.confetti","body":"hi"}"#);
+        assert!(super::timeline_event_filter(&effect, &rules));
+
+        let edit = event(
+            r#"{"msgtype":"com.example.custom","body":"* x","m.new_content":{"msgtype":"com.example.custom","body":"x"},"m.relates_to":{"rel_type":"m.replace","event_id":"$a"}}"#,
+        );
+        assert!(!super::timeline_event_filter(&edit, &rules));
     }
 
     #[test]

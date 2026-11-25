@@ -1,7 +1,7 @@
 use std::{
     ffi::{CString, OsStr},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -375,7 +375,9 @@ fn media_resource(asset: &PHAsset) -> Option<(Retained<PHAssetResource>, String)
 }
 
 fn recent_media_blocking(limit: usize) -> Result<Vec<RecentMedia>, String> {
-    authorize_blocking(PHAccessLevel::ReadWrite)?;
+    if !matches!(media_access(), "granted" | "limited") {
+        return Ok(Vec::new());
+    }
     autoreleasepool(|_| {
         let newest = NSSortDescriptor::sortDescriptorWithKey_ascending(
             Some(&NSString::from_str("creationDate")),
@@ -521,11 +523,36 @@ fn media_file_blocking(id: &str) -> Result<Vec<u8>, String> {
     result
 }
 
+fn media_access() -> &'static str {
+    // SAFETY: a class method that only reads the current authorization and is callable from any thread
+    match unsafe { PHPhotoLibrary::authorizationStatusForAccessLevel(PHAccessLevel::ReadWrite) } {
+        PHAuthorizationStatus::Authorized => "granted",
+        PHAuthorizationStatus::Limited => "limited",
+        PHAuthorizationStatus::NotDetermined => "unasked",
+        _ => "denied",
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct RecentMediaList {
+    access: &'static str,
+    items: Vec<RecentMedia>,
+}
+
 #[tauri::command]
-pub(crate) async fn recent_media(limit: usize) -> Result<Vec<RecentMedia>, String> {
-    tauri::async_runtime::spawn_blocking(move || recent_media_blocking(limit))
-        .await
-        .map_err(|error| error.to_string())?
+pub(crate) async fn recent_media(limit: usize, request: bool) -> Result<RecentMediaList, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request {
+            // A refusal is reported through `access`, not as a failure.
+            let _ = authorize_blocking(PHAccessLevel::ReadWrite);
+        }
+        Ok(RecentMediaList {
+            access: media_access(),
+            items: recent_media_blocking(limit)?,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -889,6 +916,38 @@ fn end_background_task(task: &AtomicUsize) {
         // SAFETY: identifier came from beginBackgroundTask and the swap above ensures it is ended only once
         let _: () = unsafe { msg_send![shared_application(), endBackgroundTask: identifier] };
     }
+}
+
+#[link(name = "AudioToolbox", kind = "framework")]
+unsafe extern "C" {
+    fn AudioServicesCreateSystemSoundID(url: &NSURL, sound: *mut u32) -> i32;
+    fn AudioServicesPlaySystemSound(sound: u32);
+}
+
+#[tauri::command]
+pub(crate) fn play_notification_chime() -> Result<(), String> {
+    static CHIME: OnceLock<Result<u32, String>> = OnceLock::new();
+    let sound = CHIME
+        .get_or_init(|| {
+            let url = objc2_foundation::NSBundle::mainBundle()
+                .URLForResource_withExtension(
+                    Some(&NSString::from_str("msg")),
+                    Some(&NSString::from_str("caf")),
+                )
+                .ok_or_else(|| "msg.caf is missing from the app bundle".to_owned())?;
+            let mut sound = 0;
+            // SAFETY: NSURL is toll-free bridged to CFURL and `sound` is a valid out pointer
+            let status = unsafe { AudioServicesCreateSystemSoundID(&url, &raw mut sound) };
+            if status == 0 {
+                Ok(sound)
+            } else {
+                Err(format!("AudioServicesCreateSystemSoundID: {status}"))
+            }
+        })
+        .clone()?;
+    // SAFETY: the sound came from AudioServicesCreateSystemSoundID and is never disposed
+    unsafe { AudioServicesPlaySystemSound(sound) };
+    Ok(())
 }
 
 #[tauri::command]

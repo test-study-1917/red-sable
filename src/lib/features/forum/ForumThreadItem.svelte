@@ -30,19 +30,14 @@
   import PlayIcon from 'phosphor-svelte/lib/PlayIcon';
   import PushPinIcon from 'phosphor-svelte/lib/PushPinIcon';
 
+  import type { ForumThreadCallbacks } from './forum-thread-callbacks';
   import { VOTE, type ForumLayout, type ForumThread } from './forum-threads';
 
-  interface Props {
+  interface Props extends ForumThreadCallbacks {
     thread: ForumThread;
-    onOpen: (eventId: string) => void;
     canDelete: boolean;
-    onEdit?: (thread: ForumThread) => void;
-    onDelete: (eventId: string, reason: string | null) => void;
     roomId: string;
-    onReact?: (eventId: string, key: string) => void;
-    onCopyLink: (eventId: string, format?: 'matrix' | 'external') => void;
     pinned?: boolean;
-    onPin?: (eventId: string) => void;
     layout?: ForumLayout;
   }
 
@@ -304,7 +299,8 @@
     background: var(--surface-container-hover);
   }
 
-  @media (any-hover: hover) and (any-pointer: fine) {
+  /* Not any-hover: phones report it, and a tap there shows actions that vanish on release. */
+  @media (hover: hover) and (pointer: fine) {
     .forum-thread-card:hover :global(.message-actions),
     .forum-thread-card:focus-within :global(.message-actions) {
       opacity: 1;

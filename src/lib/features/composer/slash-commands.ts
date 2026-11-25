@@ -61,7 +61,7 @@ export type SlashOutcome =
   | { kind: 'gifSearch'; query: string }
   | { kind: 'bugReport' }
   | { kind: 'knock'; address: string; via: string[] }
-  | { kind: 'done' }
+  | { kind: 'done'; notice?: { key: string; values?: Record<string, string> } }
   | { kind: 'error'; key: string; values?: Record<string, string> };
 
 export type SlashResult = Exclude<SlashOutcome, { kind: 'error' }>;
@@ -368,17 +368,24 @@ async function run(
     case 'leave':
       await rpc.rooms.leave({ room_id: roomId });
       return DONE;
-    case 'invite':
-      await rpc.rooms.invite({ room_id: roomId, user_id: invocation.user_id });
-      return DONE;
+    case 'invite': {
+      const history = await rpc.rooms.invite({ room_id: roomId, user_id: invocation.user_id });
+      return history === 'failed'
+        ? {
+            kind: 'done',
+            notice: { key: 'room.inviteSentHistoryFailed', values: { user: invocation.user_id } },
+          }
+        : DONE;
+    }
     case 'share_history': {
       const outcome = await rpc.encryption.shareHistory({
         room_id: roomId,
         user_id: invocation.user_id,
       });
+      const values = { user: invocation.user_id };
       return outcome === 'shared'
-        ? DONE
-        : { kind: 'error', key: `composer.slashShareHistory.${outcome}` };
+        ? { kind: 'done', notice: { key: 'composer.slashShareHistory.shared', values } }
+        : { kind: 'error', key: `composer.slashShareHistory.${outcome}`, values };
     }
     case 'kick':
       return moderate(name, invocation, 'kick', true, context);

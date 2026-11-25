@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, assert, beforeEach, expect, test, vi } from 'vitest';
 
 import type { CoreEvent } from '#src/generated/protocol';
 import type { CoreClient } from '#lib/core/client.svelte.js';
@@ -59,6 +59,7 @@ import type { CallTransportConnectOptions } from './call-transport';
 import { resetCallOwner } from './call-owner';
 import type { CallTransport, CallTransportState } from './call-transport';
 import { idleTransportState, ScreenAudioError } from './call-transport';
+import { CALL_CONTROL_KEY } from './call-moderation';
 
 type Harness = {
   client: CoreClient;
@@ -208,6 +209,187 @@ afterEach(() => {
   sentry.captureException.mockClear();
 });
 
+const ownControl = {
+  user_id: '@kris:example.org',
+  member_id: '@kris:example.org:LAPTOP',
+  joined_ts: 1000,
+};
+const peerControl = {
+  user_id: '@bob:example.org',
+  member_id: 'peer-per-join-id',
+  joined_ts: null,
+};
+
+async function moderationHarness() {
+  const h = harness();
+  const sendRawEvent = vi
+    .fn<CoreClient['rpc']['messages']['sendRawEvent']>()
+    .mockResolvedValue('$control');
+  h.client.rpc.messages = { ...h.client.rpc.messages, sendRawEvent };
+  const session = new CallSession(h.client, { createTransport: () => h.transport });
+  await session.join('!room:example.org', { microphone: true, camera: false });
+  const participant = {
+    identity: 'another-frontend',
+    backendId: 'remote',
+    microphone: { id: 'mic', muted: false, subscribed: true },
+  };
+  h.emit({
+    type: 'call_members',
+    session: 7,
+    members: [
+      {
+        ...ownControl,
+        device_id: 'LAPTOP',
+        backend_id: null,
+        identity: defaultGrant.identity,
+        screen_sharing: false,
+      },
+      {
+        ...peerControl,
+        joined_ts: 2000,
+        device_id: 'PHONE',
+        backend_id: 'remote',
+        identity: participant.identity,
+        screen_sharing: false,
+      },
+    ],
+  });
+  h.emitTransportState({
+    ...h.transport.getState(),
+    participants: [participant],
+  });
+  const receive = (
+    content: unknown,
+    sender = peerControl.user_id,
+    requires_confirmation = false
+  ) => {
+    h.emit({
+      type: 'call_control_signal',
+      session: 7,
+      sender,
+      origin_server_ts: 10_000,
+      requires_confirmation,
+      content,
+    });
+  };
+  return { ...h, session, participant, sendRawEvent, receive };
+}
+
+test('a Matrix acknowledgement from the selected participant confirms the call action', async () => {
+  const h = await moderationHarness();
+  const control = h.session.participantControl(h.participant);
+  assert(control);
+  const pending = control('mute');
+  expect(h.session.moderationPending).toBe(true);
+  const [request] = h.sendRawEvent.mock.calls;
+  const content = request[0].content as Record<string, { id: string }>;
+  const { id } = content[CALL_CONTROL_KEY];
+  expect(id).toEqual(expect.any(String));
+  expect(h.sendRawEvent).toHaveBeenCalledWith({
+    room_id: '!room:example.org',
+    event_type: 'io.element.call.reaction',
+    content: {
+      [CALL_CONTROL_KEY]: {
+        id,
+        from: ownControl,
+        to: peerControl,
+        kind: 'request',
+        action: 'mute',
+      },
+    },
+  });
+  const response = {
+    id,
+    from: peerControl,
+    to: ownControl,
+    kind: 'response',
+    result: 'ok',
+  };
+  h.receive(response, '@somebody:example.org');
+  expect(h.session.moderationPending).toBe(true);
+  h.receive(response, peerControl.user_id, true);
+  await pending;
+  expect(h.session.moderationPending).toBe(false);
+  expect(h.session.moderationError).toBeNull();
+  await h.session.leave();
+});
+
+test('a current peer can mute or remove this device without ending the call for everyone', async () => {
+  const h = await moderationHarness();
+  const packet = {
+    id: 'sable-control',
+    from: peerControl,
+    to: ownControl,
+    kind: 'request',
+    action: 'mute',
+  };
+  h.receive(packet);
+  await vi.waitFor(() => {
+    expect(h.sendRawEvent).toHaveBeenCalledOnce();
+  });
+  expect(h.session.microphoneEnabled).toBe(false);
+  expect(h.transport.setMicrophoneEnabled).toHaveBeenCalledWith(false);
+  await h.session.setMicrophoneEnabled(true);
+  h.receive(packet);
+  expect(h.session.microphoneEnabled).toBe(true);
+  h.receive({ ...packet, id: 'remove', action: 'remove' });
+  await vi.waitFor(() => {
+    expect(h.session.lifecycle).toBe('idle');
+  });
+  expect(h.leaveCall).toHaveBeenCalledOnce();
+  expect(h.endCall).not.toHaveBeenCalled();
+  expect(h.sendRawEvent).toHaveBeenCalledTimes(2);
+});
+
+test('unmatched targets, nonparticipants, and previous join generations cannot affect a call', async () => {
+  const h = await moderationHarness();
+  const packet = {
+    id: 'sable-control',
+    from: peerControl,
+    to: ownControl,
+    kind: 'request',
+    action: 'mute',
+  };
+  h.receive({ ...packet, to: { ...ownControl, joined_ts: 900 } });
+  h.receive({ ...packet, to: { ...ownControl, member_id: '@kris:example.org:PHONE' } });
+  h.receive({ ...packet, from: { ...peerControl, member_id: 'left-call' } });
+  expect(h.session.microphoneEnabled).toBe(true);
+  expect(h.sendRawEvent).not.toHaveBeenCalled();
+  await h.session.leave();
+});
+
+test('a removal confirmed after the target rejoins cannot act on the new membership', async () => {
+  const h = await moderationHarness();
+  const confirmRemove = h.session.participantControl(h.participant);
+  assert(confirmRemove);
+  h.emit({
+    type: 'call_members',
+    session: 7,
+    members: h.session.members.map((member) =>
+      member.identity === h.participant.identity
+        ? { ...member, member_id: 'new-membership', joined_ts: 3000 }
+        : member
+    ),
+  });
+  await confirmRemove('remove');
+  expect(h.sendRawEvent).not.toHaveBeenCalled();
+  expect(h.session.moderationError).toBe('gone');
+  await h.session.leave();
+});
+
+test('leaving cancels a pending control and ignores its late response', async () => {
+  const h = await moderationHarness();
+  const control = h.session.participantControl(h.participant);
+  assert(control);
+  const pending = control('remove');
+  await control('remove');
+  expect(h.sendRawEvent).toHaveBeenCalledOnce();
+  await h.session.leave();
+  await pending;
+  expect(h.session.moderationPending).toBe(false);
+  expect(h.session.moderationError).toBeNull();
+});
+
 test('an unencrypted call connects without waiting for a key', async () => {
   const { client, transport } = harness();
   const session = new CallSession(client, { createTransport: () => transport });
@@ -279,6 +461,7 @@ test('a call tears down after a successful join reports disconnected', async () 
 
   await session.join('!room:example.org', { microphone: true, camera: false });
   expect(session.lifecycle).toBe('active');
+  sounds.played.length = 0;
 
   emitTransportState({ ...idleTransportState(), connection: 'disconnected' });
 
@@ -290,6 +473,7 @@ test('a call tears down after a successful join reports disconnected', async () 
     expect(leaveCall).toHaveBeenCalledOnce();
     expect(transport.disconnect).toHaveBeenCalledOnce();
   });
+  expect(sounds.played).toEqual(['call_leave']);
 
   const retry = new CallSession(client, { createTransport: () => transport });
   await retry.join('!other:example.org', { microphone: true, camera: false });
@@ -331,10 +515,12 @@ test('a connect promise does not make the session active while transport is stil
   expect(session.transport.connection).toBe('connecting');
   expect(session.lifecycle).toBe('connecting');
 
+  sounds.played.length = 0;
   resolveConnect();
   await joining;
   expect(session.lifecycle).toBe('failed');
   expect(session.failure).toBe('setup-failed');
+  expect(sounds.played).toEqual([]);
 });
 
 test('reconnecting and recovering leaves an active call intact', async () => {
@@ -508,6 +694,7 @@ test('a key for another session is ignored', async () => {
         device_id: 'X',
         identity: '@bob:example.org:X',
         backend_id: null,
+        member_id: null,
         joined_ts: 0,
         screen_sharing: false,
       },
@@ -527,6 +714,7 @@ test('the call is timed from the earliest member still in it', async () => {
     device_id: device,
     identity: `@bob:example.org:${device}`,
     backend_id: null,
+    member_id: null,
     joined_ts: joined,
     screen_sharing: false,
   });
@@ -1282,17 +1470,18 @@ test.each(['dismiss', 'recover', 'leave'])(
     vi.mocked(transport.setCameraEnabled).mockRejectedValueOnce(
       new DOMException('Device not found', 'NotFoundError')
     );
+    const backgroundTimers = vi.getTimerCount();
 
     await session.setCameraEnabled(true);
     expect(session.deviceError).toBe('camera');
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(backgroundTimers + 1);
 
     if (action === 'dismiss') session.clearDeviceError();
     else if (action === 'recover') await session.setCameraEnabled(true);
     else await session.leave();
 
     expect(session.deviceError).toBeNull();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(action === 'leave' ? 0 : backgroundTimers);
     await session.leave();
   }
 );
@@ -1320,6 +1509,7 @@ test('two devices of one account keep their own voice state', () => {
     device_id: device,
     identity: `@me:x:${device}`,
     backend_id: null,
+    member_id: null,
     joined_ts: 0,
     screen_sharing: false,
   });
@@ -1551,6 +1741,7 @@ function observeAnotherDevice(h: Harness): void {
         device_id: 'PHONE',
         identity: '@kris:example.org:PHONE',
         backend_id: null,
+        member_id: null,
         joined_ts: 1,
         screen_sharing: false,
       },
@@ -1576,6 +1767,7 @@ test('end call waits for the core event, retries failures and never changes ordi
         device_id: 'LAPTOP',
         identity: 'other-wire-identity-for-this-device',
         backend_id: null,
+        member_id: null,
         joined_ts: 1,
         screen_sharing: false,
       },

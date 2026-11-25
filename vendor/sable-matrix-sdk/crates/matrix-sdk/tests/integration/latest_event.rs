@@ -1,0 +1,93 @@
+use assert_matches::assert_matches;
+use matrix_sdk::{
+    cross_process_lock::CrossProcessLockConfig,
+    latest_events::LatestEventValue,
+    linked_chunk::{ChunkIdentifier, LinkedChunkId, Position, Update},
+    store::StoreConfig,
+    test_utils::mocks::MatrixMockServer,
+};
+use matrix_sdk_base::event_cache::store::{EventCacheStore, MemoryStore};
+use matrix_sdk_test::{TestRoom, User, async_test, event_factory::EventFactory};
+use ruma::event_id;
+use tokio::task::yield_now;
+
+#[async_test]
+async fn test_latest_event_is_recomputed_when_a_user_is_ignored() {
+    let room_id = TestRoom::Default;
+    let alice = User::Alice;
+    let bob = User::Bob;
+    let event_alice = event_id!("$ev0");
+    let event_bob = event_id!("$ev1");
+    let event_factory = EventFactory::new().default_room();
+
+    // Fill the event cache with one event.
+    let event_cache_store = MemoryStore::new();
+    event_cache_store
+        .handle_linked_chunk_updates(
+            LinkedChunkId::Room(room_id.into()),
+            vec![
+                Update::NewItemsChunk { previous: None, new: ChunkIdentifier::new(0), next: None },
+                Update::PushItems {
+                    at: Position::new(ChunkIdentifier::new(0), 0),
+                    items: vec![
+                        event_factory.text_msg("A").sender(alice).event_id(event_alice).into(),
+                        event_factory.text_msg("B").sender(bob).event_id(event_bob).into(),
+                    ],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let server = MatrixMockServer::new().await;
+    let client = server
+        .client_builder()
+        .on_builder(move |builder| {
+            builder.store_config(
+                StoreConfig::new(CrossProcessLockConfig::MultiProcess {
+                    holder_name: "foo".to_owned(),
+                })
+                .event_cache_store(event_cache_store),
+            )
+        })
+        .build()
+        .await;
+
+    // Create the room.
+    let _room = server.sync_default_joined_room(&client).await;
+
+    // Listen to the latest event to get updates.
+    let mut latest_event_stream = client
+        .latest_events()
+        .await
+        .unwrap()
+        .listen_and_subscribe_to_room(room_id.into())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // In some configurations, this makes the test non-flaky.
+    yield_now().await;
+
+    // The latest event is the one from Bob.
+    assert_matches!(
+        latest_event_stream.next_now().await,
+        LatestEventValue::Remote(event) => {
+            assert_eq!(event.event_id(), Some(event_bob));
+        }
+    );
+
+    // Let's ignore Bob now.
+    server
+        .mock_sync()
+        .ok_and_run(&client, |sync_builder| {
+            sync_builder.add_global_account_data(event_factory.ignored_user_list([bob.into()]));
+        })
+        .await;
+
+    // In some configurations, this makes the test non-flaky.
+    yield_now().await;
+
+    // The latest event is reset to `None` because the room has been cleared.
+    assert_matches!(latest_event_stream.next().await, Some(LatestEventValue::None));
+}

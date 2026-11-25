@@ -1,12 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use matrix_sdk::room::{ListThreadsOptions, Receipts};
+use matrix_sdk::deserialized_responses::TimelineEvent;
+use matrix_sdk::room::{ListThreadsOptions, MessagesOptions, Receipts};
 use matrix_sdk::ruma::api::Direction;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::room::get_event_by_timestamp;
 use matrix_sdk::ruma::api::error::ErrorKind;
-use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
+use matrix_sdk::ruma::events::{AnySyncTimelineEvent, fully_read::FullyReadEventContent};
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, UInt};
 use matrix_sdk_base::read_receipts::ReadReceipts;
 use matrix_sdk_ui::timeline::{RoomExt, Timeline, TimelineFocus};
@@ -33,6 +35,7 @@ domain! {
     event_items,
     events,
     timestamp_to_event,
+    history_page,
     list_threads,
     event_source,
     unredacted_event,
@@ -320,20 +323,198 @@ impl Handler for TimestampToEventParams {
     type Ok = Option<String>;
 
     async fn run(self, core: &Arc<Core>) -> Result<Option<String>, RpcError> {
-        let request = get_event_by_timestamp::v1::Request::new(
-            self.room_id,
-            MilliSecondsSinceUnixEpoch(UInt::new_saturating(self.ts)),
-            match self.direction {
-                PaginationDirection::Backward => Direction::Backward,
-                PaginationDirection::Forward => Direction::Forward,
-            },
-        );
+        let direction = match self.direction {
+            PaginationDirection::Backward => Direction::Backward,
+            PaginationDirection::Forward => Direction::Forward,
+        };
+        history_anchor(core, &self.room_id, self.ts, direction)
+            .await
+            .map(|event_id| event_id.map(|id| id.to_string()))
+    }
+}
 
-        match core.client().await?.send(request).await {
-            Ok(response) => Ok(Some(response.event_id.to_string())),
-            Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => Ok(None),
-            Err(error) => Err(core.rpc_error("timestamp_to_event", &error)),
-        }
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct HistoryPageCursor {
+    from: String,
+    #[cfg_attr(feature = "typegen", specta(type = Option<String>))]
+    stop_at: Option<OwnedEventId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct HistoryPageParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    room_id: OwnedRoomId,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    after: Option<u64>,
+    #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
+    before: Option<u64>,
+    cursor: Option<HistoryPageCursor>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct HistoryPageOk {
+    items: Vec<TimelineItemView>,
+    cursor: Option<HistoryPageCursor>,
+    /// At least one unredacted event in the requested range could not be decrypted.
+    has_undecryptable_events: bool,
+}
+
+impl Handler for HistoryPageParams {
+    type Ok = HistoryPageOk;
+
+    async fn run(self, core: &Arc<Core>) -> Result<HistoryPageOk, RpcError> {
+        let room = core.room(&self.room_id).await?;
+        let (from, stop_at) = match self.cursor {
+            Some(cursor) => (Some(cursor.from), cursor.stop_at),
+            None => {
+                // Use the first event after the interval so all events at the
+                // inclusive end time are reachable by backward pagination.
+                let upper_anchor = match self.before {
+                    Some(before) => {
+                        history_anchor(
+                            core,
+                            &self.room_id,
+                            before.saturating_add(1),
+                            Direction::Forward,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                let from = match upper_anchor {
+                    Some(anchor) => {
+                        let context = room
+                            .event_with_context(&anchor, false, UInt::from(0u8), None)
+                            .await
+                            .or_failed(core, "history_context")?;
+                        let Some(from) = context.prev_batch_token else {
+                            return Ok(HistoryPageOk::default());
+                        };
+                        Some(from)
+                    }
+                    None => None,
+                };
+                let stop_at = match self.after {
+                    Some(after) => {
+                        history_anchor(
+                            core,
+                            &self.room_id,
+                            after.saturating_sub(1),
+                            Direction::Backward,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                (from, stop_at)
+            }
+        };
+        let mut options = MessagesOptions::backward().from(from.as_deref());
+        options.limit = UInt::from(100u8);
+        let messages = room
+            .messages(options)
+            .await
+            .or_failed(core, "history_page")?;
+        let reached_start = stop_at.as_deref().is_some_and(|stop_at| {
+            messages
+                .chunk
+                .iter()
+                .any(|event| event.event_id() == Some(stop_at))
+        });
+        let cursor = match reached_start {
+            true => None,
+            false => messages.end.map(|from| HistoryPageCursor { from, stop_at }),
+        };
+
+        let push = room.push_context().await.ok().flatten();
+        let mut has_undecryptable_events = false;
+        let candidates = messages.chunk.into_iter().filter(|event| {
+            let Some(timestamp) = event.timestamp() else {
+                return false;
+            };
+            let timestamp = u64::from(timestamp.0);
+            if self.after.is_some_and(|after| timestamp < after)
+                || self.before.is_some_and(|before| timestamp > before)
+            {
+                return false;
+            }
+            let raw = event.raw();
+            match raw.get_field::<String>("type").ok().flatten().as_deref() {
+                Some("m.room.message" | "m.sticker") => {
+                    crate::messages::replaced_event(event).is_none()
+                }
+                Some("m.room.encrypted") => {
+                    // Room::messages has already tried to decrypt the event.
+                    let redacted = raw
+                        .get_field::<serde_json::Value>("unsigned")
+                        .ok()
+                        .flatten()
+                        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some());
+                    has_undecryptable_events |= !redacted;
+                    false
+                }
+                _ => false,
+            }
+        });
+        let items = futures_util::future::join_all(candidates.map(|event| {
+            let room = &room;
+            let push = push.as_ref();
+            async move {
+                let latest = async {
+                    let unsigned = event
+                        .raw()
+                        .get_field::<Raw<serde_json::Value>>("unsigned")
+                        .ok()??;
+                    let relations = unsigned
+                        .get_field::<Raw<serde_json::Value>>("m.relations")
+                        .ok()??;
+                    let edit = relations
+                        .get_field::<Raw<AnySyncTimelineEvent>>("m.replace")
+                        .ok()??;
+                    let edit = match edit.get_field::<String>("type").ok()??.as_str() {
+                        "m.room.encrypted" => room
+                            .decrypt_event(&edit.cast_unchecked(), push)
+                            .await
+                            .ok()?,
+                        _ => TimelineEvent::from_plaintext(edit),
+                    };
+                    crate::messages::latest_valid_replacement(&event, std::slice::from_ref(&edit))
+                        .cloned()
+                }
+                .await;
+                view::standalone_item(core, room, event, latest, push).await
+            }
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+        Ok(HistoryPageOk {
+            items,
+            cursor,
+            has_undecryptable_events,
+        })
+    }
+}
+
+async fn history_anchor(
+    core: &Arc<Core>,
+    room_id: &OwnedRoomId,
+    ts: u64,
+    direction: Direction,
+) -> Result<Option<OwnedEventId>, RpcError> {
+    let request = get_event_by_timestamp::v1::Request::new(
+        room_id.clone(),
+        MilliSecondsSinceUnixEpoch(UInt::new_saturating(ts)),
+        direction,
+    );
+    match core.client().await?.send(request).await {
+        Ok(response) => Ok(Some(response.event_id)),
+        Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => Ok(None),
+        Err(error) => Err(core.rpc_error("timestamp_to_event", &error)),
     }
 }
 

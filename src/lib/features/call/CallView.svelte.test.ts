@@ -100,6 +100,7 @@ function mountBothSharing(
       participants: others,
     },
     roomFor: () => undefined,
+    participantControl: () => undefined,
     toggleWatchScreenShare,
   } as unknown as CallSession;
   return { session, toggleWatchScreenShare, ...render(CallViewHarness, { session, members: [] }) };
@@ -280,7 +281,6 @@ test('the debug overlay follows its own switch under developer tools', () => {
   preferences.developerTools = true;
   recordCallDebug({
     requested: 'auto',
-    nativeForced: false,
     mode: 'compatibility',
     reason: undefined,
     stickyAvailable: undefined,

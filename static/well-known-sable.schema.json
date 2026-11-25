@@ -201,6 +201,11 @@
           ],
           "default": "system"
         },
+        "deploymentTheme": {
+          "title": "Use this server’s theme",
+          "type": "boolean",
+          "default": true
+        },
         "fontFamily": {
           "type": "string",
           "default": ""
@@ -289,6 +294,11 @@
           ],
           "default": "always"
         },
+        "showEncryptionStatusIcon": {
+          "title": "Show encryption status icon",
+          "type": "boolean",
+          "default": true
+        },
         "voiceParticipantPlacement": {
           "title": "Voice room participants",
           "enum": [
@@ -348,7 +358,7 @@
           "default": "3"
         },
         "showHome": {
-          "title": "All rooms in the sidebar",
+          "title": "Show Home with all rooms",
           "type": "boolean",
           "default": false
         },
@@ -455,6 +465,11 @@
           "title": "Hide members in read-only rooms",
           "type": "boolean",
           "default": true
+        },
+        "hideSentBeforeJoined": {
+          "title": "Hide messages sent before you joined",
+          "type": "boolean",
+          "default": false
         },
         "showTombstoneEvents": {
           "title": "Show removed-message placeholders",
@@ -565,6 +580,7 @@
         "roomSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -573,6 +589,7 @@
         "directSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -1045,6 +1062,11 @@
           ],
           "default": "system"
         },
+        "deploymentTheme": {
+          "title": "Use this server’s theme",
+          "type": "boolean",
+          "default": true
+        },
         "fontFamily": {
           "type": "string",
           "default": ""
@@ -1133,6 +1155,11 @@
           ],
           "default": "always"
         },
+        "showEncryptionStatusIcon": {
+          "title": "Show encryption status icon",
+          "type": "boolean",
+          "default": true
+        },
         "voiceParticipantPlacement": {
           "title": "Voice room participants",
           "enum": [
@@ -1192,7 +1219,7 @@
           "default": "3"
         },
         "showHome": {
-          "title": "All rooms in the sidebar",
+          "title": "Show Home with all rooms",
           "type": "boolean",
           "default": false
         },
@@ -1299,6 +1326,11 @@
           "title": "Hide members in read-only rooms",
           "type": "boolean",
           "default": true
+        },
+        "hideSentBeforeJoined": {
+          "title": "Hide messages sent before you joined",
+          "type": "boolean",
+          "default": false
         },
         "showTombstoneEvents": {
           "title": "Show removed-message placeholders",
@@ -1409,6 +1441,7 @@
         "roomSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],
@@ -1417,6 +1450,7 @@
         "directSort": {
           "enum": [
             "recent",
+            "unread-first",
             "name-asc",
             "name-desc"
           ],

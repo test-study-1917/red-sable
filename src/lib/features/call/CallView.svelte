@@ -251,7 +251,9 @@
   class={['stage', { resting: !chromeVisible, expanded: fullscreen.expanded }]}
   aria-label={i18n.t('call.title')}
   bind:this={stage}
-  style:--dock-height="{failed ? 0 : dockHeight}px"
+  style:--dock-height={chromeVisible && (roomLayout || busy)
+    ? `${failed ? 0 : dockHeight}px`
+    : undefined}
   style:--top-height="{topHeight}px"
   onpointermove={wake}
   onpointerdown={wake}
@@ -403,6 +405,17 @@
 
   <div class="notices" bind:clientHeight={noticeHeight}>
     <CallEndNotice {session} />
+    {#if session.moderationError}
+      <Alert variant="critical" role="alert">
+        {i18n.t(
+          session.moderationError === 'gone'
+            ? 'call.moderationGone'
+            : session.moderationError === 'unavailable'
+              ? 'call.moderationUnavailable'
+              : 'call.moderationFailed'
+        )}
+      </Alert>
+    {/if}
     {#if session.desktopShortcutStatus === 'error'}
       <Alert variant="warning" class="notice">
         <p>{i18n.t('call.desktopShortcutsUnavailable')}</p>
@@ -555,6 +568,8 @@
     name={tileNames.get(item.participant.identity) ?? profile.name}
     userId={profile.userId}
     avatar={profile.avatar}
+    onModerate={session.participantControl(item.participant)}
+    moderationPending={session.moderationPending}
     featured={large}
     pinned={featured.length === 1 && featured[0].key === item.key}
     onPin={tiles.length > 1 && (item.source === 'camera' || item.watching)
@@ -688,7 +703,7 @@
     flex-direction: column;
     gap: var(--space-200);
     inset: var(--top-height) var(--space-300) auto;
-    max-height: max(0px, calc(100% - var(--top-height) - var(--dock-height)));
+    max-height: max(0px, calc(100% - var(--top-height) - var(--dock-height, 0px)));
     overflow-y: auto;
     position: absolute;
     z-index: 3;
@@ -731,15 +746,11 @@
     display: flex;
     flex: 1;
     min-height: 0;
-    padding: var(--top-height) var(--space-300) var(--dock-height);
+    padding: var(--top-height) var(--space-300) var(--dock-height, var(--space-300));
   }
 
   .media.with-notice {
     padding-block-start: calc(var(--top-height) + var(--space-200) + var(--notice-height));
-  }
-
-  .resting .media {
-    padding-block-end: var(--space-300);
   }
 
   .resting .media:not(.with-notice) {

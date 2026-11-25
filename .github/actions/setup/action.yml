@@ -56,13 +56,13 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: src/generated/wasm
-        key: wasm-${{ runner.os }}-${{ hashFiles('crates/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.mise/config.toml', 'scripts/build/build-wasm.mjs') }}
+        key: wasm-${{ runner.os }}-${{ hashFiles('crates/**', 'vendor/sable-matrix-sdk/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.mise/config.toml', 'scripts/build/build-wasm.mjs') }}
 
     - name: Set up Rust
       if: ${{ inputs.rust == 'true' || (inputs.build == 'true' && steps.wasm.outputs.cache-hit != 'true') }}
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
       with:
-        toolchain: 1.99.1
+        toolchain: 1.100.0
         targets: wasm32-unknown-unknown
 
     - name: Cache Rust artifacts

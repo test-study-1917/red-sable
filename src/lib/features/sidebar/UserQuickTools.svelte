@@ -1,6 +1,5 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { on } from 'svelte/events';
   import { page } from '$app/state';
   import { i18n } from '#lib/i18n.js';
   import { useCoreClient } from '#lib/core/context.js';
@@ -8,6 +7,7 @@
     defaultSettingsSection,
     openSettingsOver,
   } from '#lib/features/settings/settings-navigation.js';
+  import { preferences } from '#lib/settings/preferences.svelte.js';
   import { paletteState } from '#lib/ui/shortcuts/palette-state.svelte.js';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import BellIcon from 'phosphor-svelte/lib/BellIcon';
@@ -44,50 +44,41 @@
         const response = await focusedCore.rpc.notifications.inbox({
           filter: 'all',
           include_read: false,
+          focused: true,
           limit: 20000,
           before_ts: null,
         });
         if (active && current === serial) {
-          focusedInboxCount = response.items.filter(
-            (item) =>
-              item.kind === 'reaction' ||
-              item.kind === 'mention' ||
-              item.kind === 'keyword' ||
-              (!item.kind && item.highlight)
-          ).length;
+          focusedInboxCount = response.items.length;
         }
       } catch (cause) {
         console.warn('[sable inbox bell] unread check failed', cause);
       }
     }
     const stop = focusedCore.subscribeEvents((event) => {
-      if (event.type === 'inbox_changed' || event.type === 'room_list_diff') void refresh();
+      if (event.type === 'inbox_changed') void refresh();
     });
-    const localChange = () => {
-      void refresh();
-    };
-    const stopLocal = on(window, 'sable-focused-inbox-changed', localChange);
     void refresh();
     return () => {
       active = false;
       stop();
-      stopLocal();
     };
   });
 
   let hasAlerts = $derived(alertProviders.some((provider) => provider.priority !== null));
 
-  const mobileTools = [
-    { href: resolve('/(app)/rooms'), icon: ChatsIcon, label: 'nav.messages' },
+  const messagesHref = $derived(resolve(preferences.showHome ? '/(app)/home' : '/(app)/rooms'));
+  const mobileTools = $derived([
+    { href: messagesHref, icon: ChatsIcon, label: 'nav.messages' },
     {
       href: resolve('/(app)/navigate'),
       icon: ListMagnifyingGlassIcon,
       label: 'shortcuts.paletteTitle',
     },
     { href: resolve('/(app)/inbox'), icon: BellIcon, label: 'nav.inbox' },
-  ] as const;
+  ] as const);
   const mobileSlotCount = $derived(mobileTools.length + 1 + (hasAlerts ? 1 : 0));
-  const ROOM_LIST_PATHS = ['/rooms', '/direct', '/space/'];
+  const roomListPaths = $derived([messagesHref, '/direct', '/space/']);
   const desktopTools = [
     { href: resolve('/(app)/inbox'), icon: BellIcon, label: 'nav.inbox' },
     { href: resolve('/(app)/settings'), icon: GearIcon, label: 'nav.settings' },
@@ -114,8 +105,8 @@
   }
 
   function isToolActive(href: string): boolean {
-    if (href === '/rooms')
-      return ROOM_LIST_PATHS.some((path) => page.url.pathname.startsWith(path));
+    if (href === messagesHref)
+      return roomListPaths.some((path) => page.url.pathname.startsWith(path));
     return page.url.pathname.startsWith(href);
   }
 

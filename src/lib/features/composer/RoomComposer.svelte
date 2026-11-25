@@ -15,9 +15,6 @@
     PackImageView,
     PersonaView,
   } from '#src/generated/protocol';
-  import { mergeProps } from 'bits-ui';
-  import MicrophoneIcon from 'phosphor-svelte/lib/MicrophoneIcon';
-  import TextAaIcon from 'phosphor-svelte/lib/TextAaIcon';
   import type { Node as ProseMirrorNode } from 'prosemirror-model';
   import { onDestroy, tick, untrack } from 'svelte';
 
@@ -33,7 +30,7 @@
   import { i18n } from '#lib/i18n.js';
   import { serverNameOf } from '#lib/matrix-id.js';
   import { isPackChange } from '#lib/emoji/load-packs.js';
-  import { capturesFromCamera, pickFiles } from '#lib/platform/files.js';
+  import { capturesFromCamera, pickFiles, withResolvedMime } from '#lib/platform/files.js';
   import { isAndroid } from '#lib/platform/os.js';
   import { usePersonaStore } from '#lib/personas/personas.svelte.js';
   import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
@@ -41,12 +38,12 @@
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
   import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
+  import { SETTINGS_DEVICES_SECTION } from '#lib/settings/registry.js';
+  import { showSettingsOver } from '#lib/features/settings/settings-navigation.js';
   import { type ImageMetadata } from '#lib/settings/definitions.js';
   import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import { formatByteSize } from '#lib/ui/byte-size.js';
   import { cachedMediaUrl, holdMediaUrl, loadMediaUrl } from '#lib/ui/media-url.js';
-  import IconButton from '#lib/ui/primitives/IconButton.svelte';
-  import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
 
   import BotCommandForm from './BotCommandForm.svelte';
@@ -66,7 +63,10 @@
   import ComposerSendButton from './ComposerSendButton.svelte';
   import PersonaPicker from './PersonaPicker.svelte';
   import PollComposer from './PollComposer.svelte';
+  import ComposerFormatButton from './ComposerFormatButton.svelte';
   import ComposerFormatting from './ComposerFormatting.svelte';
+  import ComposerReadOnly from './ComposerReadOnly.svelte';
+  import ComposerVoiceButton from './ComposerVoiceButton.svelte';
   import ComposerLinkDialog from './ComposerLinkDialog.svelte';
   import ComposerSpoilerDialog from './ComposerSpoilerDialog.svelte';
   import LocationComposer from './LocationComposer.svelte';
@@ -130,7 +130,7 @@
     type BotCommand,
     type BotCommandInvocation,
   } from './bot-commands';
-  import { parseSlash } from './slash-commands';
+  import { parseSlash, SlashError } from './slash-commands';
   import { editStep, replyStep } from './step-shortcuts';
   import { suggestionNode } from './suggestion-node';
   import { rememberSuggestion } from './suggestion-usage';
@@ -301,6 +301,7 @@
   let inFlight = $state(0);
   let error = $state<string | null>(null);
   let retry = $state<{ text: string; run: () => void } | null>(null);
+  let securityLink = $state<string | null>(null);
   let pollOpen = $state(false);
   let locationOpen = $state(false);
   let scheduleOpen = $state(false);
@@ -316,7 +317,7 @@
   let multiline = $state(false);
   let pointerHidden = $state(false);
   const shortLayout = $derived(
-    compactHeight || (composerShort && (!multiline || preferences.alwaysInlineEditor))
+    compactHeight || (!expanded && composerShort && (!multiline || preferences.alwaysInlineEditor))
   );
   let layoutFrame: number | undefined;
   let empty = $state(true);
@@ -743,6 +744,7 @@
     const accountId = core.session?.account_id ?? '';
     const restore = () => restoreUnsent(targetKey, accountId, doc, []);
     editor.clear();
+    expanded = false;
     if (matched.command.parameters.length === 0 && matched.args !== '') {
       const body = `${typed.prefix}${matched.command.command}${matched.raw_args}`;
       if (
@@ -824,9 +826,13 @@
     }
   }
 
-  function failureText(cause: unknown): string {
-    const { key, values } = sendFailure(cause);
-    return i18n.t(key, values);
+  function failureText(cause: unknown, failure = sendFailure(cause)): string {
+    const text = i18n.t(failure.key, failure.values);
+    securityLink =
+      cause instanceof SlashError && cause.key === 'composer.slashShareHistory.no_cross_signing'
+        ? text
+        : null;
+    return text;
   }
 
   /** A send outlives a room switch, so its failure is put back in the room it was meant for. */
@@ -857,7 +863,7 @@
 
   function failRetryably(cause: unknown, run: () => void): void {
     const failure = sendFailure(cause);
-    error = i18n.t(failure.key, failure.values);
+    error = failureText(cause, failure);
     retry = failure.retryable ? { text: error, run } : null;
   }
 
@@ -898,6 +904,7 @@
     inFlight += 1;
     error = null;
     editor.clear();
+    expanded = false;
     sourceMode = editor.leaveSource();
     staged = [];
     typing.stop();
@@ -1162,7 +1169,12 @@
       }
 
       error = null;
-      staged = stageFiles(staged, files, () => nextStagedId++, preferences.imageMetadata);
+      staged = stageFiles(
+        staged,
+        files.map(withResolvedMime),
+        () => nextStagedId++,
+        preferences.imageMetadata
+      );
       if (desktop) editor.focus();
     } catch (cause) {
       if (current()) {
@@ -1468,13 +1480,7 @@
   class={['composer-stack', { short: composerShort && !readOnly, 'pointer-hidden': pointerHidden }]}
 >
   {#if readOnly}
-    <div class="composer-shell">
-      <div class="composer">
-        <div class="composer-row">
-          <p class="locked">{i18n.t('composer.readOnly')}</p>
-        </div>
-      </div>
-    </div>
+    <ComposerReadOnly />
   {:else}
     <div class="composer-shell">
       <div class="composer" role="group" aria-label={i18n.t('timeline.messagePlaceholder')}>
@@ -1510,6 +1516,15 @@
           <ComposerError
             message={error}
             onRetry={retry?.text === error ? retry.run : undefined}
+            action={securityLink === error
+              ? {
+                  label: i18n.t('composer.openSecuritySettings'),
+                  run: () => {
+                    error = null;
+                    showSettingsOver(SETTINGS_DEVICES_SECTION);
+                  },
+                }
+              : undefined}
             onDismiss={() => {
               error = null;
             }}
@@ -1653,25 +1668,12 @@
               </div>
             {/if}
             {#snippet formatButton()}
-              <Tooltip label={i18n.t('composer.formatting')}>
-                {#snippet trigger({ props })}
-                  <IconButton
-                    {...mergeProps(props, {
-                      onclick: () => {
-                        setPreference('formattingToolbar', !formattingOpen);
-                      },
-                    })}
-                    variant="ghost"
-                    size="small"
-                    class="composer-format selection-open"
-                    aria-pressed={formattingOpen}
-                    data-state={formattingOpen ? 'open' : 'closed'}
-                    label={i18n.t('composer.formatting')}
-                  >
-                    <TextAaIcon />
-                  </IconButton>
-                {/snippet}
-              </Tooltip>
+              <ComposerFormatButton
+                open={formattingOpen}
+                onToggle={() => {
+                  setPreference('formattingToolbar', !formattingOpen);
+                }}
+              />
             {/snippet}
             <div class="composer-after" bind:this={afterEl}>
               <ComposerBoard
@@ -1692,21 +1694,7 @@
                 }}
               />
               {#if showVoice}
-                <Tooltip label={i18n.t('composer.voiceRecord')}>
-                  {#snippet trigger({ props })}
-                    <IconButton
-                      {...mergeProps(props, {
-                        onclick: startRecording,
-                      })}
-                      variant="ghost"
-                      size="small"
-                      class="composer-voice"
-                      label={i18n.t('composer.voiceRecord')}
-                    >
-                      <MicrophoneIcon />
-                    </IconButton>
-                  {/snippet}
-                </Tooltip>
+                <ComposerVoiceButton onStart={startRecording} />
               {/if}
               <ComposerSendButton
                 {context}
@@ -1835,18 +1823,6 @@
     position: absolute;
     visibility: hidden;
     white-space: pre-wrap;
-  }
-
-  .locked {
-    align-items: center;
-    color: var(--surface-var-on-container);
-    display: flex;
-    font-size: max(var(--font-size-editor), var(--font-size-input-min));
-    grid-column: 1 / -1;
-    justify-content: center;
-    margin: 0;
-    min-height: var(--target);
-    padding: var(--space-200) var(--space-300);
   }
 
   .composer-file {

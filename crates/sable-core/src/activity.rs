@@ -220,7 +220,11 @@ impl Core {
         let should_sync = active || !self.call_sessions.lock().await.is_empty();
         // Call teardown only stops sync that the last call kept running.
         // Snapshot the SDK handles so later awaits cannot switch accounts.
-        let session = self.session.current(Clone::clone);
+        let inbox = self.inbox_owner().await;
+        let session = inbox
+            .as_ref()
+            .map(|source| source.session.clone())
+            .or_else(|| self.session.current(Clone::clone));
         if !current_account() || (generation.is_some() && (should_sync || session.is_none())) {
             return;
         }
@@ -239,11 +243,18 @@ impl Core {
             let presence = self.cached_sync_presence(&session.client).await;
             Self::set_sync_presence(&session.client, presence).await;
             transition.start_sync(&session.sync_service).await;
+            if !self.sync_paused() && !self.activity.network_available() {
+                self.emit(crate::protocol::CoreEvent::SyncStatus(
+                    self.shown_sync_status(session.sync_service.state().get()),
+                ));
+            }
             drop(transition);
             // Fetches replied-to events, which must not hold up local reads or the next pause.
             Box::pin(self.until_stores_close(self.retry_cached_decryption())).await;
         } else {
-            self.flush_inbox_locked(&session.client, &transition).await;
+            if let Some(inbox) = inbox {
+                self.flush_inbox_locked(&inbox, &transition).await;
+            }
             if !current_account() {
                 return;
             }
@@ -267,7 +278,24 @@ impl Core {
             self.apply_activity(self.activity.app_active(), None, None)
                 .await;
         }
+        if !available
+            && was_available
+            && !self.sync_paused()
+            && let Ok(sync_service) = self.sync_service().await
+        {
+            self.emit(crate::protocol::CoreEvent::SyncStatus(
+                self.shown_sync_status(sync_service.state().get()),
+            ));
+        }
         self.refresh_search_peers().await;
+    }
+
+    /// For when the OS reports the network gone and is wrong, which would block every restart.
+    pub(crate) async fn retry_sync(&self, sync_service: &SyncService) {
+        self.activity
+            .network_available
+            .store(true, Ordering::SeqCst);
+        self.resume_sync(sync_service).await;
     }
 
     pub(crate) fn watch_activity_health(self: &Arc<Self>) {

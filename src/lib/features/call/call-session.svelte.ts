@@ -34,8 +34,17 @@ import { CallTelemetry } from './call-telemetry';
 import { recordCallDebug, type CallDebug } from './call-debug.svelte.js';
 import { cameraVisible, screenShareVisible, type CallPin } from './call-layout';
 import { participantKeys } from './participant-keys';
+import { i18n } from '#lib/i18n.js';
+import { toasts } from '#lib/ui/toasts.svelte.js';
 import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
 import { type CallInputMode } from '#lib/settings/definitions.js';
+import {
+  CALL_CONTROL_EVENT,
+  callControlMember,
+  createCallModeration,
+  type CallModerationAction,
+  type CallModerationErrorCode,
+} from './call-moderation';
 import { DEVICE_PREFERENCE } from './devices';
 import type { CallBackendGrant, CallRemoteVideoOverlay, CallVideoOverlay } from './call-transport';
 import { playSound, releaseNotificationAudio } from '../notifications/sound';
@@ -83,7 +92,8 @@ type PendingEvent = Extract<
       | 'call_members'
       | 'call_backends'
       | 'call_signaling_error'
-      | 'call_terminated';
+      | 'call_terminated'
+      | 'call_control_signal';
   }
 >;
 
@@ -92,7 +102,8 @@ const isCallEvent = (event: CoreEvent): event is PendingEvent =>
   event.type === 'call_members' ||
   event.type === 'call_backends' ||
   event.type === 'call_signaling_error' ||
-  event.type === 'call_terminated';
+  event.type === 'call_terminated' ||
+  event.type === 'call_control_signal';
 
 export function voiceStates(
   members: readonly CallMemberView[],
@@ -158,6 +169,9 @@ export class CallSession {
   #deviceErrorTimer: ReturnType<typeof setTimeout> | undefined;
   choosingScreenAudio = $state(false);
   endStatus = $state<CallEndStatus>('idle');
+  moderationPending = $state(false);
+  moderationError = $state<CallModerationErrorCode | null>(null);
+  #callModeration: ReturnType<typeof createCallModeration> | undefined;
 
   toggleWatchScreenShare(trackId: string): void {
     this.watchedScreenShareIds = this.watchedScreenShareIds.includes(trackId)
@@ -288,6 +302,47 @@ export class CallSession {
     );
   }
 
+  #controlAddress(member: CallMemberView) {
+    return member.member_id
+      ? callControlMember(member.user_id, member.device_id, member.member_id, member.joined_ts)
+      : undefined;
+  }
+
+  #localControlMember() {
+    if (this.lifecycle !== 'active' || this.transport.connection !== 'connected') return undefined;
+    const own = this.#client.session;
+    return this.members.find(
+      (member) => own && member.user_id === own.user_id && member.device_id === own.device_id
+    );
+  }
+
+  participantControl(participant: CallParticipant) {
+    const controls = this.#callModeration;
+    const own = this.#localControlMember();
+    const member = this.members.find((entry) => entry.identity === participant.identity);
+    const target = member && this.#controlAddress(member);
+    if (
+      !controls ||
+      !target ||
+      !own?.member_id ||
+      own.identity === participant.identity ||
+      participant.local ||
+      !this.transport.participants.some((current) => current.identity === participant.identity)
+    )
+      return undefined;
+
+    return async (action: CallModerationAction): Promise<void> => {
+      if (this.#callModeration !== controls || this.moderationPending) return;
+      this.moderationPending = true;
+      this.moderationError = null;
+      const error = await controls.request(target, action);
+      if (this.#callModeration === controls) {
+        this.moderationPending = false;
+        this.moderationError = error;
+      }
+    };
+  }
+
   async join(roomId: string, media: CallMedia, serviceUrl: string | null = null): Promise<void> {
     if (this.active) return;
 
@@ -331,11 +386,7 @@ export class CallSession {
           this.#client.rpc,
           roomId,
           serviceUrl,
-          hasNativeCalls()
-            ? 'legacy'
-            : preferences.callMode === 'auto'
-              ? null
-              : preferences.callMode,
+          preferences.callMode === 'auto' ? null : preferences.callMode,
           media.camera ? 'video' : 'audio'
         )
       );
@@ -368,14 +419,12 @@ export class CallSession {
                 : 'native';
             return { transport: injected, kind };
           }
-          if (grant.mode === 'legacy') {
-            const native = await createNativeTransport(
-              String(grant.session),
-              grant.identity,
-              this.#deps.roomName?.(roomId) ?? roomId
-            );
-            if (native) return { transport: native, kind: 'native' };
-          }
+          const native = await createNativeTransport(
+            String(grant.session),
+            grant.identity,
+            this.#deps.roomName?.(roomId) ?? roomId
+          );
+          if (native) return { transport: native, kind: 'native' };
           if (grant.backends.length) {
             const multi = await import('./multi-sfu-transport');
             return {
@@ -409,7 +458,6 @@ export class CallSession {
       }
       recordCallDebug({
         requested: preferences.callMode,
-        nativeForced: hasNativeCalls(),
         mode: grant.mode,
         reason: grant.mode_reason,
         stickyAvailable: grant.sticky_available,
@@ -479,6 +527,32 @@ export class CallSession {
       });
 
       this.#grant = grant;
+      this.#callModeration = createCallModeration({
+        local: () => {
+          const member = this.#localControlMember();
+          return member && this.#controlAddress(member);
+        },
+        members: () => this.members.flatMap((member) => this.#controlAddress(member) ?? []),
+        send: (content) =>
+          this.#client.rpc.messages.sendRawEvent({
+            room_id: roomId,
+            event_type: CALL_CONTROL_EVENT,
+            content,
+          }),
+        mute: async () => {
+          const wasEnabled = this.microphoneEnabled;
+          this.microphoneEnabled = false;
+          this.#clearTalking();
+          await this.#setMicrophone(false);
+          if (this.transport.microphoneEnabled) return false;
+          if (wasEnabled) toasts.info(i18n.t('call.microphoneClosedByParticipant'));
+          return true;
+        },
+        remove: () => {
+          toasts.info(i18n.t('call.removedByParticipant'));
+          void this.leave();
+        },
+      });
       this.listenOnly = !grant.can_publish;
 
       this.encryptsMedia = grant.encrypt_media;
@@ -808,6 +882,8 @@ export class CallSession {
   }
 
   #fail(failure: CallFailure): void {
+    // A call that was up and dropped sounds like leaving it; one that never connected is silent.
+    if (this.connectedAt !== null) this.#cue('call_leave');
     this.failure = failure;
     this.lifecycle = 'failed';
     this.connectedAt = null;
@@ -833,6 +909,11 @@ export class CallSession {
 
     if (event.type === 'call_terminated') {
       if (event.room_id === this.roomId) void this.#finish(event);
+      return;
+    }
+
+    if (event.type === 'call_control_signal') {
+      void this.#callModeration?.receive(event.content, event.sender, event.requires_confirmation);
       return;
     }
 
@@ -974,6 +1055,10 @@ export class CallSession {
   }
 
   async #performTeardown(): Promise<void> {
+    this.#callModeration?.dispose();
+    this.#callModeration = undefined;
+    this.moderationPending = false;
+    this.moderationError = null;
     this.desktopShortcutStatus = 'inactive';
     this.#clearTalking();
     this.#microphoneUpdate = Promise.resolve();

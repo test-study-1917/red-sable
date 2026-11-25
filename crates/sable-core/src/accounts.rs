@@ -934,16 +934,17 @@ impl Core {
 
     async fn detach_session(&self) -> (Option<Session>, search::MessageIndex) {
         self.retire_calls().await;
-        let client = self.session.current(|session| session.client.clone());
-        if let Some(client) = client {
-            self.flush_inbox(&client).await;
-        }
-        // Lock order: room subscriptions, then the session, then the search flush. Opening a room
-        // reads the session under the first, a search copy saves under the second.
+        // Opening a room takes room subscriptions before the session. Detach
+        // the inbox under the session pin, after any in-flight writer finishes.
+        // A later write either made this final snapshot or fails its epoch check.
         let mut room_subscriptions = self.room_subscriptions.lock().await;
         let mut session = self.session.write().await;
         // An aborted task must not be holding a flush it took from the index.
         let flushing = self.search_flush.lock().await;
+        let retired_inbox = {
+            let _writing = self.inbox_flush.lock().await;
+            self.inbox.lock().await.detach()
+        };
         self.session_handlers.lock().clear();
         self.session_tasks.lock().clear();
         self.to_device_inbox.lock().take();
@@ -955,7 +956,6 @@ impl Core {
         self.timelines.lock().await.clear();
         self.thread_timelines.lock().await.clear();
         self.account_data_types.lock().await.clear();
-        self.inbox.lock().await.reset();
         *self.pack_cache.lock().await = image_packs::PackCache::default();
         self.calendars.lock().await.clear();
         *self.push_rules.lock().await = None;
@@ -974,7 +974,14 @@ impl Core {
         drop(flushing);
         self.search_crawl.lock().await.reset();
         self.server_search.lock().await.reset();
-        (session.take(), index)
+        let retired = session.take();
+        drop(session);
+        drop(room_subscriptions);
+        if let Some(session) = &retired {
+            self.flush_detached_inbox(&session.client, retired_inbox)
+                .await;
+        }
+        (retired, index)
     }
 
     pub(crate) async fn finish_sign_in(
@@ -1109,7 +1116,8 @@ impl Core {
         self.watch_joined_invites(&client);
         self.watch_send_queue(&client);
         self.watch_presence(&client, generation);
-        self.watch_inbox_persist(&client);
+        self.watch_inbox_persist(generation).await;
+        self.watch_inbox_memberships(&client, generation);
         self.prefetch_call_well_known(&client);
         let store_id = self
             .registered_store_id(&account_id)
@@ -1118,7 +1126,6 @@ impl Core {
         self.watch_search_index(&account_id, &client, &store_id);
         self.watch_ignored_users(&client);
         self.watch_ignored_history(&client, &sync_service);
-        #[cfg(target_family = "wasm")]
         self.watch_sync_stall(&client, &sync_service, crate::sync_support::SYNC_STALL);
         self.watch_backup_preference(&client);
         sync_service.start().await;
@@ -2095,6 +2102,48 @@ mod regression_tests {
             .await
             .expect("a stalled sync is restarted");
         assert!(matches!(restarted, Some(State::Running)));
+    }
+
+    #[tokio::test]
+    async fn a_manual_retry_starts_sync_on_a_network_reported_gone() {
+        use matrix_sdk_ui::sync_service::State;
+
+        let (_store, _server, core, _room) = core_with_room().await;
+        let sync_service = core.sync_service().await.unwrap();
+        core.update_network_conditions(false, true).await;
+        core.update_app_active(true).await;
+        assert!(matches!(sync_service.state().get(), State::Idle));
+        assert!(matches!(
+            core.shown_sync_status(sync_service.state().get()),
+            crate::protocol::SyncStatus::Offline
+        ));
+
+        core.retry_sync(&sync_service).await;
+
+        assert!(!matches!(sync_service.state().get(), State::Idle));
+    }
+
+    #[tokio::test]
+    async fn a_reachable_server_overrules_a_network_reported_gone() {
+        use std::time::Duration;
+
+        use matrix_sdk_ui::sync_service::State;
+
+        let (_store, server, core, _room) = core_with_room().await;
+        server.mock_versions().ok().mount().await;
+        let client = core.client().await.unwrap();
+        let sync_service = core.sync_service().await.unwrap();
+        core.update_network_conditions(false, true).await;
+        core.update_app_active(true).await;
+        assert!(matches!(sync_service.state().get(), State::Idle));
+        let mut states = sync_service.state();
+
+        core.watch_sync_stall(&client, &sync_service, Duration::from_millis(200));
+
+        tokio::time::timeout(Duration::from_secs(5), states.next())
+            .await
+            .expect("sync starts once the server answers");
+        assert!(core.activity.network_available());
     }
 
     #[tokio::test]

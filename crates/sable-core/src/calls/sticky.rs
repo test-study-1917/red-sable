@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
+use super::membership::{StickyDeadlines, StickyExpiry, StickyTrust};
 use crate::delayed_events::DelayedEventsSupport;
 use matrix_sdk::deserialized_responses::{EncryptionInfo, VerificationLevel, VerificationState};
 use matrix_sdk::{Client, Room};
@@ -15,14 +17,16 @@ pub(super) struct StickySync {
     conn_id: String,
     include_invite_state: bool,
     pos: Option<String>,
-    since: Option<String>,
-    pending: Vec<(Value, u64)>,
+    pending: Vec<(String, Value)>,
+    encrypted_deadlines: StickyDeadlines,
 }
 
 pub(crate) struct Event {
     value: Value,
     device: Option<OwnedDeviceId>,
     redacts: Option<OwnedEventId>,
+    expiry: StickyExpiry,
+    observed_at: u64,
 }
 
 fn redaction_target(room: &Room, value: &Value) -> Option<OwnedEventId> {
@@ -64,14 +68,19 @@ impl Event {
             memberships.redact(event_id.as_str(), now);
             return true;
         }
-        if encrypted {
-            let Some(device) = &self.device else {
-                return memberships.apply_untrusted(&self.value, now);
-            };
-            memberships.apply_authenticated(&self.value, device, now)
+        let trust = if encrypted {
+            self.device
+                .as_deref()
+                .map_or(StickyTrust::Untrusted, StickyTrust::Authenticated)
         } else {
-            memberships.apply(&self.value, now)
-        }
+            StickyTrust::Plain
+        };
+        memberships.apply_with_trust(
+            &self.value,
+            now,
+            trust,
+            Some((self.expiry, self.observed_at)),
+        )
     }
 }
 
@@ -81,8 +90,8 @@ impl StickySync {
             conn_id: format!("call-{session}"),
             include_invite_state: false,
             pos: None,
-            since: None,
             pending: Vec::new(),
+            encrypted_deadlines: StickyDeadlines::default(),
         }
     }
 
@@ -91,8 +100,8 @@ impl StickySync {
             conn_id: format!("call-invites-{}", ruma::TransactionId::new()),
             include_invite_state: true,
             pos: None,
-            since: None,
             pending: Vec::new(),
+            encrypted_deadlines: StickyDeadlines::default(),
         }
     }
 
@@ -121,13 +130,8 @@ impl StickySync {
         request
             .room_subscriptions
             .insert(room.room_id().to_owned(), subscription);
-        request.extensions.to_device.enabled = Some(false);
+        request.extensions.to_device.enabled = false;
         request.extensions.sticky_events.enabled = Some(true);
-        request
-            .extensions
-            .sticky_events
-            .since
-            .clone_from(&self.since);
         request
     }
 
@@ -136,19 +140,42 @@ impl StickySync {
         room: &Room,
         timeout: Duration,
     ) -> Result<Vec<Event>, matrix_sdk::HttpError> {
-        let response = match room.client().send(self.request(room, timeout)).await {
+        let response = self.poll(room, timeout).await;
+        self.resolve_response(room, response, crate::now_ms()).await
+    }
+
+    pub(super) async fn poll(
+        &self,
+        room: &Room,
+        timeout: Duration,
+    ) -> Result<v5::Response, matrix_sdk::HttpError> {
+        room.client().send(self.request(room, timeout)).await
+    }
+
+    pub(super) async fn resolve_response(
+        &mut self,
+        room: &Room,
+        response: Result<v5::Response, matrix_sdk::HttpError>,
+        now: u64,
+    ) -> Result<Vec<Event>, matrix_sdk::HttpError> {
+        self.resolve_for_call(room, response, now, None).await
+    }
+
+    pub(super) async fn resolve_for_call(
+        &mut self,
+        room: &Room,
+        response: Result<v5::Response, matrix_sdk::HttpError>,
+        now: u64,
+        state: Option<&tokio::sync::Mutex<super::runtime::State>>,
+    ) -> Result<Vec<Event>, matrix_sdk::HttpError> {
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 self.pos = None;
-                self.since = None;
                 return Err(error);
             }
         };
         let sticky = response.extensions.sticky_events;
-        self.pos = Some(response.pos);
-        if sticky.next_batch.is_some() {
-            self.since = sticky.next_batch;
-        }
         let mut events: Vec<Value> = Vec::new();
         if let Some(room_events) = sticky.rooms.get(room.room_id()) {
             events.extend(
@@ -174,53 +201,85 @@ impl StickySync {
                     .filter_map(|event| serde_json::from_str(event.json().get()).ok()),
             );
         }
-        let now = crate::now_ms();
-        let mut candidates = std::mem::take(&mut self.pending);
-        candidates.retain(|(_, expires)| *expires > now);
+        self.encrypted_deadlines.prune(now);
+        let mut candidates: Vec<_> = std::mem::take(&mut self.pending)
+            .into_iter()
+            .map(|(id, value)| (Some(id), value))
+            .collect();
+        let mut shared = match state {
+            Some(state) => Some(state.lock().await),
+            None => None,
+        };
         for value in events {
-            let expires = sticky_expiry(&value, now);
-            candidates.push((value, expires));
-        }
-        let mut resolved = Vec::new();
-        for (value, expires) in candidates {
             if value.get("type").and_then(Value::as_str) != Some("m.room.encrypted") {
+                candidates.push((None, value));
+                continue;
+            }
+            let Some(event_id) = value.get("event_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if sticky_duration(&value).is_none() {
+                continue;
+            }
+            let expiry = sticky_expiry(&value, now);
+            self.encrypted_deadlines.record(event_id, expiry, now);
+            if let (Some(shared), StickyExpiry::Known(at)) = (&mut shared, expiry) {
+                shared.sticky.record_lease(event_id, at, now);
+            }
+            candidates.push((Some(event_id.to_owned()), value));
+        }
+        drop(shared);
+        let mut resolved = Vec::new();
+        let mut tried = HashSet::new();
+        for (event_id, value) in candidates {
+            let Some(event_id) = event_id else {
                 resolved.push(Event {
                     redacts: redaction_target(room, &value),
+                    expiry: sticky_expiry(&value, now),
+                    observed_at: now,
                     value,
                     device: None,
                 });
                 continue;
-            }
-            if expires <= now
-                || (value.get("msc4354_sticky").is_none() && value.get("sticky").is_none())
-            {
+            };
+            let Some(expires) = self
+                .encrypted_deadlines
+                .expiry(&event_id)
+                .filter(|expires| expires.at() > now)
+            else {
                 continue;
-            }
-            if let Some(event) = self.decrypt_candidate(room, value, expires, now).await {
+            };
+            if tried.insert(event_id.clone())
+                && let Some(event) = self
+                    .decrypt_candidate(room, (event_id, value), expires, now)
+                    .await
+            {
                 resolved.push(event);
             }
         }
+        self.pos = Some(response.pos);
         Ok(resolved)
     }
 
     async fn decrypt_candidate(
         &mut self,
         room: &Room,
-        value: Value,
-        expires: u64,
+        candidate: (String, Value),
+        expires: StickyExpiry,
         now: u64,
     ) -> Option<Event> {
-        let raw = Raw::new(&value)
+        let raw = Raw::new(&candidate.1)
             .map(Raw::cast_unchecked::<OriginalSyncRoomEncryptedEvent>)
             .ok()?;
         let Ok(decrypted) = room.decrypt_event(&raw, None).await else {
-            self.defer(value, expires);
+            self.defer(candidate);
             return None;
         };
         let Some(info) = decrypted.encryption_info() else {
-            self.defer(value, expires);
+            self.defer(candidate);
             return None;
         };
+        let value = candidate.1;
         let mut plaintext = serde_json::from_str::<Value>(decrypted.raw().json().get()).ok()?;
         if let Some(object) = plaintext.as_object_mut() {
             for field in ["msc4354_sticky", "sticky"] {
@@ -234,7 +293,7 @@ impl StickySync {
             if let Some(unsigned) = unsigned.as_object_mut() {
                 unsigned.insert(
                     "msc4354_sticky_duration_ttl_ms".to_owned(),
-                    expires.saturating_sub(now).into(),
+                    expires.at().saturating_sub(now).into(),
                 );
             }
         }
@@ -243,24 +302,29 @@ impl StickySync {
             value: plaintext,
             device,
             redacts: None,
+            expiry: expires,
+            observed_at: now,
         })
     }
 
-    fn defer(&mut self, value: Value, expires: u64) {
+    fn defer(&mut self, candidate: (String, Value)) {
         if self.pending.len() < 1024 {
-            self.pending.push((value, expires));
+            self.pending.push(candidate);
         }
     }
 }
 
-fn sticky_expiry(value: &Value, now: u64) -> u64 {
-    let duration = value
+fn sticky_duration(value: &Value) -> Option<u64> {
+    value
         .get("msc4354_sticky")
         .or_else(|| value.get("sticky"))
         .and_then(|sticky| sticky.get("duration_ms"))
         .and_then(Value::as_u64)
-        .unwrap_or(3_600_000)
-        .min(3_600_000);
+}
+
+fn sticky_expiry(value: &Value, now: u64) -> StickyExpiry {
+    let maximum = u64::from(STICKY_DURATION_MS);
+    let duration = sticky_duration(value).unwrap_or(maximum).min(maximum);
     let sent = value
         .get("origin_server_ts")
         .and_then(Value::as_u64)
@@ -275,14 +339,46 @@ fn sticky_expiry(value: &Value, now: u64) -> u64 {
         })
         .and_then(Value::as_u64);
     ttl.map_or_else(
-        || sent.saturating_add(duration),
-        |ttl| now.saturating_add(ttl.min(duration)),
+        || StickyExpiry::Inferred(sent.saturating_add(duration)),
+        |ttl| StickyExpiry::Known(now.saturating_add(ttl.min(duration))),
     )
 }
 
 pub(crate) fn live_events(room: &Room) -> Vec<Event> {
-    room.sticky_events()
-        .live()
+    sdk_events(
+        &room.sticky_events().live(),
+        crate::now_ms(),
+        &Default::default(),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn unexpired_events(room: &Room) -> Vec<Event> {
+    let (events, leases) = room.sticky_events().snapshot();
+    sdk_events(&events, crate::now_ms(), &leases)
+}
+
+pub(super) fn merge_sdk(
+    room: &Room,
+    members: &mut super::membership::StickyMemberships,
+    encrypted: bool,
+    now: u64,
+) {
+    let (events, leases) = room.sticky_events().snapshot();
+    for (id, lease) in &leases {
+        members.record_lease(id.as_str(), lease.expires_at, now);
+    }
+    for event in sdk_events(&events, now, &leases) {
+        event.apply(members, encrypted, now);
+    }
+}
+
+fn sdk_events(
+    events: &[matrix_sdk_base::sticky::StickyEvent],
+    observed_at: u64,
+    leases: &std::collections::HashMap<OwnedEventId, matrix_sdk_base::sticky::StickyLease>,
+) -> Vec<Event> {
+    events
         .iter()
         .filter_map(|event| {
             let object: serde_json::Map<String, Value> =
@@ -302,7 +398,13 @@ pub(crate) fn live_events(room: &Room) -> Vec<Event> {
             })
             .ok()?;
             let device = authenticated_device(event.encryption_info().map(AsRef::as_ref), &value);
+            let lease = leases.get(&event.event_id);
             Some(Event {
+                expiry: lease.map_or_else(
+                    || StickyExpiry::Inferred(u64::from(event.expires_at.get())),
+                    |lease| StickyExpiry::Known(lease.expires_at),
+                ),
+                observed_at: lease.map_or(observed_at, |lease| lease.received_at),
                 value,
                 device,
                 redacts: None,

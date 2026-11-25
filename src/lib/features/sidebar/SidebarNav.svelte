@@ -25,6 +25,7 @@
     setFolderIcon,
     ungroupFolder,
     withoutSpace,
+    withSpace,
     type DropInstruction,
     type LayoutRef,
     type SidebarFolder,
@@ -201,6 +202,12 @@
     return folderName(folder, (roomId) => roomList.byId(roomId)?.name ?? null) ?? '';
   }
 
+  function togglePin(roomId: string): void {
+    spaceSidebar.write(
+      pinnedSpaceIds.has(roomId) ? withoutSpace(entries, roomId) : withSpace(entries, roomId)
+    );
+  }
+
   const railProps = {
     get layout() {
       return entries;
@@ -306,6 +313,8 @@
           callRoomId={call.active ? call.roomId : null}
           {callParticipants}
           callVoiceStates={call.voiceStates}
+          {pinnedSpaceIds}
+          onTogglePin={togglePin}
         />
       </div>
       {@render callBar()}
@@ -337,16 +346,8 @@
           callRoomId={call.active ? call.roomId : null}
           {callParticipants}
           callVoiceStates={call.voiceStates}
-        />
-        <ResizeHandle
-          value={roomNavWidth}
-          min={MIN_ROOM_NAV_WIDTH}
-          max={MAX_ROOM_NAV_WIDTH}
-          label={i18n.t('nav.resizeRooms')}
-          grow="right"
-          step={ROOM_NAV_WIDTH_STEP}
-          onResize={(next) => (roomNavWidth = clampRoomNavWidth(next))}
-          onCommit={persistRoomNavWidth}
+          {pinnedSpaceIds}
+          onTogglePin={togglePin}
         />
         {#if !collapsed}
           <AlertDrawer />
@@ -356,6 +357,16 @@
       {#if !collapsed}
         <UserQuickTools />
       {/if}
+      <ResizeHandle
+        value={roomNavWidth}
+        min={MIN_ROOM_NAV_WIDTH}
+        max={MAX_ROOM_NAV_WIDTH}
+        label={i18n.t('nav.resizeRooms')}
+        grow="right"
+        step={ROOM_NAV_WIDTH_STEP}
+        onResize={(next) => (roomNavWidth = clampRoomNavWidth(next))}
+        onCommit={persistRoomNavWidth}
+      />
     </nav>
   {/if}
   <FolderRenameDialog
@@ -380,6 +391,7 @@
   .desktop-navigation {
     display: none;
     flex-direction: column;
+    position: relative;
   }
 
   .desktop-navigation-main {
@@ -428,7 +440,7 @@
       display: flex;
     }
 
-    .desktop-navigation-main :global(.resize-handle) {
+    .desktop-navigation :global(.resize-handle) {
       inset-inline-end: -0.25rem;
     }
   }

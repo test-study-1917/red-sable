@@ -28,6 +28,7 @@
   type Props = {
     items: Item[];
     value?: string;
+    dropdownOpen?: boolean;
     id?: string;
     name?: string;
     required?: boolean;
@@ -35,6 +36,7 @@
     placeholder?: string;
     class?: ClassValue;
     forceDropdown?: boolean;
+    portalTo?: HTMLElement;
     'aria-label'?: string;
     onValueChange?: (value: string) => void;
   };
@@ -42,6 +44,7 @@
   let {
     items,
     value = $bindable(''),
+    dropdownOpen = $bindable(),
     id,
     name,
     required = false,
@@ -49,6 +52,7 @@
     placeholder,
     class: className = '',
     forceDropdown = false,
+    portalTo,
     'aria-label': ariaLabel,
     onValueChange,
   }: Props = $props();
@@ -56,7 +60,8 @@
   const appLayout = new AppLayout();
   const inlineChoices = hasSettingsChoices() ? getSettingsChoices() : false;
   const useSwitcher = $derived(
-    !forceDropdown &&
+    !portalTo &&
+      !forceDropdown &&
       inlineChoices &&
       Boolean(ariaLabel || placeholder) &&
       items.length >= 2 &&
@@ -100,7 +105,7 @@
     {disabled}
     {onValueChange}
   />
-{:else if !appLayout.current}
+{:else if !portalTo && !appLayout.current}
   <button
     type="button"
     {id}
@@ -143,7 +148,17 @@
     </div>
   </BottomSheet>
 {:else}
-  <BitsSelect.Root type="single" {items} bind:value {name} {required} {disabled} {onValueChange}>
+  <BitsSelect.Root
+    type="single"
+    {items}
+    bind:value
+    open={dropdownOpen}
+    onOpenChange={dropdownOpen === undefined ? undefined : (next) => (dropdownOpen = next)}
+    {name}
+    {required}
+    {disabled}
+    {onValueChange}
+  >
     <BitsSelect.Trigger {id} aria-label={ariaLabel} class={['form-control', 'select', className]}>
       <BitsSelect.Value
         class={['select-text', { 'select-placeholder': selectedLabel === undefined }]}
@@ -153,12 +168,14 @@
       </BitsSelect.Value>
       <CaretDownIcon class="select-caret" aria-hidden="true" />
     </BitsSelect.Trigger>
-    <BitsSelect.Portal>
+    <BitsSelect.Portal to={portalTo}>
       <BitsSelect.Content
+        aria-label={portalTo ? ariaLabel : undefined}
         dir={currentDirection()}
         sideOffset={4}
-        collisionPadding={collisionPadding()}
-        class="menu-surface select-content"
+        collisionBoundary={portalTo}
+        collisionPadding={portalTo ? 4 : collisionPadding()}
+        class={['menu-surface', 'select-content', { 'select-content-contained': portalTo }]}
         {...overlayLayer()}
       >
         <BitsSelect.Viewport class="menu-scroll-content" {@attach scrollHint}>
@@ -270,5 +287,17 @@
     --menu-max-height: min(20rem, var(--bits-select-content-available-height));
 
     width: var(--bits-select-anchor-width);
+  }
+
+  :global(.menu-surface.select-content-contained) {
+    --menu-min-width: 0;
+  }
+
+  :global(.select-content-contained .selection-label) {
+    overflow-wrap: anywhere;
+  }
+
+  :global(.select-content-contained .menu-item) {
+    --menu-item-height: var(--control-height-touch);
   }
 </style>

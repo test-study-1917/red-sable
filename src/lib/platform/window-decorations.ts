@@ -26,7 +26,7 @@ function desktopOs(): 'macos' | 'windows' | 'linux' | null {
 
 export function supportsTray(): boolean {
   const platform = electronBridge()?.platform;
-  return platform === 'linux' || platform === 'win32';
+  return platform === 'linux' || platform === 'freebsd' || platform === 'win32';
 }
 
 export function supportsSmoothScrollingToggle(): boolean {
@@ -35,6 +35,10 @@ export function supportsSmoothScrollingToggle(): boolean {
 
 export function customTitleBarDefault(): boolean {
   return desktopOs() === 'windows';
+}
+
+export function hardwareVideoEncodeDefault(): boolean {
+  return desktopOs() !== 'linux';
 }
 
 export function titleBarKind(useCustomTitleBar: boolean): TitleBarKind | null {

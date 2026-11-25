@@ -38,7 +38,9 @@ export function supportsAutoUpdate(): boolean {
     autoUpdate !== false &&
     !process.mas &&
     installMethod() !== 'flatpak' &&
-    (process.platform !== 'linux' || installMethod() === 'appimage')
+    (process.platform === 'darwin' ||
+      process.platform === 'win32' ||
+      installMethod() === 'appimage')
   );
 }
 
@@ -103,6 +105,6 @@ export function registerUpdater(
   });
 
   ipcMain.handle('sable-update-install', (event) => {
-    if (enabled && isAppFrame(event.senderFrame)) autoUpdater.quitAndInstall();
+    if (enabled && isAppFrame(event.senderFrame)) autoUpdater.quitAndInstall(true, true);
   });
 }

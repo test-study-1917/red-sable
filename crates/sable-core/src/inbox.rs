@@ -14,6 +14,7 @@ use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
 use matrix_sdk::ruma::push::Action;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt};
+use matrix_sdk_base::RoomInfoNotableUpdateReasons;
 use matrix_sdk_common::serde_helpers::extract_thread_root;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -159,6 +160,7 @@ const fn is_unread(entry: &Entry, state: &mut RoomReadState) -> bool {
 pub(crate) struct InboxScope<'a> {
     pub(crate) room_id: Option<&'a RoomId>,
     pub(crate) query: Option<&'a str>,
+    pub(crate) focused: bool,
 }
 
 fn contains_query(entry: &Entry, query: &str, body_shown: bool) -> bool {
@@ -191,10 +193,17 @@ const fn matches(entry: &Entry, filter: InboxFilter) -> bool {
 
 #[derive(Default)]
 pub(crate) struct InboxCache {
+    owner: Option<Arc<InboxSource>>,
     stored: Option<Stored>,
     revision: u64,
     saved: u64,
     resets: u64,
+}
+
+pub(crate) struct InboxSource {
+    pub(crate) session: crate::session::Session,
+    epoch: u64,
+    pub(crate) generation: u64,
 }
 
 impl InboxCache {
@@ -202,11 +211,22 @@ impl InboxCache {
         self.stored.get_or_insert_default()
     }
 
-    pub(crate) fn reset(&mut self) {
-        *self = Self {
-            resets: self.resets + 1,
-            ..Self::default()
-        };
+    pub(crate) fn detach(&mut self) -> Self {
+        let resets = self.resets + 1;
+        std::mem::replace(
+            self,
+            Self {
+                resets,
+                ..Self::default()
+            },
+        )
+    }
+
+    fn dirty_snapshot(&mut self) -> Option<(u64, Vec<u8>)> {
+        if self.revision == self.saved {
+            return None;
+        }
+        Some((self.revision, encode(self.stored.as_mut()?).ok()?))
     }
 }
 
@@ -634,9 +654,41 @@ impl Core {
         })
     }
 
+    pub(crate) async fn inbox_source(
+        &self,
+        generation: Option<u64>,
+    ) -> Result<Arc<InboxSource>, RpcError> {
+        // Use the same session → inbox order as detach_session. The pin is
+        // released before any store or homeserver I/O.
+        let session = self.session.read().await;
+        let current = self.lifecycle.current();
+        let Some(session) = session
+            .as_ref()
+            .filter(|_| generation.is_none_or(|g| g == current))
+        else {
+            return Err(RpcCode::NotLoggedIn.into());
+        };
+        let mut inbox = self.inbox.lock().await;
+        let epoch = inbox.resets;
+        Ok(inbox
+            .owner
+            .get_or_insert_with(|| {
+                Arc::new(InboxSource {
+                    session: session.clone(),
+                    epoch,
+                    generation: current,
+                })
+            })
+            .clone())
+    }
+
+    pub(crate) async fn inbox_owner(&self) -> Option<Arc<InboxSource>> {
+        self.inbox.lock().await.owner.clone()
+    }
+
     async fn record_inbox(
         &self,
-        client: &matrix_sdk::Client,
+        source: &InboxSource,
         fresh: Vec<Entry>,
         cursors: BTreeMap<OwnedRoomId, Option<String>>,
         unread_scans: BTreeMap<OwnedRoomId, UnreadScan>,
@@ -644,7 +696,7 @@ impl Core {
         if fresh.is_empty() && cursors.is_empty() && unread_scans.is_empty() {
             return Ok(0);
         }
-        let mut inbox = self.loaded_inbox(client).await?;
+        let mut inbox = self.loaded_inbox(source).await?;
         let stored = inbox.stored();
         let added = merge(&mut stored.entries, fresh);
         stored.cursors.extend(cursors);
@@ -654,85 +706,143 @@ impl Core {
         Ok(added)
     }
 
-    async fn stored_inbox(&self, client: &matrix_sdk::Client) -> Result<Stored, RpcError> {
-        Ok(self.loaded_inbox(client).await?.stored().clone())
+    async fn stored_inbox(&self, source: &InboxSource) -> Result<Stored, RpcError> {
+        Ok(self.loaded_inbox(source).await?.stored().clone())
     }
 
     /// Suspension flushes the inbox before it closes the stores, so the store read must not hold
     /// the inbox while it waits for them.
     async fn loaded_inbox(
         &self,
-        client: &matrix_sdk::Client,
+        source: &InboxSource,
     ) -> Result<tokio::sync::MutexGuard<'_, InboxCache>, RpcError> {
-        let resets = {
-            let inbox = self.inbox.lock().await;
-            if inbox.stored.is_some() {
-                return Ok(inbox);
-            }
-            inbox.resets
-        };
-        let loaded = self.with_open_stores(async || load(client).await).await?;
+        let inbox = self.inbox.lock().await;
+        if inbox.resets != source.epoch {
+            return Err(RpcCode::Unavailable.into());
+        }
+        if inbox.stored.is_some() {
+            return Ok(inbox);
+        }
+        drop(inbox);
+        let loaded = self
+            .with_open_stores(async || load(&source.session.client).await)
+            .await?;
         let mut inbox = self.inbox.lock().await;
-        // The session changed during the read, so `loaded` belongs to the previous account.
-        if inbox.resets != resets {
+        if inbox.resets != source.epoch {
             return Err(RpcCode::Unavailable.into());
         }
         inbox.stored.get_or_insert(loaded);
         Ok(inbox)
     }
 
-    pub(crate) async fn flush_inbox(&self, client: &matrix_sdk::Client) {
-        self.save_inbox(async |bytes| {
-            self.with_open_stores(async || write(client, bytes).await)
-                .await
-        })
-        .await;
+    async fn flush_inbox(&self, source: &InboxSource) {
+        // Get access to the stores before reserving the writer. Teardown must
+        // be able to detach an inbox while the old watcher awaits reopening.
+        self.with_open_stores(async || self.save_inbox(source).await)
+            .await;
+    }
+
+    pub(crate) async fn flush_detached_inbox(
+        &self,
+        client: &matrix_sdk::Client,
+        mut retired: InboxCache,
+    ) {
+        if let Some((_, bytes)) = retired.dirty_snapshot() {
+            let _ = self
+                .with_open_stores(async || write(client, bytes).await)
+                .await;
+        }
     }
 
     /// For a suspension, where `with_open_stores` would wait for stores it has already closed.
     pub(crate) async fn flush_inbox_locked(
         &self,
-        client: &matrix_sdk::Client,
+        source: &InboxSource,
         transition: &crate::activity::Transition<'_>,
     ) {
         if transition.stores_open() {
-            self.save_inbox(async |bytes| write(client, bytes).await)
-                .await;
+            self.save_inbox(source).await;
         }
     }
 
-    async fn save_inbox(&self, write: impl AsyncFnOnce(Vec<u8>) -> Result<(), RpcError>) {
+    async fn save_inbox(&self, source: &InboxSource) {
         let _writing = self.inbox_flush.lock().await;
         let (revision, bytes) = {
             let mut inbox = self.inbox.lock().await;
-            if inbox.revision == inbox.saved {
+            if inbox.resets != source.epoch {
                 return;
             }
-            let Some(stored) = inbox.stored.as_mut() else {
+            let Some(snapshot) = inbox.dirty_snapshot() else {
                 return;
             };
-            let Ok(bytes) = encode(stored) else {
-                return;
-            };
-            (inbox.revision, bytes)
+            snapshot
         };
-        if write(bytes).await.is_ok() {
-            let mut inbox = self.inbox.lock().await;
-            inbox.saved = inbox.saved.max(revision);
-        } else {
-            self.inbox_changed.notify_one();
+        let saved = write(&source.session.client, bytes).await.is_ok();
+        let mut inbox = self.inbox.lock().await;
+        if inbox.resets != source.epoch {
+            return;
         }
+        if saved {
+            inbox.saved = revision;
+            return;
+        }
+        self.inbox_changed.notify_one();
     }
 
-    pub(crate) fn watch_inbox_persist(self: &Arc<Self>, client: &matrix_sdk::Client) {
+    pub(crate) async fn watch_inbox_persist(self: &Arc<Self>, generation: u64) {
+        let Ok(source) = self.inbox_source(Some(generation)).await else {
+            return;
+        };
         let core = self.clone();
-        let client = client.clone();
         self.track_session_task(
             spawn(async move {
                 loop {
                     core.inbox_changed.notified().await;
                     matrix_sdk::sleep::sleep(INBOX_FLUSH_INTERVAL).await;
-                    core.flush_inbox(&client).await;
+                    core.flush_inbox(&source).await;
+                }
+            })
+            .abort_on_drop(),
+        );
+    }
+
+    pub(crate) fn watch_inbox_memberships(
+        self: &Arc<Self>,
+        client: &matrix_sdk::Client,
+        generation: u64,
+    ) {
+        use tokio::sync::broadcast::error::RecvError;
+
+        let core = self.clone();
+        let client = client.clone();
+        let mut updates = client.room_info_notable_update_receiver();
+        let joined_rooms = move || {
+            client
+                .joined_rooms()
+                .into_iter()
+                .map(|room| room.room_id().to_owned())
+                .collect::<HashSet<_>>()
+        };
+        let mut joined = joined_rooms();
+        self.track_session_task(
+            spawn(async move {
+                loop {
+                    match updates.recv().await {
+                        Ok(update)
+                            if !update
+                                .reasons
+                                .contains(RoomInfoNotableUpdateReasons::MEMBERSHIP) =>
+                        {
+                            continue;
+                        }
+                        Err(RecvError::Closed) => break,
+                        _ => {}
+                    }
+                    let current = joined_rooms();
+                    if current != joined {
+                        joined = current;
+                        core.emit_if_current(generation, CoreEvent::InboxChanged);
+                    }
                 }
             })
             .abort_on_drop(),
@@ -741,25 +851,20 @@ impl Core {
 
     pub(crate) async fn record_live_inbox(
         &self,
+        source: &InboxSource,
         room: &Room,
         raw: &Raw<AnySyncTimelineEvent>,
         actions: &[Action],
-        generation: u64,
     ) {
         let Some(entry) = self.inbox_entry(room, raw, actions).await else {
             return;
         };
         match self
-            .record_inbox(
-                &room.client(),
-                vec![entry],
-                BTreeMap::new(),
-                BTreeMap::new(),
-            )
+            .record_inbox(source, vec![entry], BTreeMap::new(), BTreeMap::new())
             .await
         {
             Ok(changed) if changed > 0 => {
-                self.emit_if_current(generation, CoreEvent::InboxChanged);
+                self.emit_if_current(source.generation, CoreEvent::InboxChanged);
             }
             Err(error) => warn!(?error, "recording an inbox notification failed"),
             _ => {}
@@ -768,17 +873,16 @@ impl Core {
 
     pub(crate) async fn refresh_undecryptable_inbox_entry(
         &self,
+        source: &InboxSource,
         room: &Room,
         event: &TimelineEvent,
         actions: &[Action],
-        generation: u64,
     ) {
         let Some(event_id) = event.event_id() else {
             return;
         };
-        let client = room.client();
         let undecryptable = {
-            self.loaded_inbox(&client).await.is_ok_and(|mut inbox| {
+            self.loaded_inbox(source).await.is_ok_and(|mut inbox| {
                 inbox
                     .stored()
                     .entries
@@ -789,7 +893,7 @@ impl Core {
         if !undecryptable {
             return;
         }
-        self.record_live_inbox(room, event.raw(), actions, generation)
+        self.record_live_inbox(source, room, event.raw(), actions)
             .await;
     }
 
@@ -801,10 +905,12 @@ impl Core {
         before_ts: Option<u64>,
         scope: InboxScope<'_>,
     ) -> Result<(Vec<InboxItemView>, bool), RpcError> {
-        let client = self.client().await?;
-        let stored = self.stored_inbox(&client).await?;
-        let seen_notifications = stored.seen_notifications.clone();
-        let mut rooms: HashMap<OwnedRoomId, Option<(bool, RoomReadState)>> = HashMap::new();
+        let source = self.inbox_source(None).await?;
+        let stored = self.stored_inbox(&source).await?;
+        let client = &source.session.client;
+        let seen_notifications = stored.seen_notifications;
+        let mut rooms: HashMap<OwnedRoomId, Option<(Room, bool, Option<RoomReadState>)>> =
+            HashMap::new();
         let mut threads: HashMap<OwnedEventId, u64> = HashMap::new();
         let mut room_receipts: HashMap<OwnedRoomId, u64> = HashMap::new();
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -817,6 +923,12 @@ impl Core {
             .filter(|query| !query.is_empty());
 
         for mut entry in stored.entries {
+            if scope.focused
+                && !(matches!(entry.kind.as_str(), "reaction" | "mention" | "keyword")
+                    || entry.kind.is_empty() && entry.highlight)
+            {
+                continue;
+            }
             if scope
                 .room_id
                 .is_some_and(|room_id| entry.room_id != room_id)
@@ -834,46 +946,34 @@ impl Core {
                     .filter(|room| room.state() == matrix_sdk::RoomState::Joined);
                 let state = match joined {
                     Some(room) => {
-                        let read = read_state(self, &room).await?;
-                        Some((
-                            self.with_open_stores(async || is_dm(&room).await).await,
-                            read,
-                        ))
+                        let direct = self.with_open_stores(async || is_dm(&room).await).await;
+                        Some((room, direct, None))
                     }
                     None => None,
                 };
                 rooms.insert(entry.room_id.clone(), state);
             }
-            let Some(Some((direct, read))) = rooms.get_mut(&entry.room_id) else {
+            let Some(Some((room, direct, read))) = rooms.get_mut(&entry.room_id) else {
                 continue;
             };
             entry.is_direct = *direct;
-            let room_unread = match &entry.thread_root {
-                Some(thread_root) => {
-                    let thread_read_ts = if let Some(ts) = threads.get(thread_root) {
-                        *ts
-                    } else {
-                        let ts = match client.get_room(&entry.room_id) {
-                            Some(room) => {
-                                thread_read_ts(self, &room, thread_root, &mut room_receipts).await?
-                            }
-                            None => 0,
-                        };
-                        threads.insert(thread_root.clone(), ts);
-                        ts
-                    };
-                    entry.ts > thread_read_ts
-                }
-                None => is_unread(&entry, read),
-            };
-            // Preserve manually read notification records without changing
-            // ordinary room receipts or the new per-thread read state.
-            let unread = if seen_notifications.contains(&entry.event_id) {
-                false
-            } else if matches!(entry.kind.as_str(), "reaction" | "mention" | "keyword") {
-                true
+            let unread = if scope.focused {
+                !seen_notifications.contains(&entry.event_id)
+            } else if let Some(thread_root) = &entry.thread_root {
+                let thread_read_ts = if let Some(ts) = threads.get(thread_root) {
+                    *ts
+                } else {
+                    let ts = thread_read_ts(self, room, thread_root, &mut room_receipts).await?;
+                    threads.insert(thread_root.clone(), ts);
+                    ts
+                };
+                entry.ts > thread_read_ts
             } else {
-                room_unread
+                let read = match read {
+                    Some(read) => read,
+                    None => read.insert(read_state(self, room).await?),
+                };
+                is_unread(&entry, read)
             };
             if !matches(&entry, filter)
                 || (!unread && !include_read)
@@ -917,25 +1017,31 @@ impl Core {
         Ok((items, has_more))
     }
 
-    pub(crate) async fn mark_notification_seen(
+    pub(crate) async fn mark_notifications_seen(
         &self,
-        event_id: OwnedEventId,
+        event_ids: impl IntoIterator<Item = OwnedEventId> + Send,
     ) -> Result<(), RpcError> {
-        let client = self.client().await?;
-        let mut inbox = self.loaded_inbox(&client).await?;
+        let event_ids: HashSet<_> = event_ids.into_iter().collect();
+        let source = self.inbox_source(None).await?;
+        let mut inbox = self.loaded_inbox(&source).await?;
         let stored = inbox.stored();
-        let changed = stored
-            .entries
-            .iter()
-            .any(|entry| entry.event_id == event_id)
-            && stored.seen_notifications.insert(event_id);
+        let before = stored.seen_notifications.len();
+        stored.seen_notifications.extend(
+            stored
+                .entries
+                .iter()
+                .map(|entry| &entry.event_id)
+                .filter(|id| event_ids.contains(*id))
+                .cloned(),
+        );
+        let changed = stored.seen_notifications.len() != before;
         if changed {
             inbox.revision += 1;
             self.inbox_changed.notify_one();
         }
         drop(inbox);
         if changed {
-            self.emit(CoreEvent::InboxChanged);
+            self.emit_if_current(source.generation, CoreEvent::InboxChanged);
         }
         Ok(())
     }
@@ -945,13 +1051,14 @@ impl Core {
         include_read: bool,
         room_id: Option<&RoomId>,
     ) -> Result<(u32, bool), RpcError> {
-        let client = self.client().await?;
-        crate::rooms::fill_own_members(&client)
+        let source = self.inbox_source(None).await?;
+        let client = &source.session.client;
+        crate::rooms::fill_own_members(client)
             .await
             .or_failed(self, "inbox_memberships")?;
-        let stored = self.stored_inbox(&client).await?;
+        let stored = self.stored_inbox(&source).await?;
         let every_encrypted = self.every_encrypted_event_pushed().await;
-        let candidates = backfill_candidates(self, &client, &stored, include_read, room_id).await?;
+        let candidates = backfill_candidates(self, client, &stored, include_read, room_id).await?;
         drop(stored);
 
         let mut fresh = Vec::new();
@@ -1020,10 +1127,10 @@ impl Core {
         }
 
         let added = self
-            .record_inbox(&client, fresh, cursors, unread_scans)
+            .record_inbox(&source, fresh, cursors, unread_scans)
             .await?;
         if added > 0 {
-            self.emit(CoreEvent::InboxChanged);
+            self.emit_if_current(source.generation, CoreEvent::InboxChanged);
         }
         if added > 0 || failure.is_some() {
             tracing::info!(
@@ -1133,9 +1240,10 @@ mod tests {
     async fn recorded_notifications_reach_the_store_only_on_flush() {
         let server = MatrixMockServer::new().await;
         let (core, client, _room) = setup(&server, 1).await;
+        let source = core.inbox_source(None).await.unwrap();
         for (event, ts) in [("first", 100), ("second", 200)] {
             core.record_inbox(
-                &client,
+                &source,
                 vec![entry(event, ts)],
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -1145,12 +1253,12 @@ mod tests {
         }
         assert_eq!(super::load(&client).await.unwrap().entries, []);
 
-        core.flush_inbox(&client).await;
+        core.flush_inbox(&source).await;
 
         let stored = super::load(&client).await.unwrap();
         assert_eq!(stored.entries.len(), 2);
         *core.inbox.lock().await = super::InboxCache::default();
-        assert_eq!(core.stored_inbox(&client).await.unwrap().entries.len(), 2);
+        assert_eq!(core.stored_inbox(&source).await.unwrap().entries.len(), 2);
     }
 
     #[tokio::test]
@@ -1158,9 +1266,9 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let (core, client, _room) = setup(&server, 1).await;
         tokio::time::pause();
-        core.watch_inbox_persist(&client);
+        core.watch_inbox_persist(core.lifecycle.current()).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("first", 100)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1173,7 +1281,7 @@ mod tests {
         assert_eq!(stored.entries[0].event_id, event_id);
         assert!(stored.seen_notifications.is_empty());
 
-        core.mark_notification_seen(event_id.to_owned())
+        core.mark_notifications_seen([event_id.to_owned()])
             .await
             .unwrap();
         tokio::time::sleep(super::INBOX_FLUSH_INTERVAL * 2).await;
@@ -1183,11 +1291,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaving_a_joined_room_invalidates_the_inbox_without_writing_notifications() {
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+        let room = server
+            .sync_joined_room(&client, room_id!("!left:example.org"))
+            .await;
+        let (core, mut events) = Core::new("inbox", Box::new(MemorySessionStore::default()));
+        core.watch_inbox_memberships(&client, core.lifecycle.current());
+        room.update_and_save_room_info(|mut info| {
+            info.mark_as_left();
+            (
+                info,
+                matrix_sdk_base::RoomInfoNotableUpdateReasons::MEMBERSHIP,
+            )
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .unwrap(),
+            Some(crate::protocol::CoreEvent::InboxChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sync_and_activity_do_not_wait_for_a_queued_session_retirement() {
+        use std::time::Duration;
+
+        let server = MatrixMockServer::new().await;
+        let (core, client, room) = setup(&server, 1).await;
+        core.watch_notifications(&client, core.lifecycle.current())
+            .await;
+        let pinned = core.session.read().await;
+        let mut retirement = std::pin::pin!(core.take_session());
+        assert!(futures_util::poll!(&mut retirement).is_pending());
+
+        let raw = Raw::new(&message(
+            "$while-retiring",
+            crate::now_ms(),
+            client.user_id(),
+        ))
+        .unwrap()
+        .cast_unchecked::<AnySyncTimelineEvent>();
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            server.sync_room(
+                &client,
+                JoinedRoomBuilder::new(room.room_id()).add_timeline_event(raw),
+            ),
+        )
+        .await
+        .expect("the SDK timeline handler must not wait for the session pin");
+        tokio::time::timeout(Duration::from_secs(4), core.update_app_active(false))
+            .await
+            .expect("suspension must not wait for the session pin");
+        assert_eq!(
+            super::load(&client).await.unwrap().entries[0].event_id,
+            "$while-retiring"
+        );
+
+        drop(pinned);
+        assert!(retirement.await.is_some());
+    }
+
+    #[tokio::test]
     async fn suspending_with_unsaved_notifications_saves_them_and_lets_sync_resume() {
         let server = MatrixMockServer::new().await;
         let (core, client, _room) = setup(&server, 1).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("first", 100)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1209,10 +1383,11 @@ mod tests {
     #[tokio::test]
     async fn suspending_during_the_first_inbox_load_does_not_deadlock() {
         let server = MatrixMockServer::new().await;
-        let (core, client, _room) = setup(&server, 1).await;
+        let (core, _, _) = setup(&server, 1).await;
+        let source = core.inbox_source(None).await.unwrap();
         let closing = core.activity.closing_stores().await;
         let record = core.record_inbox(
-            &client,
+            &source,
             vec![entry("first", 100)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1234,9 +1409,9 @@ mod tests {
     #[tokio::test]
     async fn the_inbox_can_be_limited_to_one_room() {
         let server = MatrixMockServer::new().await;
-        let (core, client, room) = setup(&server, 1).await;
+        let (core, _, room) = setup(&server, 1).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("here", 200)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1277,9 +1452,9 @@ mod tests {
     #[tokio::test]
     async fn the_inbox_can_be_searched_by_sender() {
         let server = MatrixMockServer::new().await;
-        let (core, client, _) = setup(&server, 1).await;
+        let (core, _, _) = setup(&server, 1).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("from-alice", 200)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1310,7 +1485,7 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let (core, client, room) = setup(&server, 1).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("unread", 200)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1336,15 +1511,20 @@ mod tests {
     #[tokio::test]
     async fn a_stored_encrypted_preview_is_hidden_once_the_setting_is_off() {
         let server = MatrixMockServer::new().await;
-        let (core, client, _room) = setup(&server, 1).await;
+        let (core, _, _) = setup(&server, 1).await;
         let stored = Entry {
             body: Some("secret".to_owned()),
             encrypted: true,
             ..entry("secret", 200)
         };
-        core.record_inbox(&client, vec![stored], BTreeMap::new(), BTreeMap::new())
-            .await
-            .unwrap();
+        core.record_inbox(
+            &core.inbox_source(None).await.unwrap(),
+            vec![stored],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
         core.notification_content
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -1370,7 +1550,7 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let (core, client, room) = setup(&server, 1).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("unread", 200)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1449,7 +1629,7 @@ mod tests {
             ..entry(event, ts)
         };
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![
                 in_thread("seen", 200),
                 in_thread("new", 300),
@@ -1508,7 +1688,7 @@ mod tests {
             ..entry(event, ts)
         };
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![in_thread("seen", 200), in_thread("new", 300)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1570,7 +1750,7 @@ mod tests {
             .mount(server.server())
             .await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("unread", 200)],
             BTreeMap::new(),
             BTreeMap::new(),
@@ -1616,7 +1796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unfetchable_receipt_event_falls_back_to_the_receipt_time() {
+    async fn receipt_time_clears_room_mentions_but_not_focused_history() {
         let server = MatrixMockServer::new().await;
         let (core, client, room) = setup(&server, 1).await;
         let factory = EventFactory::new().room(room.room_id()).sender(User::Alice);
@@ -1650,19 +1830,47 @@ mod tests {
             .mount(server.server())
             .await;
         core.record_inbox(
-            &client,
-            vec![entry("old", 100), entry("new", 200)],
+            &core.inbox_source(None).await.unwrap(),
+            vec![
+                Entry {
+                    kind: "mention".to_owned(),
+                    highlight: true,
+                    ..entry("old", 100)
+                },
+                entry("new", 200),
+            ],
             BTreeMap::new(),
             BTreeMap::new(),
         )
         .await
         .unwrap();
 
+        let focused = InboxScope {
+            focused: true,
+            ..InboxScope::default()
+        };
+        let (items, _) = core
+            .inbox_notifications(InboxFilter::All, false, 30, None, focused)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].event_id, "$old");
+        assert!(!items[0].read);
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    request.url.path().contains("/event/") && request.url.path().ends_with("gone")
+                })
+        );
+
         let (items, _) = core
             .inbox_notifications(InboxFilter::All, false, 30, None, InboxScope::default())
             .await
             .unwrap();
-
         assert_eq!(
             items
                 .iter()
@@ -1670,6 +1878,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["$new"]
         );
+        let room_scope = InboxScope {
+            room_id: Some(room.room_id()),
+            ..InboxScope::default()
+        };
+        let (mentions, _) = core
+            .inbox_notifications(InboxFilter::Mentions, false, 30, None, room_scope)
+            .await
+            .unwrap();
+        assert!(mentions.is_empty());
+
+        core.mark_notifications_seen([event_id!("$old").to_owned()])
+            .await
+            .unwrap();
+        let (items, _) = core
+            .inbox_notifications(InboxFilter::All, true, 30, None, focused)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].event_id, "$old");
+        assert!(items[0].read);
     }
 
     #[tokio::test]
@@ -1725,6 +1953,146 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"start": "p0", "chunk": [message("$retry", 100, client.user_id())], "state": []})))
             .mount(server.server()).await;
         assert_eq!(core.backfill_inbox(false, None).await.unwrap(), (1, false));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_cannot_commit_entries_or_cursors_to_a_replacement_account() {
+        use std::time::Duration;
+
+        let server = MatrixMockServer::new().await;
+        let (core, first, room) = setup(&server, 1).await;
+        let first_source = core.inbox_source(None).await.unwrap();
+        let second = server
+            .client_builder()
+            .logged_in_with_token(
+                "second-token".to_owned(),
+                owned_user_id!("@second:example.org"),
+                ruma::owned_device_id!("SECOND"),
+            )
+            .build()
+            .await;
+        server.sync_joined_room(&second, room.room_id()).await;
+        let second_session = Session {
+            account_id: "second".to_owned(),
+            client: second.clone(),
+            sync_service: Arc::new(SyncService::builder(second.clone()).build().await.unwrap()),
+            homeserver: server.server().uri(),
+            oauth: false,
+        };
+        let second_entries = vec![entry("second", 100)];
+        let second_cursor =
+            BTreeMap::from([(room.room_id().to_owned(), Some("second-cursor".to_owned()))]);
+        let mut stored = super::Stored {
+            entries: second_entries.clone(),
+            cursors: second_cursor.clone(),
+            ..Default::default()
+        };
+        super::write(&second, super::encode(&mut stored).unwrap())
+            .await
+            .unwrap();
+
+        let (arrived, release) = block_backfill(&server, &first).await;
+        let backfill = tokio::spawn({
+            let core = core.clone();
+            async move { core.backfill_inbox(true, None).await }
+        });
+        tokio::time::timeout(Duration::from_secs(4), arrived.notified())
+            .await
+            .unwrap();
+        // Use the real detach/reset path. It must not wait for the HTTP request.
+        tokio::time::timeout(Duration::from_secs(4), core.take_session())
+            .await
+            .unwrap()
+            .unwrap();
+        core.lifecycle.set_current(2);
+        *core.session.write().await = Some(second_session);
+        let second_source = core.inbox_source(None).await.unwrap();
+        assert_eq!(
+            core.stored_inbox(&second_source).await.unwrap().cursors,
+            second_cursor
+        );
+        release.send(()).unwrap();
+        let error = backfill.await.unwrap().unwrap_err();
+        assert!(matches!(error.code, crate::protocol::RpcCode::Unavailable));
+
+        let cached = core.stored_inbox(&second_source).await.unwrap();
+        assert_eq!(cached.entries, second_entries);
+        assert_eq!(cached.cursors, second_cursor);
+        let new_entry = entry("new-second", 300);
+        core.record_inbox(
+            &second_source,
+            vec![new_entry.clone()],
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        let transition = core.activity.transition().await;
+        core.flush_inbox_locked(&first_source, &transition).await;
+        drop(transition);
+        assert_eq!(super::load(&first).await.unwrap().entries, []);
+        core.flush_inbox(&second_source).await;
+        let stored = super::load(&second).await.unwrap();
+        assert_eq!(stored.entries, [vec![new_entry], second_entries].concat());
+        assert_eq!(stored.cursors, second_cursor);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retirement_persists_backfill_committed_before_inbox_detach() {
+        use std::time::Duration;
+
+        let server = MatrixMockServer::new().await;
+        let (core, client, room) = setup(&server, 1).await;
+        let (arrived, release) = block_backfill(&server, &client).await;
+        let backfill = tokio::spawn({
+            let core = core.clone();
+            async move { core.backfill_inbox(true, None).await }
+        });
+        tokio::time::timeout(Duration::from_secs(4), arrived.notified())
+            .await
+            .unwrap();
+        let room_subscriptions = core.room_subscriptions.lock().await;
+        let mut retirement = std::pin::pin!(core.take_session());
+        assert!(futures_util::poll!(&mut retirement).is_pending());
+        release.send(()).unwrap();
+        assert_eq!(backfill.await.unwrap().unwrap(), (1, false));
+        assert_eq!(super::load(&client).await.unwrap().entries, []);
+        drop(room_subscriptions);
+        retirement.await.unwrap();
+        let stored = super::load(&client).await.unwrap();
+        assert_eq!(stored.entries[0].event_id, "$first");
+        assert_eq!(
+            stored.cursors,
+            BTreeMap::from([(room.room_id().to_owned(), None)])
+        );
+    }
+
+    async fn block_backfill(
+        server: &MatrixMockServer,
+        client: &Client,
+    ) -> (Arc<tokio::sync::Notify>, std::sync::mpsc::SyncSender<()>) {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let (release, wait) = std::sync::mpsc::sync_channel(1);
+        let wait = parking_lot::Mutex::new(wait);
+        let response = ResponseTemplate::new(200).set_body_json(json!({
+            "start": "first-start", "chunk": [message("$first", 200, client.user_id())], "state": [],
+        }));
+        Mock::given(method("GET"))
+            .and(path_regex("/messages$"))
+            .respond_with({
+                let arrived = arrived.clone();
+                move |_: &wiremock::Request| {
+                    arrived.notify_one();
+                    wait.lock()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    response.clone()
+                }
+            })
+            .expect(1)
+            .mount(server.server())
+            .await;
+        (arrived, release)
     }
 
     #[tokio::test]
@@ -1806,7 +2174,7 @@ mod tests {
         let server = MatrixMockServer::new().await;
         let (core, client, _) = setup(&server, 2).await;
         core.record_inbox(
-            &client,
+            &core.inbox_source(None).await.unwrap(),
             vec![entry("known", 200)],
             BTreeMap::new(),
             BTreeMap::new(),

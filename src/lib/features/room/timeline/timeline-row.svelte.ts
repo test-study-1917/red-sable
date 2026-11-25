@@ -1,5 +1,5 @@
-import { on } from 'svelte/events';
 import { onDestroy, type Snippet } from 'svelte';
+import { on } from 'svelte/events';
 
 import type {
   MemberView,
@@ -28,6 +28,7 @@ import { useSenderColors } from '../members/members.js';
 import { hasSenderRoles, useSenderRoles } from '../members/sender-roles.js';
 import { MessageSwipe } from '../messages/message-swipe.svelte.js';
 import { useMessageMenu } from '../messages/message-menu-open.svelte.js';
+import { hasMessageSelection, useMessageSelection } from '../messages/message-selection.svelte.js';
 import type { MessageActions } from '../messages/message-menu-items';
 import { useMessageDialogs } from '../messages/message-dialogs.svelte.js';
 import {
@@ -56,14 +57,7 @@ function canSelectText(target: EventTarget | null): boolean {
   );
 }
 
-export interface TimelineItemProps extends MessageCallbacks {
-  item: TimelineItemView;
-  collapsed: boolean;
-  unreadCount?: number;
-  replyPersona?: PerMessageProfileView | null;
-  threadPersona?: PerMessageProfileView | null;
-  roomId?: string;
-  highlighted?: boolean;
+export interface TimelineCallbacks extends MessageCallbacks {
   onMatrixLink?: (link: MatrixLink, anchor: HTMLAnchorElement) => void;
   onSenderProfile?: (
     userId: string,
@@ -73,6 +67,20 @@ export interface TimelineItemProps extends MessageCallbacks {
   onMentionUser?: (userId: string, name: string) => void;
   onRetrySend?: (transactionId: string) => void;
   onCancelSend?: (transactionId: string) => void;
+  onOpenMedia?: (eventId: string) => void;
+  onVotePoll?: (eventId: string, answers: string[]) => void;
+  onEndPoll?: (eventId: string) => void;
+  onSwipeMembers?: () => void;
+}
+
+export interface TimelineItemProps extends TimelineCallbacks {
+  item: TimelineItemView;
+  collapsed: boolean;
+  unreadCount?: number;
+  replyPersona?: PerMessageProfileView | null;
+  threadPersona?: PerMessageProfileView | null;
+  roomId?: string;
+  highlighted?: boolean;
   currentUserId?: string | null;
   canRedactOwn?: boolean;
   canRedactOthers?: boolean;
@@ -90,15 +98,11 @@ export interface TimelineItemProps extends MessageCallbacks {
   avatarsInHeaders?: boolean;
   members?: readonly MemberView[];
   onJumpToEvent?: (eventId: string) => void;
-  onOpenMedia?: (eventId: string) => void;
-  onVotePoll?: (eventId: string, answers: string[]) => void;
-  onEndPoll?: (eventId: string) => void;
   events?: TimelineEventIndex;
   onMenuOpenChange?: (open: boolean) => void;
   placeholder?: boolean;
   placeholderCharacters?: number;
   overrideCosmetics?: SenderCosmetics | null;
-  onSwipeMembers?: () => void;
 }
 
 export interface TimelineRowOptions extends MessageCallbacks {
@@ -129,6 +133,7 @@ export class TimelineRow {
   readonly core = useCoreClient();
   readonly dialogs = useMessageDialogs();
   readonly menu = useMessageMenu();
+  readonly selection = hasMessageSelection() ? useMessageSelection() : null;
   readonly profiles = new TimelineItemProfiles(this.core);
   readonly engagement = new TimelineItemEngagement(() => this.element);
   readonly actionExecutor: MessageActionExecutor;
@@ -162,11 +167,15 @@ export class TimelineRow {
     );
     this.swipe = new MessageSwipe({
       enabled: () =>
+        !this.selecting &&
         this.actionable &&
         !selectedText(this.element) &&
         (this.swipeOpensMembers || this.actions.onReply !== undefined),
       canEdit: () =>
-        this.actionable && !this.swipeOpensMembers && this.actions.onEdit !== undefined,
+        !this.selecting &&
+        this.actionable &&
+        !this.swipeOpensMembers &&
+        this.actions.onEdit !== undefined,
       onReply: () => {
         const { selected, onCancelContext, onSwipeMembers } = this.#options();
         if (this.swipeOpensMembers) onSwipeMembers?.();
@@ -180,7 +189,7 @@ export class TimelineRow {
       },
     });
     this.press = new LongPress({
-      enabled: () => this.actionable || this.canCancelSend,
+      enabled: () => !this.selecting && (this.actionable || this.canCancelSend),
       onPress: (event) => {
         const { item } = this.#options();
         this.menu.set(item.id, false);
@@ -195,6 +204,7 @@ export class TimelineRow {
     });
     this.#doubleTap = new DoubleTap(() => {
       if (
+        this.selecting ||
         !this.actionable ||
         selectedText(this.element) ||
         !preferences.doubleTapReact ||
@@ -275,6 +285,10 @@ export class TimelineRow {
     () =>
       preferences.messageSwipeAction === 'members' && this.#options().onSwipeMembers !== undefined
   );
+  readonly selecting = $derived(this.selection?.active ?? false);
+  readonly multiSelected = $derived.by(
+    () => this.selection?.has(this.#options().item.event_id) ?? false
+  );
   readonly actionable = $derived.by(() => {
     const { item, preview } = this.#options();
     return !preview && item.event_id !== null && this.stalled === null && !this.pending;
@@ -284,7 +298,16 @@ export class TimelineRow {
     return !preview && this.pending && item.transaction_id !== null && onCancelSend !== undefined;
   });
   readonly actions = $derived.by((): MessageActions => {
-    if (!this.canCancelSend) return this.actionExecutor.actions;
+    if (!this.canCancelSend) {
+      const base = this.actionExecutor.actions;
+      if (!this.actionable || this.selection === null || this.selecting) return base;
+      return {
+        ...base,
+        onSelect: () => {
+          this.selection?.enter(this.#options().item);
+        },
+      };
+    }
     return {
       onCancelSend: () => {
         const { item, onCancelSend } = this.#options();
@@ -293,7 +316,9 @@ export class TimelineRow {
     };
   });
   readonly showActions = $derived(
-    (this.actionable || this.canCancelSend) && (this.engagement.engaged || this.actionsPinned)
+    !this.selecting &&
+      (this.actionable || this.canCancelSend) &&
+      (this.engagement.engaged || this.actionsPinned)
   );
 
   selectionActions(text: string, quote = selectedQuote(this.element)): MessageActions {
@@ -324,6 +349,7 @@ export class TimelineRow {
   attach = (node: HTMLElement): (() => void) => {
     this.element = node;
     const detachSwipe = this.swipe.attach(node);
+    const offClick = on(node, 'click', this.#onRowClick);
     let timer: ReturnType<typeof setTimeout>;
     const scheduleSelection = () => {
       clearTimeout(timer);
@@ -332,6 +358,7 @@ export class TimelineRow {
       timer = setTimeout(() => {
         if (
           this.#touchSelection !== 'released' ||
+          this.selecting ||
           !this.actionable ||
           this.menu.id !== null ||
           this.dialogs.isOpen(this.#options().item, 'sheet')
@@ -360,8 +387,31 @@ export class TimelineRow {
       detachRelease();
       detachCancel();
       detachSwipe();
+      offClick();
       this.element = null;
     };
+  };
+
+  #onRowClick = (event: MouseEvent): void => {
+    const fromToggle =
+      event.target instanceof Element && event.target.closest('.select-toggle') !== null;
+    if (
+      !this.selecting ||
+      !this.actionable ||
+      (this.#options().editing && !fromToggle) ||
+      event.button !== 0 ||
+      event.defaultPrevented
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const focusedHere = this.element?.contains(document.activeElement) ?? false;
+    const { item } = this.#options();
+    if (event.shiftKey) this.selection?.selectRange(item);
+    else this.selection?.toggle(item);
+    if (focusedHere && !this.selection?.active) {
+      this.element?.focus();
+    }
   };
 
   pinActions = (open: boolean): void => {
@@ -373,7 +423,7 @@ export class TimelineRow {
   pointerDown = (event: PointerEvent): void => {
     this.#doubleTap.down(event);
     if (event.pointerType === 'mouse') this.engagement.hold();
-    if (event.pointerType !== 'mouse' && canSelectText(event.target)) {
+    if (!this.selecting && event.pointerType !== 'mouse' && canSelectText(event.target)) {
       this.#touchSelection = 'holding';
       this.press.cancel();
       return;
@@ -393,6 +443,10 @@ export class TimelineRow {
   };
 
   openContextMenu = (event: MouseEvent): void => {
+    if (this.selecting) {
+      event.preventDefault();
+      return;
+    }
     // On touch, let the platform establish a text selection before offering quote actions.
     if (touchContextMenu(event) && canSelectText(event.target)) return;
     const { item } = this.#options();

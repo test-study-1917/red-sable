@@ -47,6 +47,7 @@ vi.mock('#lib/features/room/messages/message-scope.svelte.js', async () => {
 import ForumThreadItemHarness from './ForumThreadItemHarness.test.svelte';
 import { collectForumThreads, type ForumThread } from './forum-threads';
 import ForumThreadList from './ForumThreadListHarness.test.svelte';
+import { reactiveToggle } from '#lib/test-support/toggle.svelte.js';
 import { withRowFields } from '#lib/features/room/timeline/row-fixtures.js';
 
 const root = withRowFields({
@@ -76,6 +77,7 @@ const root = withRowFields({
   per_message_profile: null,
   bundled_link_previews: [],
   link_previews_removed: null,
+  shared_by: null,
   redacted_on_ban: null,
   mention: 'none',
   forwarded: null,
@@ -250,6 +252,10 @@ test('shows votes as text to someone who cannot react', () => {
   expect(within(card()).queryByRole('button', { name: /2 votes/ })).not.toBeInTheDocument();
 });
 
+function noopCallbacks() {
+  return { onOpen: vi.fn(), onDelete: vi.fn(), onCopyLink: vi.fn() };
+}
+
 test.each(['list', 'gallery'] as const)(
   'a deleted pinned post leaves the %s view',
   async (layout) => {
@@ -257,11 +263,9 @@ test.each(['list', 'gallery'] as const)(
       threads: [thread],
       loading: false,
       canLoadMore: false,
-      onOpen: vi.fn(),
+      callbacks: noopCallbacks(),
       canDelete: () => false,
-      onDelete: vi.fn(),
       roomId: '!forum:example.org',
-      onCopyLink: vi.fn(),
       onLoadMore: vi.fn(),
       isPinned: () => true,
       layout,
@@ -274,6 +278,43 @@ test.each(['list', 'gallery'] as const)(
     await rerender({ threads: collectForumThreads([redacted, root], null) });
     expect(screen.queryByRole('article')).not.toBeInTheDocument();
     expect(screen.queryByRole('list', { name: 'Pinned threads' })).not.toBeInTheDocument();
-    expect(screen.getByText('No threads yet.')).toBeVisible();
+    expect(document.querySelector('.forum-thread-list-empty')).not.toBeNull();
   }
 );
+
+test('thread actions follow a live change to the host callbacks', async () => {
+  const user = userEvent.setup();
+  const canPin = reactiveToggle();
+  const onPin = () => {};
+  render(ForumThreadList, {
+    threads: [thread],
+    loading: false,
+    canLoadMore: false,
+    callbacks: {
+      ...noopCallbacks(),
+      get onPin() {
+        return canPin.on ? onPin : undefined;
+      },
+    },
+    canDelete: () => false,
+    roomId: '!forum:example.org',
+    onLoadMore: vi.fn(),
+  });
+  const pinItem = async () => {
+    await user.pointer({ keys: '[MouseRight]', target: card() });
+    const menu = await screen.findByRole('menu');
+    const found = within(menu).queryByRole('menuitem', { name: 'Pin message' });
+    await user.keyboard('{Escape}');
+    await vi.waitFor(() => {
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      expect(document.body.style.pointerEvents).toBe('');
+    });
+    return found;
+  };
+
+  expect(await pinItem()).not.toBeNull();
+  canPin.on = false;
+  expect(await pinItem()).toBeNull();
+  canPin.on = true;
+  expect(await pinItem()).not.toBeNull();
+});

@@ -9,7 +9,9 @@ use wiremock::{
     matchers::{method, path_regex},
 };
 
-use super::{Event, LeaveCode, LeaveOut, StickySync, live_events, send, send_delayed};
+use super::{
+    Event, LeaveCode, LeaveOut, StickyExpiry, StickySync, send, send_delayed, unexpired_events,
+};
 use crate::delayed_events::DelayedEventsSupport;
 
 async fn room() -> (MatrixMockServer, matrix_sdk::Room) {
@@ -31,6 +33,8 @@ fn plaintext_membership_is_rejected_in_encrypted_rooms() {
                 "member":{"user_id":"@a:example.org", "device_id":"DEVICE", "id":"member"}}}),
         device: None,
         redacts: None,
+        expiry: StickyExpiry::Known(60_100),
+        observed_at: 100,
     };
     let mut memberships = crate::calls::membership::StickyMemberships::default();
     assert!(event.apply(&mut memberships, true, 100));
@@ -251,7 +255,7 @@ async fn test_sticky_sync_sends_bounded_extensions_and_parses_both_event_locatio
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "pos": "p1",
             "rooms": { room.room_id().as_str(): { "timeline": [{"type":"m.room.message","event_id":"$timeline","sender":"@a:example.org","origin_server_ts":1,"content":{}}] } },
-            "extensions": { "org.matrix.msc4354.sticky_events": { "next_batch":"s1", "rooms": { room.room_id().as_str(): { "events": [{"type":"m.room.message","event_id":"$sticky","sender":"@a:example.org","origin_server_ts":1,"content":{}}] } } } }
+            "extensions": { "org.matrix.msc4354.sticky_events": { "rooms": { room.room_id().as_str(): { "events": [{"type":"m.room.message","event_id":"$sticky","sender":"@a:example.org","origin_server_ts":1,"content":{}}] } } } }
         })))
         .mount(server.server())
         .await;
@@ -281,7 +285,7 @@ async fn test_sticky_sync_sends_bounded_extensions_and_parses_both_event_locatio
         json!([["m.room.create", ""]]),
         "Synapse rejects a room subscription without required_state"
     );
-    assert_eq!(body["extensions"]["to_device"]["enabled"], false);
+    assert_ne!(body["extensions"]["to_device"]["enabled"], true);
     assert_eq!(
         body["extensions"]["org.matrix.msc4354.sticky_events"]["enabled"],
         true
@@ -324,13 +328,13 @@ async fn test_sticky_sync_applies_redactions_in_encrypted_rooms() {
 }
 
 #[async_test]
-async fn test_sticky_sync_reuses_since_when_incremental_response_is_empty() {
+async fn test_sticky_sync_resumes_from_the_connection_position() {
     let (server, room) = room().await;
     Mock::given(method("POST"))
         .and(path_regex(".*sync.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "pos": "p1",
-            "extensions": {"org.matrix.msc4354.sticky_events": {"next_batch": "s1"}}
+            "extensions": {"org.matrix.msc4354.sticky_events": {}}
         })))
         .expect(1)
         .up_to_n_times(1)
@@ -346,15 +350,11 @@ async fn test_sticky_sync_reuses_since_when_incremental_response_is_empty() {
         .mount(server.server())
         .await;
     let mut sync = StickySync::new(1);
-    sync.sync(&room, Duration::from_secs(1))
-        .await
-        .expect("initial sync");
-    sync.sync(&room, Duration::from_secs(1))
-        .await
-        .expect("incremental sync");
-    sync.sync(&room, Duration::from_secs(1))
-        .await
-        .expect("empty incremental sync");
+    for _ in 0..3 {
+        sync.sync(&room, Duration::from_secs(1))
+            .await
+            .expect("sticky sync");
+    }
 
     let received = server
         .received_requests()
@@ -363,33 +363,28 @@ async fn test_sticky_sync_reuses_since_when_incremental_response_is_empty() {
         .into_iter()
         .filter(|request| request.method == "POST" && request.url.path().contains("sync"))
         .collect::<Vec<_>>();
-    assert_eq!(received.len(), 3);
-    assert!(
-        received[0]
-            .url
-            .query_pairs()
-            .find(|(key, _)| key == "pos")
-            .is_none()
-    );
+    let positions = received
+        .iter()
+        .map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "pos")
+                .map(|(_, pos)| pos.into_owned())
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        received[1]
-            .url
-            .query_pairs()
-            .find(|(key, _)| key == "pos")
-            .unwrap()
-            .1,
-        "p1"
+        positions,
+        [None, Some("p1".to_owned()), Some("p2".to_owned())]
     );
-    let second: serde_json::Value = serde_json::from_slice(&received[1].body).unwrap();
-    assert_eq!(
-        second["extensions"]["org.matrix.msc4354.sticky_events"]["since"],
-        "s1"
-    );
-    let third: serde_json::Value = serde_json::from_slice(&received[2].body).unwrap();
-    assert_eq!(
-        third["extensions"]["org.matrix.msc4354.sticky_events"]["since"],
-        "s1"
-    );
+    for request in &received {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(
+            body["extensions"]["org.matrix.msc4354.sticky_events"]
+                .get("since")
+                .is_none()
+        );
+    }
 }
 
 #[async_test]
@@ -538,32 +533,67 @@ async fn test_delayed_send_refreshes_expired_credentials_and_preserves_sticky_qu
     );
 }
 
-#[async_test]
-async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
-    let (_server, room) = room().await;
-    let now = crate::now_ms();
-    let mut response = ruma::api::client::sync::sync_events::msc4186::Response::new("1".to_owned());
-    let mut sticky_room =
-        ruma::api::client::sync::sync_events::msc4186::response::StickyEventsRoom::default();
-    sticky_room.events.push(
-        ruma::serde::Raw::new(&json!({
+fn member_batch(
+    room: &matrix_sdk::Room,
+    origin: u64,
+    ttl_field: &str,
+    ttl: u64,
+) -> ruma::api::client::sync::sync_events::msc4186::Response {
+    event_batch(
+        room,
+        &json!({
             "type": "m.rtc.member", "sender": "@other:example.org", "event_id": "$member",
-            "origin_server_ts": now, "msc4354_sticky": {"duration_ms": 900_000},
+            "origin_server_ts": origin, "msc4354_sticky": {"duration_ms": 900_000},
+            "unsigned": { (ttl_field): ttl },
             "content": {
                 "msc4354_sticky_key": "member", "slot_id": "m.call#ROOM",
                 "application": {"type": "m.call"},
                 "member": {"user_id": "@other:example.org", "device_id": "PHONE", "id": "member"},
                 "transports": {"published": [{"type": "livekit", "livekit_service_url": "https://sfu.example"}]}
             }
-        }))
-        .unwrap()
-        .cast_unchecked(),
-    );
+        }),
+    )
+}
+
+fn event_batch(
+    room: &matrix_sdk::Room,
+    value: &serde_json::Value,
+) -> ruma::api::client::sync::sync_events::msc4186::Response {
+    use ruma::api::client::sync::sync_events::msc4186;
+
+    let mut response = msc4186::Response::new("1".to_owned());
+    let mut sticky_room = msc4186::response::StickyEventsRoom::default();
+    sticky_room
+        .events
+        .push(ruma::serde::Raw::new(value).unwrap().cast_unchecked());
     response
         .extensions
         .sticky_events
         .rooms
         .insert(room.room_id().to_owned(), sticky_room);
+    response
+}
+
+#[async_test]
+async fn test_independent_sticky_deadline_survives_delayed_apply_and_later_sdk_receipts() {
+    let (_server, room) = room().await;
+    let before = crate::now_ms();
+    let response = member_batch(&room, before - 10_000, "sticky_duration_ttl_ms", 1_000);
+    let event = StickySync::new(1)
+        .resolve_response(&room, Ok(response), before)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let expires_at = event.expiry.at();
+    assert_eq!(expires_at, before + 1_000);
+    let mut delayed = super::super::membership::StickyMemberships::default();
+    assert!(event.apply(&mut delayed, false, expires_at));
+    assert_eq!(delayed.members(expires_at), []);
+    let mut members = super::super::membership::StickyMemberships::default();
+    assert!(event.apply(&mut members, false, expires_at - 1));
+
+    let response = member_batch(&room, before - 10_000, "sticky_duration_ttl_ms", 1_000);
     room.client()
         .process_sliding_sync_test_helper(
             &response,
@@ -571,13 +601,225 @@ async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
         )
         .await
         .unwrap();
+    let cached = unexpired_events(&room).pop().unwrap();
+    assert!(cached.expiry.at() >= expires_at);
+    assert!(!cached.apply(&mut members, false, expires_at - 1));
+    assert_eq!(
+        members.members(expires_at - 1)[0].expires_at_ms,
+        Some(expires_at)
+    );
+    assert_eq!(members.members(expires_at), []);
+}
 
+#[async_test]
+async fn test_tombstone_expiring_between_receipt_and_apply_still_replaces_join() {
+    let (_server, room) = room().await;
+    let mut sync = StickySync::new(1);
+    let response = member_batch(&room, 100, "sticky_duration_ttl_ms", 12_000);
+    let joined = sync
+        .resolve_response(&room, Ok(response), 1_000)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     let mut members = super::super::membership::StickyMemberships::default();
-    for event in live_events(&room) {
-        event.apply(&mut members, false, now);
-    }
+    assert!(joined.apply(&mut members, false, 1_000));
+    let observed = members.members(1_000).pop().unwrap();
 
-    let members = members.members(now);
-    assert_eq!(members.len(), 1);
-    assert_eq!(members[0].user_id, "@other:example.org");
+    for (id, ttl) in [("$expired-on-receipt", 0), ("$leave", 500)] {
+        let response = event_batch(
+            &room,
+            &json!({
+                "type": "m.rtc.member", "sender": "@other:example.org", "event_id": id,
+                "origin_server_ts": 1_400, "msc4354_sticky": {"duration_ms": 900_000},
+                "unsigned": {"sticky_duration_ttl_ms": ttl},
+                "content": {"msc4354_sticky_key": "member"}
+            }),
+        );
+        let event = sync
+            .resolve_response(&room, Ok(response), 1_500)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(event.apply(&mut members, false, 2_000), ttl != 0);
+    }
+    assert!(!joined.apply(&mut members, false, 8_000));
+    assert_eq!(members.members(8_000), []);
+    assert_eq!(members.confirmed_departure(&observed, 8_000), Some(1_400));
+}
+
+#[async_test]
+async fn test_encrypted_sticky_replay_cannot_renew_the_pending_deadline() {
+    use matrix_sdk_test::{JoinedRoomBuilder, event_factory::EventFactory};
+    use ruma::{events::room::encrypted::OriginalSyncRoomEncryptedEvent, serde::Raw};
+
+    let server = MatrixMockServer::new().await;
+    server.mock_crypto_endpoints_preset().await;
+    let (alice, bob) = server.set_up_alice_and_bob_for_encryption().await;
+    let room_id = room_id!("!sticky:example.org");
+    let factory = EventFactory::new()
+        .room(room_id)
+        .sender(alice.user_id().unwrap());
+    for client in [&alice, &bob] {
+        server
+            .mock_sync()
+            .ok_and_run(client, |sync| {
+                sync.add_joined_room(
+                    JoinedRoomBuilder::new(room_id)
+                        .add_state_event(factory.room_encryption())
+                        .add_state_event(factory.member(alice.user_id().unwrap()))
+                        .add_state_event(factory.member(bob.user_id().unwrap())),
+                );
+            })
+            .await;
+    }
+    server
+        .mock_get_members()
+        .ok(vec![
+            factory.member(alice.user_id().unwrap()).into_raw(),
+            factory.member(bob.user_id().unwrap()).into_raw(),
+        ])
+        .mount()
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r"/rooms/.*/send/m\.room\.encrypted/.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id":"$encrypted"})))
+        .mount(server.server())
+        .await;
+    let (guard, key_event) = server
+        .mock_capture_put_to_device(alice.user_id().unwrap())
+        .await;
+    let alice_room = alice.get_room(room_id).unwrap();
+    send(&alice, &alice_room, json!({
+        "msc4354_sticky_key": "member", "slot_id": "m.call#ROOM",
+        "application": {"type": "m.call"},
+        "member": {"id": "member", "user_id": alice.user_id().unwrap(), "device_id": alice.device_id().unwrap()},
+    })).await.unwrap();
+    let key_event = key_event.await;
+    drop(guard);
+    let request = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path().contains("/send/m.room.encrypted/"))
+        .unwrap();
+    let encrypted = json!({
+        "type": "m.room.encrypted", "event_id": "$encrypted", "sender": alice.user_id().unwrap(),
+        "origin_server_ts": 500, "msc4354_sticky": {"duration_ms": 60_000},
+        "unsigned": {"msc4354_sticky_duration_ttl_ms": 1_000},
+        "content": serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+    });
+    let room = bob.get_room(room_id).unwrap();
+    let mut sync = StickySync::new(1);
+    for received_at in [1_000, 1_500] {
+        assert!(
+            sync.resolve_response(&room, Ok(event_batch(&room, &encrypted)), received_at)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    server
+        .mock_sync()
+        .ok_and_run(&bob, |sync| {
+            sync.add_to_device_event(key_event.deserialize_as().unwrap());
+        })
+        .await;
+    let raw = Raw::new(&encrypted)
+        .unwrap()
+        .cast_unchecked::<OriginalSyncRoomEncryptedEvent>();
+    assert!(
+        room.decrypt_event(&raw, None)
+            .await
+            .unwrap()
+            .encryption_info()
+            .is_some()
+    );
+    let empty = ruma::api::client::sync::sync_events::msc4186::Response::new("2".to_owned());
+    assert!(
+        sync.resolve_response(&room, Ok(empty), 2_100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        sync.resolve_response(&room, Ok(event_batch(&room, &encrypted)), 2_200)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[async_test]
+async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
+    for (field, ttl) in [
+        ("msc4354_sticky_duration_ttl_ms", 1_000),
+        ("sticky_duration_remaining_ms", 0),
+        ("sticky_duration_ttl_ms", 1_000),
+    ] {
+        let (_server, room) = room().await;
+        let now = crate::now_ms();
+        let response = member_batch(&room, now, field, ttl);
+        room.client()
+            .process_sliding_sync_test_helper(
+                &response,
+                &matrix_sdk_base::RequestedRequiredStates::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut members = super::super::membership::StickyMemberships::default();
+        if ttl == 0 {
+            let mut earlier: serde_json::Value = serde_json::from_str(
+                response.extensions.sticky_events.rooms[room.room_id()].events[0]
+                    .json()
+                    .get(),
+            )
+            .unwrap();
+            earlier["unsigned"][field] = json!(1_000);
+            assert!(members.apply(&earlier, now));
+            let at = crate::now_ms();
+            super::merge_sdk(&room, &mut members, false, at);
+            assert!(members.members(at).is_empty());
+            assert!(room.sticky_events().unexpired().is_empty());
+            continue;
+        }
+        let expires_at = u64::from(room.sticky_events().unexpired()[0].expires_at.get());
+        let event = unexpired_events(&room).pop().unwrap();
+        let imported_at = expires_at - 100;
+        assert!(event.apply(&mut members, false, imported_at));
+        let member = &members.members(imported_at)[0];
+        assert_eq!(member.user_id, "@other:example.org");
+        assert_eq!(member.expires_at_ms, Some(expires_at));
+        assert!(
+            !event.apply(&mut members, false, expires_at),
+            "replay must not extend the TTL"
+        );
+        assert_eq!(members.members(expires_at), []);
+
+        let mut members = super::super::membership::StickyMemberships::default();
+        assert!(members.apply(&event.value, imported_at));
+        assert!(!event.apply(&mut members, false, imported_at));
+        assert_eq!(
+            members.members(imported_at)[0].expires_at_ms,
+            Some(expires_at)
+        );
+
+        let mut members = super::super::membership::StickyMemberships::default();
+        assert!(members.apply(&event.value, imported_at));
+        assert_eq!(members.members(expires_at).len(), 1);
+        assert!(!event.apply(&mut members, false, expires_at));
+        assert_eq!(members.members(expires_at), []);
+
+        let mut newer = event.value.clone();
+        newer["event_id"] = json!("$newer");
+        assert!(members.apply(&newer, expires_at));
+        assert!(!event.apply(&mut members, false, expires_at));
+        assert_eq!(
+            members.members(expires_at)[0].expires_at_ms,
+            Some(expires_at + ttl)
+        );
+    }
 }

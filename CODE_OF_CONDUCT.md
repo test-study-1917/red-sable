@@ -45,7 +45,7 @@ apply.
 
 ## Where this applies
 
-These rules apply to Sable's official GitHub repositories, Matrix space and rooms as well as profiles within those spaces.
+These rules apply to Sable's official repositories, Matrix space and rooms as well as profiles within those spaces.
 Public profiles as well as per space/room profiles will be moderated as both are visible and we can not reliably work with potential
 state mismatches. 
 
@@ -59,7 +59,7 @@ If a moderator asks you to stop, stop.
 
 When this code of conduct is not followed,
 moderators may remove content, issue a warning, kick, or ban someone from Sable's Matrix
-rooms or block them from its GitHub repositories.
+rooms or block them from its repositories.
 
 When practical, moderators will explain the problem and what needs to happen next.
 Moderators will step back from handling reports that involve them directly, provided another moderator is available. You may request a review by emailing the address listed in the Reporting section below if you believe a decision was mistaken.

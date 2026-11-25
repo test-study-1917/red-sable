@@ -270,6 +270,15 @@ impl KeyDistributor {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    pub(crate) fn set_identity(&mut self, identity: String) {
+        self.identity = identity;
+    }
+
     pub(crate) const fn set_wire(&mut self, wire: super::membership::RtcWire) {
         self.wire = wire;
     }
@@ -561,6 +570,7 @@ mod tests {
             created_ts,
             joined_ts: created_ts,
             expires_at_ms: None,
+            sticky_event_id: None,
             foci: Vec::new(),
             screen_sharing: false,
             wire: super::super::membership::RtcWire::Deployed,
@@ -956,6 +966,7 @@ mod sdk_tests {
             created_ts: 100,
             joined_ts: 100,
             expires_at_ms: None,
+            sticky_event_id: None,
             foci: Vec::new(),
             screen_sharing: false,
             wire: super::super::membership::RtcWire::Deployed,

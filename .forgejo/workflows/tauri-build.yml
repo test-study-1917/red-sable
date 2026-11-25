@@ -25,10 +25,10 @@ env:
   FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
   # Each nightly is ~1.5 GB of bundles on a node with ~100 GB of disk.
   NIGHTLY_KEEP: 20
-  SCCACHE_BUCKET: sccache
+  SCCACHE_BUCKET: ow-oops-sccache
   SCCACHE_S3_KEY_PREFIX: sable-next
-  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: us-east-1
+  SCCACHE_ENDPOINT: https://s3.gra.io.cloud.ovh.net
+  SCCACHE_REGION: gra
   SCCACHE_S3_USE_SSL: 'true'
   SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
 jobs:
@@ -160,6 +160,14 @@ jobs:
             src/generated/wasm
           if-no-files-found: error
           retention-days: 7
+  deploy:
+    name: Deploy to Cloudflare
+    needs: build-web
+    # Forgejo copies this condition onto the called jobs, where the event is
+    # workflow_call, so it tests the ref.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    uses: ./.forgejo/workflows/cloudflare-web.yml
+    secrets: inherit
   docker:
     name: Build ${{ matrix.image }} image (${{ matrix.arch }})
     needs: [setup-release, build-web]
@@ -192,15 +200,17 @@ jobs:
       DOCKERFILE: ${{ matrix.file }}
       PACKAGES_USER: ${{ secrets.PACKAGES_USER }}
       PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - name: Check out repository
         uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.setup-release.outputs.ref }}
           persist-credentials: false
-      # The web image reuses the bundle built for the desktop packages.
+      # The web image reuses the bundle built for the desktop packages, the
+      # server image its WASM bindings.
       - name: Download web assets
-        if: ${{ matrix.image == 'web' }}
         uses: https://code.forgejo.org/forgejo/download-artifact@769f970437aa3291b13f35dc23fc87967d7fb19f # v7
         with:
           name: web-assets
@@ -213,8 +223,13 @@ jobs:
         run: |
           revision="$(git rev-parse HEAD)"
           image="$REGISTRY/${GITHUB_REPOSITORY,,}"
-          [ "$IMAGE_KIND" = web ] || image="$image-server"
-          # The BuildKit container outlives the job so its local cache is reused across runs.
+          if [ "$IMAGE_KIND" = web ]; then
+            prebuilt=(--build-context dist=dist)
+          else
+            image="$image-server"
+            prebuilt=(--build-context wasm=src/generated/wasm)
+          fi
+          # Where Docker outlives the job, so does this builder and its local cache.
           builder="ci-builder-$ARCH"
           docker context inspect "ci-$ARCH" >/dev/null 2>&1 || docker context create "ci-$ARCH"
           docker buildx inspect "$builder" >/dev/null 2>&1 \
@@ -225,12 +240,17 @@ jobs:
               --builder "$builder" \
               --file "$DOCKERFILE" \
               --platform "linux/$ARCH" \
+              "${prebuilt[@]}" \
+              --build-arg SCCACHE_BUCKET --build-arg SCCACHE_ENDPOINT --build-arg SCCACHE_REGION \
+              --build-arg SCCACHE_S3_KEY_PREFIX --build-arg SCCACHE_S3_USE_SSL \
+              --secret id=aws_access_key_id,env=AWS_ACCESS_KEY_ID \
+              --secret id=aws_secret_access_key,env=AWS_SECRET_ACCESS_KEY \
               --provenance=false \
               --label "org.opencontainers.image.source=$FORGEJO_URL/$GITHUB_REPOSITORY" \
               --label "org.opencontainers.image.revision=$revision" \
               --label "org.opencontainers.image.version=$VERSION" \
-              --cache-from "type=registry,ref=$image:buildcache-$ARCH" \
-              --cache-to "type=registry,ref=$image:buildcache-$ARCH,mode=max,ignore-error=true" \
+              --cache-from "type=s3,region=$SCCACHE_REGION,bucket=$SCCACHE_BUCKET,endpoint_url=$SCCACHE_ENDPOINT,prefix=buildkit/sable-next/,name=$IMAGE_KIND-$ARCH" \
+              --cache-to "type=s3,region=$SCCACHE_REGION,bucket=$SCCACHE_BUCKET,endpoint_url=$SCCACHE_ENDPOINT,prefix=buildkit/sable-next/,name=$IMAGE_KIND-$ARCH,mode=max,ignore-error=true" \
               --output "type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" \
               --metadata-file "$RUNNER_TEMP/build-metadata.json" && break
             [ "$attempt" -lt 3 ] || exit 1
@@ -658,6 +678,9 @@ jobs:
         shell: bash
     timeout-minutes: 60
     env:
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       VERSION: ${{ needs.setup-release.outputs.version }}
       TAG: ${{ needs.setup-release.outputs.tag }}
       SHA: ${{ github.sha }}
@@ -717,6 +740,9 @@ jobs:
       - name: Remove the signing keychain
         if: ${{ always() && env.APPLE_CERTIFICATE != '' }}
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+      - name: Show sccache stats
+        if: ${{ always() && env.RUSTC_WRAPPER != '' }}
+        run: sccache --show-stats || true
       - name: Upload native addon symbols
         run: node scripts/ci/upload-sentry-symbols.mjs electron/dist
       - name: Verify native core shutdown
@@ -739,6 +765,9 @@ jobs:
       ipa_version: ${{ steps.ipa.outputs.version }}
       ipa_build: ${{ steps.ipa.outputs.build }}
     env:
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       TAG: ${{ needs.setup-release.outputs.tag }}
       VERSION: ${{ needs.setup-release.outputs.version }}
       RUST_TARGETS: aarch64-apple-ios
@@ -818,6 +847,9 @@ jobs:
             echo "version=$short_version"
             echo "build=$bundle_version"
           } >> "$GITHUB_OUTPUT"
+      - name: Show sccache stats
+        if: ${{ always() && env.RUSTC_WRAPPER != '' }}
+        run: sccache --show-stats || true
       - name: Attach iOS bundle to release
         env:
           IPA_PATH: ${{ steps.ipa.outputs.path }}
@@ -825,17 +857,19 @@ jobs:
       - name: Upload to TestFlight
         env:
           IPA_PATH: ${{ steps.ipa.outputs.path }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APP_STORE_API_KEY_BASE64 }}
         run: |
           command -v fastlane >/dev/null || brew install fastlane
           fastlane ios testflight ipa:"$IPA_PATH" version:"$VERSION"
       - name: Submit to the App Store
         if: ${{ needs.setup-release.outputs.nightly != 'true' }}
         env:
-          IPA_PATH: ${{ steps.ipa.outputs.path }}
+          SHORT_VERSION: ${{ steps.ipa.outputs.version }}
           BUILD: ${{ steps.ipa.outputs.build }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APP_STORE_API_KEY_BASE64 }}
         run: |
           notes="$PWD/$(node -e 'import("./scripts/release/release-prep.mjs").then((m) => console.log(m.fastlaneChangelogs(process.argv[1]).at(-1)))' "$VERSION")"
-          fastlane ios app_store ipa:"$IPA_PATH" build:"$BUILD" notes:"$notes"
+          fastlane ios app_store version:"$SHORT_VERSION" build:"$BUILD" notes:"$notes"
 
   github-bundles:
     name: Wait for GitHub bundles
@@ -1028,9 +1062,38 @@ jobs:
           protect="$protect,$(cat channel/* | grep -oE 'download/nightly-[^/]+' \
             | cut -d/ -f2 | sort -u | tr '\n' ',')"
           node scripts/ci/forgejo-release.mjs prune --keep "$NIGHTLY_KEEP" --protect "$protect"
+  mac-update-manifest:
+    name: Merge the macOS update manifests
+    needs: [setup-release, github-bundles, electron-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TAG: ${{ needs.setup-release.outputs.tag }}
+      VERSION: ${{ needs.setup-release.outputs.version }}
+    # Skipping the job instead would skip sign-release too.
+    steps:
+      - name: Check out repository
+        if: ${{ needs.setup-release.outputs.nightly != 'true' }}
+        uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup-release.outputs.ref }}
+          persist-credentials: false
+      - name: Set up app
+        if: ${{ needs.setup-release.outputs.nightly != 'true' }}
+        uses: ./.forgejo/actions/setup
+        with:
+          install-mise-tools: 'false'
+      - name: Merge and publish the manifests
+        if: ${{ needs.setup-release.outputs.nightly != 'true' }}
+        run: |
+          mkdir manifests
+          node scripts/ci/forgejo-release.mjs download --pattern 'latest-mac*.yml' --dir manifests
+          node electron/merge-mac-manifests.mjs manifests/latest-mac.yml manifests/latest-mac-x64.yml
+          node scripts/ci/forgejo-release.mjs upload manifests/latest-mac.yml
+          node scripts/ci/forgejo-release.mjs upload --tag latest manifests/latest-mac.yml
   sign-release:
     name: Sign release checksums
-    needs: [setup-release, github-bundles, electron-macos, obtainium, altstore]
+    needs: [setup-release, github-bundles, electron-macos, mac-update-manifest, obtainium, altstore]
     if: ${{ needs.setup-release.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1139,7 +1202,7 @@ jobs:
           retry git push
   distribute-homebrew:
     name: Publish the Homebrew cask
-    needs: [setup-release, electron-macos]
+    needs: [setup-release, github-bundles, electron-macos]
     if: ${{ needs.setup-release.outputs.nightly != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1152,16 +1215,17 @@ jobs:
         with:
           ref: ${{ needs.setup-release.outputs.ref }}
           persist-credentials: false
-      - name: Download the DMG
+      - name: Download the DMGs
         run: |
           mkdir dmg
           node scripts/ci/forgejo-release.mjs download \
-            --pattern "sable-${VERSION}-arm64.dmg" --dir dmg
+            --pattern "sable-${VERSION}-{arm64,x64}.dmg" --dir dmg
       - name: Push the cask to the Forgejo tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          sha="$(sha256sum "dmg/sable-${VERSION}-arm64.dmg" | awk '{print $1}')"
+          arm="$(sha256sum "dmg/sable-${VERSION}-arm64.dmg" | awk '{print $1}')"
+          intel="$(sha256sum "dmg/sable-${VERSION}-x64.dmg" | awk '{print $1}')"
           export GIT_TERMINAL_PROMPT=0
 
           push_tap() (
@@ -1184,7 +1248,8 @@ jobs:
             mkdir -p tap/Casks
             sed \
               -e "s/^  version .*/  version '${VERSION}'/" \
-              -e "s/^  sha256 .*/  sha256 '${sha}'/" \
+              -e "s/^  sha256 arm: .*/  sha256 arm:   '${arm}',/" \
+              -e "s/^         intel: .*/         intel: '${intel}'/" \
               packaging/homebrew/sable.rb > tap/Casks/sable.rb
             cd tap
             git config user.name 'Sable release'

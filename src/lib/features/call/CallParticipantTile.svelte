@@ -24,6 +24,8 @@
 
   import { cameraVisible, type CallTileSource } from './call-layout';
   import CallStatsOverlay from './CallStatsOverlay.svelte';
+  import CallParticipantActions from './CallParticipantActions.svelte';
+  import type { CallModerationAction } from './call-moderation';
   import type {
     CallParticipant,
     CallRemoteVideoOverlay,
@@ -54,6 +56,8 @@
     watchingScreen?: boolean;
     onWatchScreen?: () => void;
     onVolumeChange?: (identity: string, volume: number) => void;
+    onModerate?: (action: CallModerationAction) => void;
+    moderationPending?: boolean;
   }
 
   let {
@@ -71,6 +75,8 @@
     watchingScreen = false,
     onWatchScreen,
     onVolumeChange,
+    onModerate,
+    moderationPending = false,
   }: Props = $props();
 
   function applyVolume(next: number): void {
@@ -256,6 +262,9 @@
   {/if}
 
   <div class="actions">
+    {#if onModerate && !participant.local && !screen}
+      <CallParticipantActions {name} {muted} busy={moderationPending} {onModerate} />
+    {/if}
     {#if onPin}
       <IconButton
         variant="ghost"
@@ -360,7 +369,7 @@
       <Slider
         min={0}
         max={MAX_PARTICIPANT_VOLUME}
-        step={0.05}
+        step={0.01}
         label={volumeLabel}
         value={volume}
         oninput={applyVolume}

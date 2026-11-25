@@ -62,6 +62,7 @@
       participants: [{ identity: '@other:example.org:PHONE' }],
     },
     roomFor: () => undefined,
+    participantControl: () => undefined,
     leave: () => onLeave(),
     endForEveryone: async () => {
       if (session.endStatus === 'sending') return;

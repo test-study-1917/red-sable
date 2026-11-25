@@ -1,7 +1,5 @@
 import { afterEach, expect, onTestFinished, test, vi } from 'vitest';
 import { commands, page, userEvent } from 'vitest/browser';
-
-import en from '../../../../locales/en.json' with { type: 'json' };
 import { render } from 'vitest-browser-svelte';
 
 import type { ProfileView, TimelineItemView } from '#src/generated/protocol';
@@ -93,6 +91,7 @@ function message(id: string, sender: string, senderName: string): TimelineItemVi
     per_message_profile: null,
     bundled_link_previews: [],
     link_previews_removed: null,
+    shared_by: null,
     redacted_on_ban: null,
     mention: 'none',
     forwarded: null,
@@ -197,6 +196,24 @@ test('a compact reply preview keeps the name gutter level with the message body'
   const body = row?.querySelector('.formatted-body');
   if (!gutter || !body) throw new Error('missing compact reply parts');
   expect(gutter.getBoundingClientRect().top).toBe(body.getBoundingClientRect().top);
+});
+
+test.each([
+  ['preserves short multiline quotes', 'First line\nSecond line', 2],
+  ['clamps explicit lines', 'One\nTwo\nThree\nFour\nFive\nSix', 5],
+  ['clamps wrapped lines', 'A long reply with no explicit line breaks. '.repeat(20), 5],
+] as const)('an expanded reply %s', async (_description, text, lines) => {
+  setPreference('replyPreviewStyle', 'expanded');
+  const item = replyToAlice('expanded-reply', '@bob:example.test', 'Bob');
+  if (!item.in_reply_to) throw new Error('Missing reply target');
+  item.in_reply_to.body = text;
+  await mountItem(item);
+  await document.fonts.ready;
+
+  const body = document.querySelector('.reply-expanded .reply-body');
+  if (!body) throw new Error('Missing reply text');
+  const lineHeight = Number.parseFloat(getComputedStyle(body).lineHeight);
+  expect(Math.abs(body.getBoundingClientRect().height - lineHeight * lines)).toBeLessThan(1);
 });
 
 test('a mobile connected reply aligns its preview text with the sender name', async () => {
@@ -322,14 +339,14 @@ test('a hover action still fires when the row loses hover and focus mid-press', 
   await page.viewport(1280, 700);
   document.body.style.paddingTop = '120px';
   const onReply = vi.fn();
-  const screen = await mountItem(message('menu-2', '@alice:example.test', 'Alice'), 'modern', {
+  await mountItem(message('menu-2', '@alice:example.test', 'Alice'), 'modern', {
     onReply,
   });
   const row = document.querySelector<HTMLElement>('article.message');
   if (!row) throw new Error('the message row is not rendered');
   await userEvent.hover(row);
-  const reply = screen.getByRole('button', { name: en.timeline.reply, exact: true });
-  const button = reply.element() as HTMLElement;
+  const button = row.querySelector<HTMLElement>('.message-actions .message-action-button');
+  if (!button) throw new Error('the reply action is not rendered');
   await userEvent.hover(button);
   button.dispatchEvent(
     new PointerEvent('pointerdown', {

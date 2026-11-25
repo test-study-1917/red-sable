@@ -154,6 +154,7 @@ test.each([false, true])(
       user_id: `@${name}:example.org`,
       identity: name,
       device_id: 'phone',
+      member_id: null,
       backend_id: null,
       joined_ts: 1,
       screen_sharing: false,
@@ -316,6 +317,9 @@ test('adds an incoming unread DM to the navbar and removes it when read', async 
     notifying: 1,
     latest_event: {
       sender: '@alice:example.org',
+      own: false,
+      sender_label: null,
+      kind: 'text',
       body: 'Hello',
       timestamp: 1000,
       sending: false,

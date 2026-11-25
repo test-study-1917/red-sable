@@ -13,7 +13,9 @@
 
   import { useCoreClient } from '#lib/core/context.js';
   import { i18n } from '#lib/i18n.js';
+  import { currentLanguage } from '#lib/language.svelte.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
+  import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.js';
   import VideoPlayer from '#lib/ui/VideoPlayer.svelte';
   import { formatMessageTimestamp } from '#lib/ui/date-time.js';
   import Button from '#lib/ui/primitives/Button.svelte';
@@ -38,6 +40,14 @@
     inappropriate: 'timeline.postInappropriate',
     spoiler: 'timeline.postSpoiler',
   } as const satisfies Record<PostSensitivityView, string>;
+
+  function languageName(code: string): string {
+    try {
+      return new Intl.DisplayNames([currentLanguage()], { type: 'language' }).of(code) ?? code;
+    } catch {
+      return code;
+    }
+  }
 </script>
 
 {#snippet author(post: PostView, size: number)}
@@ -61,8 +71,9 @@
     <div class={['post-media', { grid: items.length > 1 }]}>
       {#each items as item, index (index)}
         {#if item.kind === 'image' && item.source}
+          {@const source = item.source}
           <MediaImage
-            source={item.source}
+            {source}
             alt={item.alt ?? ''}
             width={items.length > 1 ? 200 : 400}
             height={items.length > 1 ? 200 : 300}
@@ -70,6 +81,9 @@
             intrinsicHeight={item.height}
             mime={item.mime}
             href={url}
+            onclick={() => {
+              mediaViewerState.openStandalone(source, url, item.mime, item.width, item.height);
+            }}
           />
         {:else if item.kind !== 'image'}
           {@const video = items.slice(0, index).filter((media) => media.kind !== 'image').length}
@@ -99,6 +113,11 @@
     </Button>
   {:else}
     {#if note.text}<p class="post-text">{note.text}</p>{/if}
+    {#if note.translated_from}
+      <p class="post-translated">
+        {i18n.t('timeline.postTranslatedFrom', { language: languageName(note.translated_from) })}
+      </p>
+    {/if}
     {@render media(note.media, key)}
   {/if}
 {/snippet}
@@ -217,6 +236,12 @@
     margin: 0;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
+  }
+
+  .post-translated {
+    color: var(--surface-var-on-container);
+    font-size: var(--font-size-small);
+    margin: 0;
   }
 
   .post-media.grid {

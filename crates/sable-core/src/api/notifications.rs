@@ -8,7 +8,12 @@ use matrix_sdk_ui::notification_client::NotificationProcessSetup;
 use serde::{Deserialize, Serialize};
 
 use super::{Handler, Json};
-use crate::protocol::{RpcCode, RpcError, DefaultNotificationModesView, EventNotificationView, EventNotificationsView, InboxItemView, KeywordNotificationView, MentionNotificationModeView, MentionNotificationsView, MentionRuleView, NotificationModeView, NotificationSettingsView, NotificationView, PushFetchView};
+use crate::protocol::{
+    DefaultNotificationModesView, EventNotificationView, EventNotificationsView, InboxItemView,
+    KeywordNotificationView, MentionNotificationModeView, MentionNotificationsView,
+    MentionRuleView, NotificationModeView, NotificationSettingsView, NotificationView,
+    PushFetchView, RpcCode, RpcError,
+};
 use crate::{Core, ResultExt, notifications, push_rules};
 
 domain! {
@@ -32,6 +37,7 @@ domain! {
     inbox,
     backfill_inbox,
     mark_notification_seen,
+    mark_notifications_seen,
     set_options,
     push_rules,
     set_push_rule_enabled,
@@ -67,7 +73,7 @@ impl Handler for SettingsParams {
         Ok(push_rules::room_settings(
             &rules,
             &self.room_id,
-            notifications::uses_direct_push_rules(&room),
+            notifications::uses_direct_push_rules(&rules, &room),
         ))
     }
 }
@@ -305,9 +311,11 @@ impl Handler for SetRoomsNotificationModeParams {
         let rules = core.push_rules().await?;
         let mut writes = Vec::new();
         for room_id in &self.room_ids {
-            let room = core.room(room_id).await?;
-            let direct = notifications::uses_direct_push_rules(&room);
-            writes.extend(push_rules::plan_room_mode(room_id, direct, self.mode));
+            core.room(room_id).await?;
+            writes.extend(push_rules::plan_room_mode(room_id, self.mode));
+        }
+        if self.mode == Some(NotificationModeView::All) {
+            writes.extend(push_rules::plan_suppressions(&rules.snapshot().await));
         }
         rules
             .apply(writes)
@@ -425,6 +433,9 @@ pub struct InboxParams {
     pub room_id: Option<OwnedRoomId>,
     #[serde(default)]
     pub query: Option<String>,
+    /// Focused notification history tracks read state independently from room receipts.
+    #[serde(default)]
+    pub focused: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -447,6 +458,7 @@ impl Handler for InboxParams {
                 crate::inbox::InboxScope {
                     room_id: self.room_id.as_deref(),
                     query: self.query.as_deref(),
+                    focused: self.focused,
                 },
             )
             .await?;
@@ -500,7 +512,22 @@ impl Handler for MarkNotificationSeenParams {
     type Ok = ();
 
     async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.mark_notification_seen(self.event_id).await
+        core.mark_notifications_seen([self.event_id]).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct MarkNotificationsSeenParams {
+    #[cfg_attr(feature = "typegen", specta(type = Vec<String>))]
+    pub event_ids: Vec<OwnedEventId>,
+}
+
+impl Handler for MarkNotificationsSeenParams {
+    type Ok = ();
+
+    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+        core.mark_notifications_seen(self.event_ids).await
     }
 }
 
