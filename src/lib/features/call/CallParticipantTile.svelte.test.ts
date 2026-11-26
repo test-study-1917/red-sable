@@ -64,7 +64,7 @@ test('removing a call participant requires confirmation', async () => {
   expect(onModerate).toHaveBeenCalledExactlyOnceWith('remove');
 });
 
-test('ordinary participants only have local playback controls', () => {
+test('a tile without a call control action still has local playback controls', () => {
   mountTile();
   expect(screen.queryByRole('button', { name: 'Call controls for Bob' })).not.toBeInTheDocument();
 });

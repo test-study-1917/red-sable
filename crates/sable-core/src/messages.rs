@@ -1183,7 +1183,7 @@ impl RawEventHead {
 
 const PINNED_FETCH_CONCURRENCY: usize = 10;
 
-fn replaced_event(event: &TimelineEvent) -> Option<OwnedEventId> {
+pub(crate) fn replaced_event(event: &TimelineEvent) -> Option<OwnedEventId> {
     let content = event
         .raw()
         .get_field::<serde_json::Value>("content")

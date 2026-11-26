@@ -199,9 +199,8 @@
     "removeConfirmTitle": "将 {{name}} 移出当前通话？",
     "removeConfirmDescription": "{{name}} 的这台设备将断开与当前语音通话的连接。",
     "removeConfirmAction": "移出通话",
-    "moderationDenied": "房间未允许所有通话参与者操作，只有房间管理员可以关闭他人麦克风或移出通话。",
     "moderationGone": "该参与者或其麦克风已不在通话中，请检查参与者列表后重试。",
-    "moderationUnavailable": "对方未响应。双方都需要使用支持通话控制的 Sable 版本。",
+    "moderationUnavailable": "对方未响应，其客户端可能不支持通话控制。",
     "moderationFailed": "未能确认通话操作结果，请检查连接后重试。",
     "microphoneClosedByParticipant": "一位通话参与者关闭了你的麦克风，你可以重新开启。",
     "removedByParticipant": "你已被一位参与者移出本次通话，可以重新加入。",
@@ -340,9 +339,6 @@
     "screenAudioWorkaroundHint": "如果通话听到的是你的麦克风而非所选的音频，请启用此项。"
   },
   "room": {
-    "callControlTitle": "语音通话控制",
-    "callControlEveryone": "允许所有通话参与者禁言和移出他人",
-    "callControlEveryoneHint": "开启后，当前通话参与者均可关闭其他参与者的麦克风，或将其设备移出本次通话；关闭时仅房间管理员可操作。对方可以重新开麦或加入通话。双方需使用支持此功能的 Sable 客户端。",
     "directoryKind": "显示",
     "permOtherSettings": "其他设置",
     "permInvite": "邀请",

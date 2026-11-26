@@ -7,15 +7,18 @@ use std::collections::{HashSet, VecDeque};
 
 use matrix_sdk::ruma::{OwnedTransactionId, TransactionId};
 use serde_json::{Value, json};
+use web_time::Instant;
 
 use super::membership::{CallMember, StickyMemberships};
 
 pub(super) const EVENT_TYPE: &str = "io.element.call.reaction";
 const TERMINATE: &str = "io.element.call.terminate";
+pub(crate) const MODERATE: &str = "io.element.call.moderate";
 const GRACE_MS: u64 = 30_000;
 const ENCRYPTED_STICKY_WAIT_MS: u64 = 30_000;
 const CLOCK_SKEW_MS: u64 = 5_000;
 const LIMIT: usize = 256;
+const MODERATION_MAX_AGE_MS: u128 = 30_000;
 
 pub(super) struct Candidate {
     event_id: String,
@@ -60,6 +63,44 @@ impl Candidate {
     }
 }
 
+/// Route directed controls on the same live, decrypted room event path as termination.
+pub(super) fn moderation(
+    event: &Value,
+    session: crate::protocol::CallSessionId,
+    age_ms: Option<i64>,
+    received_at: Instant,
+) -> Option<crate::protocol::CoreEvent> {
+    if event.get("type")?.as_str()? != EVENT_TYPE
+        || event.get("state_key").is_some()
+        || event.pointer("/unsigned/redacted_because").is_some()
+        || event.get("event_id")?.as_str()?.is_empty()
+    {
+        return None;
+    }
+    let content = event.get("content")?;
+    let age_at_receipt = u128::from(age_ms.unwrap_or_default().max(0).unsigned_abs());
+    if content.get(TERMINATE).is_some()
+        || age_at_receipt + received_at.elapsed().as_millis() > MODERATION_MAX_AGE_MS
+    {
+        return None;
+    }
+    Some(crate::protocol::CoreEvent::CallControlSignal {
+        session,
+        sender: event.get("sender")?.as_str()?.to_owned(),
+        origin_server_ts: event
+            .get("origin_server_ts")?
+            .as_u64()
+            .filter(|ts| (1..=u64::from(ruma::UInt::MAX)).contains(ts))?,
+        requires_confirmation: age_ms.is_none(),
+        content: content.get(MODERATE)?.clone(),
+    })
+}
+
+pub(super) struct LiveEnvelope {
+    pub(super) value: Value,
+    pub(super) received_at: Instant,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Ended {
     pub(super) terminated_by: String,
@@ -96,7 +137,7 @@ pub(super) struct Reader {
     observed: Vec<Observed>,
     local_joined_at: u64,
     accepted: VecDeque<String>,
-    pub(super) pending: VecDeque<Value>,
+    pub(super) pending: VecDeque<LiveEnvelope>,
     waiting_for_membership: VecDeque<(Candidate, MembershipWait)>,
     new_membership_candidates: bool,
     pub(super) ended: Option<Ended>,
@@ -370,18 +411,18 @@ impl Reader {
         self.new_membership_candidates = false;
     }
 
-    pub(super) fn remember_pending(&mut self, value: Value) {
-        let Some(id) = value.get("event_id").and_then(Value::as_str) else {
+    pub(super) fn remember_pending(&mut self, envelope: LiveEnvelope) {
+        let Some(id) = envelope.value.get("event_id").and_then(Value::as_str) else {
             return;
         };
         if self
             .pending
             .iter()
-            .any(|item| item.get("event_id").and_then(Value::as_str) == Some(id))
+            .any(|item| item.value.get("event_id").and_then(Value::as_str) == Some(id))
         {
             return;
         }
-        self.pending.push_back(value);
+        self.pending.push_back(envelope);
         while self.pending.len() > LIMIT {
             self.pending.pop_front();
         }

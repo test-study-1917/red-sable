@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Add microphone mute and removal controls for voice call participants. Room administrators can allow everyone in a call to use them through a shared room permission switch; the default permits only administrators. Updated Sable web clients verify the caller and room policy before applying controls, without requiring LiveKit administrator grants.
+Any participant in an active voice call can turn off another participant’s microphone or remove their selected device from the call. These controls work between updated Sable and compatible custom Element Call clients without LiveKit administrator grants. The other participant can unmute or rejoin.

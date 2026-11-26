@@ -34,15 +34,14 @@ import { CallTelemetry } from './call-telemetry';
 import { recordCallDebug, type CallDebug } from './call-debug.svelte.js';
 import { cameraVisible, screenShareVisible, type CallPin } from './call-layout';
 import { participantKeys } from './participant-keys';
-import { mayModerateCall } from './call-moderation-policy';
 import { i18n } from '#lib/i18n.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
 import { type CallInputMode } from '#lib/settings/definitions.js';
 import {
-  callModerationGrant,
-  moderateCallParticipant,
-  CallModerationError,
+  CALL_CONTROL_EVENT,
+  callControlMember,
+  createCallModeration,
   type CallModerationAction,
   type CallModerationErrorCode,
 } from './call-moderation';
@@ -93,7 +92,8 @@ type PendingEvent = Extract<
       | 'call_members'
       | 'call_backends'
       | 'call_signaling_error'
-      | 'call_terminated';
+      | 'call_terminated'
+      | 'call_control_signal';
   }
 >;
 
@@ -102,7 +102,8 @@ const isCallEvent = (event: CoreEvent): event is PendingEvent =>
   event.type === 'call_members' ||
   event.type === 'call_backends' ||
   event.type === 'call_signaling_error' ||
-  event.type === 'call_terminated';
+  event.type === 'call_terminated' ||
+  event.type === 'call_control_signal';
 
 export function voiceStates(
   members: readonly CallMemberView[],
@@ -171,10 +172,7 @@ export class CallSession {
   endStatus = $state<CallEndStatus>('idle');
   moderationPending = $state(false);
   moderationError = $state<CallModerationErrorCode | null>(null);
-  #mayModerate = $state(false);
-  #policyTimer: ReturnType<typeof setInterval> | undefined;
-  #moderationBackends = $state.raw<CallBackendGrant[]>([]);
-  #moderationRequest: AbortController | undefined;
+  #callModeration: ReturnType<typeof createCallModeration> | undefined;
 
   toggleWatchScreenShare(trackId: string): void {
     this.watchedScreenShareIds = this.watchedScreenShareIds.includes(trackId)
@@ -305,92 +303,45 @@ export class CallSession {
     );
   }
 
-  #moderationBackend(participant: CallParticipant): CallBackendGrant | undefined {
-    return participant.backendId === undefined && this.#moderationBackends.length === 1
-      ? this.#moderationBackends[0]
-      : this.#moderationBackends.find((backend) => backend.id === participant.backendId);
+  #controlAddress(member: CallMemberView) {
+    return member.member_id
+      ? callControlMember(member.user_id, member.device_id, member.member_id, member.joined_ts)
+      : undefined;
   }
 
-  canModerateParticipant(participant: CallParticipant): boolean {
-    const backend = this.#moderationBackend(participant);
-    return (
-      this.lifecycle === 'active' &&
-      this.transport.connection === 'connected' &&
-      this.#mayModerate &&
-      !participant.local &&
-      backend !== undefined &&
-      participant.identity !== backend.identity &&
-      this.members.some((member) => member.identity === participant.identity) &&
-      this.transport.participants.some(
-        (current) =>
-          current.identity === participant.identity && current.backendId === participant.backendId
-      ) &&
-      (this.#media?.moderateParticipant !== undefined || callModerationGrant(backend) !== null)
+  #localControlMember() {
+    if (this.lifecycle !== 'active' || this.transport.connection !== 'connected') return undefined;
+    const own = this.#client.session;
+    return this.members.find(
+      (member) => own && member.user_id === own.user_id && member.device_id === own.device_id
     );
   }
 
-  async moderateParticipant(
-    participant: CallParticipant,
-    action: CallModerationAction
-  ): Promise<void> {
-    if (this.moderationPending) return;
-    const backend = this.#moderationBackend(participant);
-    if (!backend || !this.canModerateParticipant(participant)) {
-      this.moderationError = 'unavailable';
-      return;
-    }
-    const controller = new AbortController();
-    this.#moderationRequest = controller;
-    this.moderationPending = true;
-    this.moderationError = null;
-    try {
-      const media = this.#media;
-      const roomId = this.roomId;
-      const userId = this.#client.session?.user_id;
-      if (!roomId || !userId || !(await mayModerateCall(this.#client.rpc, roomId, userId))) {
-        throw new CallModerationError('denied');
-      }
-      if (
-        controller.signal.aborted ||
-        media !== this.#media ||
-        !this.canModerateParticipant(participant)
-      )
-        return;
-      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]);
-      if (media?.moderateParticipant) {
-        await media.moderateParticipant(
-          participant.identity,
-          action,
-          signal,
-          participant.backendId
-        );
-      } else {
-        await moderateCallParticipant(backend, participant.identity, action, signal);
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        this.moderationError = error instanceof CallModerationError ? error.code : 'failed';
-      }
-    } finally {
-      if (this.#moderationRequest === controller) {
-        this.#moderationRequest = undefined;
-        this.moderationPending = false;
-      }
-    }
-  }
+  participantControl(participant: CallParticipant) {
+    const controls = this.#callModeration;
+    const own = this.#localControlMember();
+    const member = this.members.find((entry) => entry.identity === participant.identity);
+    const target = member && this.#controlAddress(member);
+    if (
+      !controls ||
+      !target ||
+      !own?.member_id ||
+      own.identity === participant.identity ||
+      participant.local ||
+      !this.transport.participants.some((current) => current.identity === participant.identity)
+    )
+      return undefined;
 
-  async #refreshModerationPolicy(): Promise<void> {
-    const media = this.#media;
-    const roomId = this.roomId;
-    const userId = this.#client.session?.user_id;
-    if (!media || !roomId || !userId) return;
-    let allowed = false;
-    try {
-      allowed = await mayModerateCall(this.#client.rpc, roomId, userId);
-    } catch {
-      /* Fail closed. */
-    }
-    if (media === this.#media && roomId === this.roomId) this.#mayModerate = allowed;
+    return async (action: CallModerationAction): Promise<void> => {
+      if (this.#callModeration !== controls || this.moderationPending) return;
+      this.moderationPending = true;
+      this.moderationError = null;
+      const error = await controls.request(target, action);
+      if (this.#callModeration === controls) {
+        this.moderationPending = false;
+        this.moderationError = error;
+      }
+    };
   }
 
   async join(roomId: string, media: CallMedia, serviceUrl: string | null = null): Promise<void> {
@@ -497,39 +448,6 @@ export class CallSession {
         return;
       }
       this.#media = transport;
-      transport.setModerationHandler?.(async (action, identity, signal) => {
-        const member = this.members.find((entry) => entry.identity === identity);
-        const roomId = this.roomId;
-        const current = () =>
-          !signal.aborted &&
-          this.lifecycle === 'active' &&
-          transport === this.#media &&
-          roomId === this.roomId &&
-          this.members.some(
-            (entry) => entry.identity === identity && entry.user_id === member?.user_id
-          );
-        if (!member || !roomId || !current()) throw new CallModerationError('gone');
-        if (!(await mayModerateCall(this.#client.rpc, roomId, member.user_id))) {
-          throw new CallModerationError('denied');
-        }
-        if (!current()) throw new CallModerationError('gone');
-        if (action === 'mute') {
-          await this.setMicrophoneEnabled(false);
-          if (!current() || this.transport.microphoneEnabled)
-            throw new CallModerationError('failed');
-          toasts.info(i18n.t('call.microphoneClosedByParticipant'));
-          return {};
-        }
-        return {
-          afterAcknowledged: async () => {
-            if (!current()) return;
-            toasts.info(i18n.t('call.removedByParticipant'));
-            await this.leave();
-          },
-        };
-      });
-      void this.#refreshModerationPolicy();
-      this.#policyTimer = setInterval(() => void this.#refreshModerationPolicy(), 5_000);
       this.#livekit = isLivekit(transport) ? transport : undefined;
       setNativeCallAudio(transportKind === 'native');
       if (nativeCallOwnsAudio()) releaseNotificationAudio();
@@ -559,19 +477,6 @@ export class CallSession {
         'call.encryption_requested': grant.encrypt_media,
       });
       this.#unsubscribeTransport = transport.subscribe((state) => {
-        // A server mute changes the publication without going through our controls.
-        // Keep the intent in sync, so PTT/device changes cannot immediately reopen it.
-        if (
-          this.lifecycle === 'active' &&
-          this.transport.microphoneEnabled &&
-          !state.microphoneEnabled &&
-          state.connection === 'connected' &&
-          state.self?.microphone?.muted === true &&
-          this.#canTransmit()
-        ) {
-          this.microphoneEnabled = false;
-          this.#clearTalking();
-        }
         this.transport = state;
         const sharing = state.connection === 'connected' && state.screenShareEnabled;
         if (sharing !== this.#screenSharing && this.#session !== undefined) {
@@ -623,9 +528,32 @@ export class CallSession {
       });
 
       this.#grant = grant;
-      this.#moderationBackends = grant.backends.length
-        ? grant.backends
-        : [{ id: 'legacy', url: grant.url, jwt: grant.jwt, identity: grant.identity }];
+      this.#callModeration = createCallModeration({
+        local: () => {
+          const member = this.#localControlMember();
+          return member && this.#controlAddress(member);
+        },
+        members: () => this.members.flatMap((member) => this.#controlAddress(member) ?? []),
+        send: (content) =>
+          this.#client.rpc.messages.sendRawEvent({
+            room_id: roomId,
+            event_type: CALL_CONTROL_EVENT,
+            content,
+          }),
+        mute: async () => {
+          const wasEnabled = this.microphoneEnabled;
+          this.microphoneEnabled = false;
+          this.#clearTalking();
+          await this.#setMicrophone(false);
+          if (this.transport.microphoneEnabled) return false;
+          if (wasEnabled) toasts.info(i18n.t('call.microphoneClosedByParticipant'));
+          return true;
+        },
+        remove: () => {
+          toasts.info(i18n.t('call.removedByParticipant'));
+          void this.leave();
+        },
+      });
       this.listenOnly = !grant.can_publish;
 
       this.encryptsMedia = grant.encrypt_media;
@@ -987,6 +915,11 @@ export class CallSession {
       return;
     }
 
+    if (event.type === 'call_control_signal') {
+      void this.#callModeration?.receive(event.content, event.sender, event.requires_confirmation);
+      return;
+    }
+
     if (event.type === 'call_signaling_error') {
       const signalingError = new Error('signaling-error');
       if (!event.fatal || this.lifecycle === 'idle' || this.lifecycle === 'leaving') {
@@ -1023,7 +956,6 @@ export class CallSession {
         publisherId: event.publisher_id,
         backends: event.backends,
       };
-      this.#moderationBackends = event.backends;
       if (!this.#connected) return;
       this.#backendsRevision = event.revision;
       const telemetry = this.#telemetry;
@@ -1126,15 +1058,10 @@ export class CallSession {
   }
 
   async #performTeardown(): Promise<void> {
-    this.#moderationRequest?.abort();
-    this.#moderationRequest = undefined;
+    this.#callModeration?.dispose();
+    this.#callModeration = undefined;
     this.moderationPending = false;
     this.moderationError = null;
-    if (this.#policyTimer) clearInterval(this.#policyTimer);
-    this.#policyTimer = undefined;
-    this.#mayModerate = false;
-    this.#media?.setModerationHandler?.(undefined);
-    this.#moderationBackends = [];
     this.desktopShortcutStatus = 'inactive';
     this.#clearTalking();
     this.#microphoneUpdate = Promise.resolve();

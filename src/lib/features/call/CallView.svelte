@@ -408,13 +408,11 @@
     {#if session.moderationError}
       <Alert variant="critical" role="alert">
         {i18n.t(
-          session.moderationError === 'denied'
-            ? 'call.moderationDenied'
-            : session.moderationError === 'gone'
-              ? 'call.moderationGone'
-              : session.moderationError === 'unavailable'
-                ? 'call.moderationUnavailable'
-                : 'call.moderationFailed'
+          session.moderationError === 'gone'
+            ? 'call.moderationGone'
+            : session.moderationError === 'unavailable'
+              ? 'call.moderationUnavailable'
+              : 'call.moderationFailed'
         )}
       </Alert>
     {/if}
@@ -570,9 +568,7 @@
     name={tileNames.get(item.participant.identity) ?? profile.name}
     userId={profile.userId}
     avatar={profile.avatar}
-    onModerate={session.canModerateParticipant(item.participant)
-      ? (action) => void session.moderateParticipant(item.participant, action)
-      : undefined}
+    onModerate={session.participantControl(item.participant)}
     moderationPending={session.moderationPending}
     featured={large}
     pinned={featured.length === 1 && featured[0].key === item.key}

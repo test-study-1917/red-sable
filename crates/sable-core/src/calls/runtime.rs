@@ -17,12 +17,13 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify, oneshot};
+use web_time::Instant;
 
 use super::content::content;
 use super::discover::{Discovered, ModeInfo, discover};
 use super::keys::{self, KeyDistributor, Rolled};
 use super::membership::{self, CallMember, StickyMemberships};
-use super::termination::MembershipWait;
+use super::termination::{LiveEnvelope, MembershipWait};
 use super::{HANGUP_DELAY, RoomMembership, USE_KEY_DELAY, sfu, sticky};
 use crate::api::calls::JoinOk;
 use crate::protocol::{
@@ -1954,8 +1955,8 @@ async fn retry_pending_terminations(
         let mut state = state.lock().await;
         std::mem::take(&mut state.termination.pending)
     };
-    for value in pending {
-        if receive_termination(core, generation, session, room, state, value).await {
+    for envelope in pending {
+        if receive_live_termination(core, generation, session, room, state, envelope).await {
             wake.notify_one();
         }
     }
@@ -1968,11 +1969,37 @@ pub(super) async fn receive_termination(
     session: CallSessionId,
     room: &Room,
     state: &Arc<Mutex<State>>,
-    mut value: Value,
+    value: Value,
+) -> bool {
+    receive_live_termination(
+        core,
+        generation,
+        session,
+        room,
+        state,
+        LiveEnvelope {
+            value,
+            received_at: Instant::now(),
+        },
+    )
+    .await
+}
+
+async fn receive_live_termination(
+    core: &SignedIn,
+    generation: u64,
+    session: CallSessionId,
+    room: &Room,
+    state: &Arc<Mutex<State>>,
+    LiveEnvelope {
+        mut value,
+        received_at,
+    }: LiveEnvelope,
 ) -> bool {
     if !core.call_account_is_current(generation) {
         return false;
     }
+    let age_ms = value.pointer("/unsigned/age").and_then(Value::as_i64);
     if value.get("type").and_then(Value::as_str) == Some("m.room.encrypted") {
         use matrix_sdk::ruma::{
             events::room::encrypted::OriginalSyncRoomEncryptedEvent, serde::Raw,
@@ -2006,11 +2033,19 @@ pub(super) async fn receive_termination(
             _ => {
                 let mut state = state.lock().await;
                 if core.call_account_is_current(generation) && state.termination.ended.is_none() {
-                    state.termination.remember_pending(value);
+                    state
+                        .termination
+                        .remember_pending(LiveEnvelope { value, received_at });
                 }
                 return false;
             }
         }
+    }
+    if let Some(control) = super::termination::moderation(&value, session, age_ms, received_at) {
+        if core.call_account_is_current(generation) {
+            core.core().emit_if_current(generation, control);
+        }
+        return false;
     }
     let Some(candidate) = super::termination::Candidate::parse(&value) else {
         return false;

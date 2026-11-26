@@ -262,9 +262,6 @@
     "bookmarkRemoved": "Removed a bookmark in {{room}}"
   },
   "room": {
-    "callControlTitle": "Voice call controls",
-    "callControlEveryone": "Allow all call participants to mute and remove others",
-    "callControlEveryoneHint": "When enabled, any current participant can turn off another participant’s microphone or remove their device from the call. When disabled, only room administrators can do this. Participants can unmute or rejoin. Both sides need a supported Sable client.",
     "actionsLabel": "Room actions",
     "createDescription": "Rooms hold a conversation. A space holds rooms.",
     "createSpaceTitle": "Create a space",
@@ -4100,9 +4097,8 @@
     "removeConfirmTitle": "Remove {{name}} from this call?",
     "removeConfirmDescription": "{{name}}’s device will be disconnected from the current voice call.",
     "removeConfirmAction": "Remove from call",
-    "moderationDenied": "Only room administrators can control other participants unless the room allows everyone to do so.",
     "moderationGone": "The participant or their microphone is no longer available. Check the participant list and try again.",
-    "moderationUnavailable": "This participant did not respond. Both participants need a version of Sable that supports call controls.",
+    "moderationUnavailable": "This participant did not respond. Their client may not support call controls.",
     "moderationFailed": "The call action could not be confirmed. Check the connection and try again.",
     "microphoneClosedByParticipant": "A call participant turned off your microphone. You can turn it back on.",
     "removedByParticipant": "A participant removed you from the call. You can join again.",

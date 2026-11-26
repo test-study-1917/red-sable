@@ -24,7 +24,6 @@
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
-  import RoomCallControlSettings from './RoomCallControlSettings.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import { uprightImageBytes } from '#lib/ui/upright-jpeg.js';
 
@@ -383,18 +382,6 @@
   {#if loading && levels === null}
     <p class="settings-status" role="status"><Spinner small /></p>
   {:else if levels}
-    {#if roomId && room?.room_kind !== 'space'}
-      {#key roomId}
-        <RoomCallControlSettings
-          {roomId}
-          {levels}
-          {ownLevel}
-          {canEdit}
-          busy={saving || syncing}
-          onUpdate={(next) => (data.levels = next)}
-        />
-      {/key}
-    {/if}
     {#if !canEdit}
       <Alert variant="info" role="status">{i18n.t('room.permReadOnly')}</Alert>
     {/if}

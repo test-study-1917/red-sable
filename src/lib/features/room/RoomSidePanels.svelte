@@ -5,7 +5,7 @@
     HISTORY_EXPORT_CONTEXT,
     type RoomHistoryExportContext,
   } from './room-history-export-context.js';
-  import type { RoomListItemView } from '#src/generated/protocol';
+  import type { RoomListItemView, TimelineItemView } from '#src/generated/protocol';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
   import type { RoomMemberLoader } from '#lib/rooms/room-members.svelte.js';
   import RoomAttachmentsPanel from './RoomAttachmentsPanel.svelte';
@@ -23,10 +23,10 @@
     room: RoomListItemView | undefined;
     roomId: string;
     roomName: string;
-    historyItems: readonly unknown[];
+    historyItems: readonly TimelineItemView[];
+    historyReachesStart: boolean;
     historyReachesLatest: boolean;
-    onLoadHistory: (count: number) => Promise<boolean>;
-    onOpenHistoryMedia: (eventId: string) => void;
+    onReadHistoryPage: RoomHistoryExportContext['readPage'];
     onJumpToHistoryMessage: (eventId: string) => void;
     autoOpenWidgetId?: string | null;
     onActiveWidgetChange?: (widgetId: string | null) => void;
@@ -47,9 +47,9 @@
     roomId,
     roomName,
     historyItems,
+    historyReachesStart,
     historyReachesLatest,
-    onLoadHistory,
-    onOpenHistoryMedia,
+    onReadHistoryPage,
     onJumpToHistoryMessage,
     autoOpenWidgetId = null,
     onActiveWidgetChange,
@@ -67,10 +67,10 @@
     roomId: () => roomId,
     roomName: () => roomName,
     timelineItems: () => historyItems,
+    reachesStart: () => historyReachesStart,
     reachesLatest: () => historyReachesLatest,
     members: () => memberLoader.members,
-    loadOlder: (count: number) => onLoadHistory(count),
-    openMedia: (eventId: string) => onOpenHistoryMedia(eventId),
+    readPage: (params) => onReadHistoryPage(params),
     jumpToMessage: (eventId: string) => onJumpToHistoryMessage(eventId),
   } satisfies RoomHistoryExportContext);
 </script>

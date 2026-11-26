@@ -160,7 +160,8 @@
     padding-block-end: var(--space-300);
   }
 
-  .attachments-body li > :global(*) {
+  .attachments-body li > :global(*),
+  .attachment-list li :global(button) {
     scroll-margin-block-start: var(--space-800);
   }
 

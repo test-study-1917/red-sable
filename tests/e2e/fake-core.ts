@@ -81,6 +81,9 @@ declare global {
     __e2eTimelineRooms: string[];
     __e2eTimelineSubscriptions: number[];
     __e2eTimelineFocus: TimelineFocusView[];
+    __e2eRoomAttachments?: RpcResult<Rpc['rooms']['attachments']>['items'];
+    __e2eHistoryPages?: RpcResult<Rpc['timeline']['historyPage']>[];
+    __e2eHistoryPageDelayMs?: number;
     __e2ePaginationDirections: string[];
     __e2eRefreshRoom: () => void;
     __e2eLeaveRoom: (roomId: string) => void;
@@ -1786,6 +1789,12 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
         );
       },
       'timeline.events': () => [],
+      'timeline.history_page': () =>
+        window.__e2eHistoryPages?.shift() ?? {
+          items: [],
+          cursor: null,
+          has_undecryptable_events: false,
+        },
       'timeline.unread_diagnostics': () => ({
         main: { unread: 0, notifying: 0, highlight: 0, receipt_event_id: null },
         server_notifications: 0,
@@ -2058,7 +2067,10 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
       'rooms.public_rooms': () => ({ rooms: [], next_batch: null, total: 0 }),
       'rooms.directory_visibility': () => false,
       'rooms.upgrade': () => successorRoom.room_id,
-      'rooms.attachments': () => ({ items: [], next_batch: null }),
+      'rooms.attachments': ({ kind }) => ({
+        items: kind === 'file' ? (window.__e2eRoomAttachments ?? []) : [],
+        next_batch: null,
+      }),
       'rooms.cosmetics': () => ({ space_id: null, users: [] }),
       'rooms.create': () => '!created:example.test',
       'rooms.create_dm': () => '!dm:example.test',
@@ -2089,6 +2101,7 @@ export async function installFakeCore(page: Page, mode: WorkerMode): Promise<voi
     const replyDelay = (type: string, params: unknown): number => {
       if (type === 'session.switch_account') return window.__e2eSwitchAccountDelayMs ?? 0;
       if (type === 'messages.url_preview') return window.__e2eUrlPreviewDelayMs ?? 0;
+      if (type === 'timeline.history_page') return window.__e2eHistoryPageDelayMs ?? 0;
       if (workerMode === 'forward_history' && type === 'timeline.paginate') return 0;
       if (
         type === 'timeline.subscribe' &&

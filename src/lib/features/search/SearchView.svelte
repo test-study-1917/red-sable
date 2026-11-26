@@ -8,6 +8,7 @@
   import XIcon from 'phosphor-svelte/lib/XIcon';
 
   import { useCoreClient } from '#lib/core/context.js';
+  import { hasPageMeta, usePageMeta } from '#lib/core/page-meta.js';
   import { i18n } from '#lib/i18n.js';
   import { roomSectionPath } from '#lib/rooms/permalink.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
@@ -43,6 +44,7 @@
   import SearchChip from './SearchChip.svelte';
   import SearchHitRow from './SearchHitRow.svelte';
   import SearchLoadMore from './SearchLoadMore.svelte';
+  import SearchRoomHistory from './SearchRoomHistory.svelte';
   import SearchRetryAlert from './SearchRetryAlert.svelte';
   import SearchStarter from './SearchStarter.svelte';
   import { SenderDirectory, type SenderIdentity } from './sender-directory.svelte.js';
@@ -55,6 +57,7 @@
   let { panel = false, initialQuery = '' }: Props = $props();
   const core = useCoreClient();
   const roomList = useRoomList();
+  const pageMeta = hasPageMeta() ? usePageMeta() : undefined;
   const senders = new SenderDirectory(core);
 
   let rooms = $derived(searchRooms(roomList.rooms));
@@ -70,6 +73,28 @@
   );
   let directory = $derived({ rooms, people });
   const search = new MessageSearch(core, () => directory);
+  const historyRoomId = $derived.by(() => {
+    if (panel || search.resolved.matches_nothing) return;
+    const scope = search.parsed.tokens.filter(
+      (token) =>
+        !token.negated &&
+        (token.operator === 'in' || token.operator === 'space' || token.operator === 'with')
+    );
+    if (scope.length !== 1 || scope[0].operator !== 'in') return;
+    const filter = search.resolved.filter;
+    const roomId = resolveRoomTarget(rooms, scope[0].value);
+    if (!roomId || filter.rooms.length !== 1 || filter.not_rooms.includes(roomId)) return;
+    if (filter.rooms[0] !== roomId || roomList.byId(roomId)?.state !== 'joined') return;
+    return roomId;
+  });
+
+  $effect(() => {
+    if (!pageMeta?.mobileHeader || !historyRoomId) return;
+    pageMeta.mobileActions = historyAction;
+    return () => {
+      if (pageMeta.mobileActions === historyAction) pageMeta.mobileActions = undefined;
+    };
+  });
 
   const LOOKUP_DELAY_MS = 300;
   const PEOPLE_OPERATORS: ReadonlySet<string> = new Set(['from', 'mentions', 'with']);
@@ -490,10 +515,22 @@
 {#if panel}
   {@render content()}
 {:else}
-  <AppPageShell title={i18n.t('common.searchMessages')} density="compact">
+  <AppPageShell
+    title={i18n.t('common.searchMessages')}
+    density="compact"
+    actions={historyRoomId && !pageMeta?.mobileHeader ? historyAction : undefined}
+  >
     {@render content()}
   </AppPageShell>
 {/if}
+
+{#snippet historyAction()}
+  {#if historyRoomId}
+    {#key historyRoomId}
+      <SearchRoomHistory roomId={historyRoomId} />
+    {/key}
+  {/if}
+{/snippet}
 
 {#snippet content()}
   <div class={['search-view', { panel }]}>

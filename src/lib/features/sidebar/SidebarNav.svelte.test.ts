@@ -155,6 +155,7 @@ test.each([false, true])(
       user_id: `@${name}:example.org`,
       identity: name,
       device_id: 'phone',
+      member_id: null,
       backend_id: null,
       joined_ts: 1,
       screen_sharing: false,

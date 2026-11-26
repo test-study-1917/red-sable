@@ -1,6 +1,9 @@
 <script lang="ts">
   import type { Component } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import type { MemberView } from '#src/generated/protocol';
+  import ChatCenteredTextIcon from 'phosphor-svelte/lib/ChatCenteredTextIcon';
+  import DownloadSimpleIcon from 'phosphor-svelte/lib/DownloadSimpleIcon';
   import FileAudioIcon from 'phosphor-svelte/lib/FileAudioIcon';
   import FileIcon from 'phosphor-svelte/lib/FileIcon';
   import FileImageIcon from 'phosphor-svelte/lib/FileImageIcon';
@@ -10,8 +13,12 @@
   import FileZipIcon from 'phosphor-svelte/lib/FileZipIcon';
 
   import { useCoreClient } from '#lib/core/context.js';
+  import { i18n } from '#lib/i18n.js';
+  import { downloadBytes } from '#lib/ui/download.js';
   import { mediaViewerState } from '#lib/ui/media/media-viewer-state.svelte.ts';
   import type { MediaItem } from '#lib/ui/media/media-viewer-types.js';
+  import IconButton from '#lib/ui/primitives/IconButton.svelte';
+  import { toasts } from '#lib/ui/toasts.svelte.js';
 
   import { memberName } from '../members/members';
   import AttachmentMeta from './AttachmentMeta.svelte';
@@ -37,9 +44,12 @@
 
   type FileAttachment = RoomAttachmentOf<'file'>;
 
-  const pager = new RoomAttachmentsPager(useCoreClient(), 'file');
+  const core = useCoreClient();
+  const pager = new RoomAttachmentsPager(core, 'file');
+  const downloads = new SvelteSet<string>();
 
   let viewerItems = $derived(pager.items.map((item) => mediaItem(item)));
+  let jump = $derived(closingJump(modal, onClose, onJump));
 
   function senderOf(item: FileAttachment): string {
     return memberName(members, item.sender);
@@ -66,11 +76,20 @@
   }
 
   function open(item: FileAttachment): void {
-    mediaViewerState.openPanel(
-      viewerItems,
-      attachmentKey(item),
-      closingJump(modal, onClose, onJump)
-    );
+    mediaViewerState.openPanel(viewerItems, attachmentKey(item), jump);
+  }
+
+  async function download(key: string, content: FileAttachment['content']): Promise<void> {
+    downloads.add(key);
+    try {
+      const bytes = await core.media.fetchMedia(content.source, 0, 0);
+      await downloadBytes(bytes, content.filename, content.mime);
+    } catch (error) {
+      console.warn('[sable attachments] file download failed', error);
+      toasts.error(i18n.t('errors.actionFailed'));
+    } finally {
+      downloads.delete(key);
+    }
   }
 
   function fileIcon(mime: string | null): Component {
@@ -88,50 +107,89 @@
 <RoomAttachmentFeed {pager} {roomId} layout="rows" empty="timeline.attachmentsFilesEmpty">
   {#snippet item(item: FileAttachment)}
     {@const content = item.content}
+    {@const key = attachmentKey(item)}
+    {@const downloading = downloads.has(key)}
     {@const Icon = fileIcon(content.mime)}
-    <button
-      type="button"
-      class="attachment-row"
-      aria-label={attachmentLabel(item, content.filename, senderOf(item))}
-      onclick={() => {
-        open(item);
-      }}
-    >
-      <Icon class="attachment-icon" aria-hidden="true" />
-      <span class="attachment-text">
-        <span class="attachment-name">{content.filename}</span>
-        <AttachmentMeta sender={senderOf(item)} timestamp={item.timestamp} size={content.size} />
-      </span>
-    </button>
+    <div class="attachment-row">
+      <button
+        type="button"
+        class="attachment-preview"
+        aria-label={attachmentLabel(item, content.filename, senderOf(item))}
+        onclick={() => open(item)}
+      >
+        <Icon class="attachment-icon" aria-hidden="true" />
+        <span class="attachment-text">
+          <span class="attachment-name">{content.filename}</span>
+          <AttachmentMeta sender={senderOf(item)} timestamp={item.timestamp} size={content.size} />
+        </span>
+      </button>
+      <div class="attachment-actions">
+        <IconButton
+          variant="ghost"
+          size="small"
+          label={`${i18n.t('common.download')}: ${content.filename}`}
+          title={i18n.t('common.download')}
+          loading={downloading}
+          onclick={() => void download(key, content)}
+        >
+          {#if !downloading}<DownloadSimpleIcon />{/if}
+        </IconButton>
+        <IconButton
+          variant="ghost"
+          size="small"
+          label={`${i18n.t('common.jumpToMessage')}: ${content.filename}`}
+          title={i18n.t('common.jumpToMessage')}
+          onclick={() => jump(item.event_id)}
+        >
+          <ChatCenteredTextIcon />
+        </IconButton>
+      </div>
+    </div>
   {/snippet}
 </RoomAttachmentFeed>
 
 <style>
   .attachment-row {
+    align-items: center;
+    display: flex;
+    padding-inline-end: var(--space-100);
+  }
+
+  .attachment-actions {
+    display: flex;
+  }
+
+  .attachment-actions :global(.icon-button) {
+    --button-height: var(--target-hit);
+  }
+
+  .attachment-preview {
     align-items: start;
+    align-self: stretch;
     background: none;
     border: 0;
     border-radius: var(--radius);
     color: inherit;
     cursor: pointer;
     display: flex;
+    flex: 1;
     font: inherit;
     gap: var(--space-300);
+    min-width: 0;
     padding: var(--space-200);
     text-align: start;
-    width: 100%;
   }
 
-  .attachment-row:hover {
+  .attachment-preview:hover {
     background: var(--bg-container-hover);
   }
 
-  .attachment-row:focus-visible {
+  .attachment-preview:focus-visible {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: calc(var(--focus-ring-width) * -1);
   }
 
-  .attachment-row :global(.attachment-icon) {
+  .attachment-preview :global(.attachment-icon) {
     color: var(--surface-var-on-container);
     flex: none;
     height: var(--icon-size-medium);

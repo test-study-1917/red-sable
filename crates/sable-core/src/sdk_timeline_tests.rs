@@ -822,6 +822,165 @@ async fn permalink_timeline_loads_and_contains_its_target() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one two-page RPC flow with both readable and unreadable encrypted events"
+)]
+async fn history_page_starts_at_the_date_anchor_and_includes_both_boundary_times() {
+    use matrix_sdk::ruma::owned_device_id;
+    use matrix_sdk_base::crypto::{
+        olm::{Account, EncryptionSettings, InboundGroupSession, OutboundGroupSession, SenderData},
+        types::EventEncryptionAlgorithm,
+    };
+    use wiremock::matchers::query_param;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!dated:example.org");
+    server.sync_joined_room(&client, room_id).await;
+    let sender = Account::new(user_id!("@alice:example.org"));
+    let keys = sender.identity_keys();
+    let outbound = OutboundGroupSession::new(
+        owned_device_id!("SENDER"),
+        Arc::new(keys),
+        room_id,
+        EncryptionSettings::default(),
+    )
+    .unwrap();
+    let inbound = InboundGroupSession::new(
+        outbound.sender_key(),
+        keys.ed25519,
+        room_id,
+        &outbound.session_key().await,
+        SenderData::unknown(),
+        None,
+        EventEncryptionAlgorithm::MegolmV1AesSha2,
+        None,
+        false,
+    )
+    .unwrap();
+    client
+        .olm_machine_for_testing()
+        .await
+        .as_ref()
+        .unwrap()
+        .store()
+        .import_room_keys(vec![inbound.export().await], None, |_, _| ())
+        .await
+        .unwrap();
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+
+    let room_path = format!("/_matrix/client/v1/rooms/{room_id}");
+    for (ts, dir, id) in [("3001", "f", "$above"), ("1999", "b", "$below")] {
+        Mock::given(method("GET"))
+            .and(path(format!("{room_path}/timestamp_to_event")))
+            .and(query_param("ts", ts))
+            .and(query_param("dir", dir))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "event_id": id, "origin_server_ts": ts.parse::<u64>().unwrap(),
+            })))
+            .expect(1)
+            .mount(server.server())
+            .await;
+    }
+
+    let room_path = format!("/_matrix/client/v3/rooms/{room_id}");
+    Mock::given(method("GET"))
+        .and(path(format!("{room_path}/context/$above")))
+        .and(query_param("limit", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "start": "dated" })))
+        .expect(1)
+        .mount(server.server())
+        .await;
+
+    let message = |id: &str, ts: u64| {
+        json!({
+            "type": "m.room.message", "event_id": id, "sender": "@alice:example.org",
+            "room_id": room_id, "origin_server_ts": ts,
+            "content": { "msgtype": "m.text", "body": id },
+        })
+    };
+    let content = outbound
+        .encrypt(
+            "m.room.message",
+            &serde_json::from_value(json!({ "msgtype": "m.text", "body": "Decrypted text" }))
+                .unwrap(),
+        )
+        .await
+        .content;
+    let mut last = message("$last", 3000);
+    last["type"] = json!("m.room.encrypted");
+    last["content"] = json!(content);
+    let mut too_late = last.clone();
+    too_late["origin_server_ts"] = json!(3001);
+    too_late["event_id"] = json!("$too-late");
+    too_late["content"]["session_id"] = json!("missing");
+    let mut unreadable = too_late.clone();
+    unreadable["origin_server_ts"] = json!(2000);
+    unreadable["event_id"] = json!("$unreadable");
+    let mut redacted = unreadable.clone();
+    redacted["event_id"] = json!("$redacted");
+    redacted["content"] = json!({});
+    redacted["unsigned"] = json!({ "redacted_because": {
+        "type": "m.room.redaction", "event_id": "$redaction", "sender": "@alice:example.org",
+        "origin_server_ts": 2001, "content": { "redacts": "$redacted" },
+    } });
+
+    let mut edited = message("$first", 2000);
+    edited["unsigned"] = json!({ "m.relations": { "m.replace": {
+        "type": "m.room.message", "event_id": "$edit", "sender": "@alice:example.org",
+        "room_id": room_id, "origin_server_ts": 3200,
+        "content": {
+            "msgtype": "m.text", "body": "* Edited text",
+            "m.new_content": { "msgtype": "m.text", "body": "Edited text" },
+            "m.relates_to": { "rel_type": "m.replace", "event_id": "$first" }
+        }
+    } } });
+    for (from, end, events) in [
+        ("dated", "older", vec![too_late, last, redacted]),
+        (
+            "older",
+            "skip",
+            vec![edited, unreadable, message("$below", 1999)],
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("{room_path}/messages")))
+            .and(query_param("from", from))
+            .and(query_param("dir", "b"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "start": from, "end": end, "chunk": events,
+            })))
+            .expect(1)
+            .mount(server.server())
+            .await;
+    }
+
+    let mut params = json!({ "room_id": room_id, "after": 2000, "before": 3000, "cursor": null });
+    let page = core
+        .call("timeline.history_page", &params.to_string())
+        .await
+        .unwrap();
+    let page: serde_json::Value = serde_json::from_str(page.get()).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["event_id"], "$last");
+    assert_eq!(page["items"][0]["content"]["body"], "Decrypted text");
+    assert_eq!(page["has_undecryptable_events"], false);
+    params["cursor"] = page["cursor"].clone();
+
+    let page = core
+        .call("timeline.history_page", &params.to_string())
+        .await
+        .unwrap();
+    let page: serde_json::Value = serde_json::from_str(page.get()).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["event_id"], "$first");
+    assert_eq!(page["items"][0]["content"]["body"], "Edited text");
+    assert!(page["cursor"].is_null());
+    assert_eq!(page["has_undecryptable_events"], true);
+}
+
+#[tokio::test]
 async fn custom_room_state_reads_from_the_server_when_not_in_the_store() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;

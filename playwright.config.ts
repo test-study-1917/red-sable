@@ -4,7 +4,7 @@ const port = process.env.SABLE_PREVIEW_PORT ?? '4173';
 const origin = `http://127.0.0.1:${port}`;
 const dragListOrigin = 'http://127.0.0.1:4186';
 const SCRIPTED_TIMELINE_SPECS =
-  /(?:^|\/)(?:timeline-(?:anchoring|stability|gap|keyboard|lifecycle|media)|thread-links)\.spec\.ts$/;
+  /(?:^|\/)(?:timeline-(?:anchoring|stability|gap|keyboard|lifecycle|media)|thread-links|room-file-attachments)\.spec\.ts$/;
 
 const build = process.env.SABLE_E2E_PREBUILT
   ? ''

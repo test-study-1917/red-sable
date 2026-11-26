@@ -261,14 +261,14 @@ export function contextSearchPath(
   spacePathId: string | undefined
 ): string {
   const room = findRoomByPathId(rooms, roomPathId);
-  if (room) return scopedSearchPath('in', room, room.room_id);
+  if (room) return scopedSearchPath('in', undefined, room.room_id);
   const space = findRoomByPathId(rooms, spacePathId);
   if (space) return scopedSearchPath('space', space, space.room_id);
   return resolve('/(app)/search');
 }
 
-export function searchInRoom(room: RoomListItemView | undefined, roomId: string): void {
-  const target = scopedSearchPath('in', room, roomId);
+export function searchInRoom(roomId: string): void {
+  const target = scopedSearchPath('in', undefined, roomId);
 
   // eslint-disable-next-line svelte/no-navigation-without-resolve -- scopedSearchPath() resolves the route itself
   goto(target).catch((error: unknown) => {

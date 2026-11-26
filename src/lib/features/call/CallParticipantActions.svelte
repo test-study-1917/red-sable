@@ -16,6 +16,7 @@
 
   let { name, muted, busy, onModerate }: Props = $props();
   let confirmOpen = $state(false);
+  let confirmRemove = $state.raw<(() => void) | undefined>();
 </script>
 
 <ActionMenu label={i18n.t('call.participantActions', { name })} side="bottom" align="end">
@@ -34,7 +35,15 @@
   <ActionMenuItem disabled={busy || muted} onSelect={() => onModerate('mute')}>
     {i18n.t('call.muteMicrophone', { name })}
   </ActionMenuItem>
-  <ActionMenuItem destructive disabled={busy} onSelect={() => (confirmOpen = true)}>
+  <ActionMenuItem
+    destructive
+    disabled={busy}
+    onSelect={() => {
+      const selected = onModerate;
+      confirmRemove = () => selected('remove');
+      confirmOpen = true;
+    }}
+  >
     {i18n.t('call.removeParticipant', { name })}
   </ActionMenuItem>
 </ActionMenu>
@@ -47,6 +56,7 @@
   confirmDisabled={busy}
   onConfirm={() => {
     confirmOpen = false;
-    onModerate('remove');
+    confirmRemove?.();
+    confirmRemove = undefined;
   }}
 />

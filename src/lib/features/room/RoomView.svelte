@@ -845,7 +845,7 @@
 
   function openSearch(): void {
     if (!desktop) {
-      searchInRoom(resolvedRoom, resolvedRoomId);
+      searchInRoom(resolvedRoomId);
       return;
     }
     panels.toggleSearch();
@@ -853,7 +853,7 @@
 
   $effect(() =>
     openRoomSearch.register(() => {
-      if (!desktop) searchInRoom(resolvedRoom, resolvedRoomId);
+      if (!desktop) searchInRoom(resolvedRoomId);
       else if (!panels.searchOpen) panels.toggleSearch();
     })
   );
@@ -1168,10 +1168,9 @@
     roomId={resolvedRoomId}
     {roomName}
     historyItems={timeline.items}
+    historyReachesStart={timeline.backwardPagination === 'end'}
     historyReachesLatest={timeline.reachesLatest}
-    onLoadHistory={requestHistory}
-    onOpenHistoryMedia={(id: string) =>
-      mediaViewerState.open(id, () => timeline.items, jumpToEvent)}
+    onReadHistoryPage={core.rpc.timeline.historyPage}
     onJumpToHistoryMessage={jumpToEvent}
     {desktop}
     {threads}

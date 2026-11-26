@@ -9,8 +9,8 @@ import type { PersonaStore } from '#lib/personas/personas.svelte.js';
 import type { CursorAnchor } from '#lib/ui/cursor-anchor.js';
 import { t } from '#lib/i18n.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
-import { saveBytes, saveVideoToPhotos } from '#lib/platform/files.js';
-import { confirmSaved, reportSave } from '#lib/ui/download.js';
+import { saveVideoToPhotos } from '#lib/platform/files.js';
+import { confirmSaved, downloadBytes } from '#lib/ui/download.js';
 import { favoriteGifs, isFavorite, toggleFavorite } from '#lib/gif/favorites.svelte.js';
 import { isNativeMobile, isAndroid } from '#lib/platform/os.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
@@ -164,13 +164,7 @@ export class MessageActionExecutor {
           this.savingSource = null;
           this.savingSlow = false;
         });
-        const outcome = await saveBytes(
-          bytes,
-          media.filename || 'attachment',
-          media.mime ?? 'application/octet-stream',
-          preferences.askDownloadLocation
-        );
-        reportSave(outcome);
+        await downloadBytes(bytes, media.filename, media.mime);
       } catch (error) {
         console.warn('[sable timeline] media download failed', error);
         toasts.error(t('errors.actionFailed'));
