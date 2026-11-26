@@ -72,6 +72,44 @@ test('leaving a space room on desktop opens the lobby rather than the index', as
   expect(goto).toHaveBeenCalledWith('/space/param:!space/lobby');
 });
 
+test('opening a thread in the current room keeps it off the list entry', () => {
+  const href = '/rooms/room?thread=%24root';
+  goToPage(href);
+  expect(goto).toHaveBeenCalledExactlyOnceWith(href, {
+    replace: false,
+    reset: false,
+    state: { mobileDrawer: 'closed', mobileDrawerBack: true },
+    persistState: true,
+  });
+});
+
+test('opening a thread from a list keeps it off the list entry', async () => {
+  visit('/space/space');
+  goto.mockImplementationOnce((path, options) => {
+    visit(path, { roomId: 'room' });
+    Object.assign(page.state, options?.state);
+    return Promise.resolve();
+  });
+
+  const href = '/space/space/room?thread=%24root';
+  goToPage(href);
+  await vi.waitFor(() => {
+    expect(goto).toHaveBeenCalledTimes(2);
+  });
+
+  expect(goto).toHaveBeenNthCalledWith(1, '/space/space/room', {
+    replace: false,
+    state: { mobileDrawer: 'open' },
+    persistState: true,
+  });
+  expect(goto).toHaveBeenNthCalledWith(2, href, {
+    replace: false,
+    reset: false,
+    state: { mobileDrawer: 'closed', mobileDrawerBack: true },
+    persistState: true,
+  });
+});
+
 test('searching quotes a room label with a space in it', () => {
   searchInRoom({ canonical_alias: null, name: 'My room' } as RoomListItemView, '!room');
 

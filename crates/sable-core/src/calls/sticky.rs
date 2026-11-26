@@ -45,6 +45,12 @@ fn authenticated_device(info: Option<&EncryptionInfo>, value: &Value) -> Option<
     if value.get("sender")?.as_str()? != info.sender.as_str() {
         return None;
     }
+    trusted_sender_device(info)
+}
+
+/// The sender device, unless the SDK found a verification violation, a mismatched sender or no
+/// device to link the event to. A device its owner never signed is still accepted.
+pub(super) fn trusted_sender_device(info: &EncryptionInfo) -> Option<OwnedDeviceId> {
     match &info.verification_state {
         VerificationState::Verified
         | VerificationState::Unverified(
@@ -348,7 +354,7 @@ pub(crate) fn live_events(room: &Room) -> Vec<Event> {
     sdk_events(
         &room.sticky_events().live(),
         crate::now_ms(),
-        &Default::default(),
+        &std::collections::HashMap::new(),
     )
 }
 

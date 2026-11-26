@@ -38,7 +38,7 @@ use super::{
     store::MemorySessionStore,
 };
 use crate::api::packs::ConvertLegacyParams;
-use crate::api::room_state::{EventParams, SendEventParams};
+use crate::api::room_state::{EventParams, EventsRawParams, SendEventParams};
 use crate::api::timeline::{
     MarkReadParams, MarkUnreadParams, ReadMarkerParams, SetPinnedParams, SubscribeOk,
     SubscribeParams, UnsubscribeParams, WarmRoomsParams,
@@ -572,7 +572,8 @@ async fn a_forbidden_image_does_not_block_later_messages() {
         server.mock_room_state_encryption().plain().mount().await;
         let room = server.sync_joined_room(&client, room_id).await;
         let core = core_for(&server, client.clone()).await;
-        core.watch_send_queue(&client);
+        let session = core.signed_in().unwrap();
+        session.watch_send_queue();
         let queue = room.send_queue();
         queue.set_enabled(false);
         let (_, mut updates) = queue.subscribe().await.unwrap();
@@ -719,7 +720,8 @@ async fn oversized_edits_return_message_too_large() {
         .await;
     room.send_queue().set_enabled(false);
     let core = core_for(&server, client).await;
-    core.timeline(&room_id.to_owned()).await.unwrap();
+    let session = core.signed_in().unwrap();
+    session.timeline(&room_id.to_owned()).await.unwrap();
 
     let result = core
         .run(
@@ -838,15 +840,7 @@ async fn custom_room_state_reads_from_the_server_when_not_in_the_store() {
         .mount(server.server())
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     let content = core
         .run(EventParams {
@@ -859,6 +853,55 @@ async fn custom_room_state_reads_from_the_server_when_not_in_the_store() {
         .map(|json| json.0);
 
     assert_eq!(content, Some(json!({"url": "mxc://example.org/banner"})));
+}
+
+#[tokio::test]
+async fn every_custom_state_event_reads_from_the_server_when_not_in_the_store() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!checklist:example.org");
+    let event_type = "net.headpats.checklist";
+
+    server.sync_joined_room(&client, room_id).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/_matrix/client/v3/rooms/{room_id}/state")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "type": event_type, "state_key": "a", "content": { "done": true },
+                "sender": "@alice:example.org", "event_id": "$a",
+                "origin_server_ts": 1, "room_id": room_id
+            },
+            {
+                "type": event_type, "state_key": "b", "content": { "done": false },
+                "sender": "@alice:example.org", "event_id": "$b",
+                "origin_server_ts": 2, "room_id": room_id
+            },
+            {
+                "type": "m.room.topic", "state_key": "", "content": { "topic": "t" },
+                "sender": "@alice:example.org", "event_id": "$t",
+                "origin_server_ts": 3, "room_id": room_id
+            }
+        ])))
+        .mount(server.server())
+        .await;
+
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+
+    let read = |state_key: Option<&str>| {
+        core.run(EventsRawParams {
+            room_id: room_id.to_owned(),
+            event_type: event_type.to_owned(),
+            state_key: state_key.map(str::to_owned),
+        })
+    };
+    let keys = |events: Vec<crate::api::Json>| -> Vec<String> {
+        events
+            .into_iter()
+            .map(|json| json.0["state_key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(keys(read(None).await.unwrap()), ["a", "b"]);
+    assert_eq!(keys(read(Some("b")).await.unwrap()), ["b"]);
 }
 
 async fn core_for(server: &MatrixMockServer, client: matrix_sdk::Client) -> Arc<Core> {
@@ -987,9 +1030,10 @@ async fn a_synced_state_event_drops_the_room_state_snapshot() {
         .await;
 
     let core = core_for(&server, client.clone()).await;
-    core.watch_room_state(&client);
-    core.room_state_snapshot(&client, room_id).await.unwrap();
-    core.room_state_snapshot(&client, room_id).await.unwrap();
+    let session = core.signed_in().unwrap();
+    session.watch_room_state();
+    session.room_state_snapshot(room_id).await.unwrap();
+    session.room_state_snapshot(room_id).await.unwrap();
     server
         .sync_room(
             &client,
@@ -1000,7 +1044,7 @@ async fn a_synced_state_event_drops_the_room_state_snapshot() {
             ),
         )
         .await;
-    core.room_state_snapshot(&client, room_id).await.unwrap();
+    session.room_state_snapshot(room_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -1440,7 +1484,8 @@ async fn a_written_state_event_is_read_back_until_sync_delivers_it() {
         .await;
 
     let core = core_for(&server, client.clone()).await;
-    core.watch_room_state(&client);
+    let session = core.signed_in().unwrap();
+    session.watch_room_state();
     core.run(SendEventParams {
         room_id: room_id.to_owned(),
         event_type: event_type.to_owned(),
@@ -1488,6 +1533,7 @@ async fn warmed_rooms_join_the_subscription_set_up_to_a_cap() {
     }
 
     let core = core_for(&server, client).await;
+    let session = core.signed_in().unwrap();
     core.run(SubscribeParams {
         room_id: open_room_id.to_owned(),
         focus: TimelineFocusView::Live,
@@ -1508,7 +1554,7 @@ async fn warmed_rooms_join_the_subscription_set_up_to_a_cap() {
         .unwrap();
     }
 
-    let subscribed = core.room_subscriptions.lock().await.clone();
+    let subscribed = session.state().room_subscriptions.lock().await.clone();
     assert!(subscribed.contains(open_room_id));
     assert!(!subscribed.contains(room_id!("!unknown:example.org")));
     assert!(!subscribed.contains(&warm_ids[0]));
@@ -1531,6 +1577,7 @@ async fn an_opened_room_stays_subscribed_after_another_room_opens() {
     server.mock_room_state_encryption().plain().mount().await;
 
     let core = core_for(&server, client).await;
+    let session = core.signed_in().unwrap();
     let SubscribeOk {
         subscription: first,
         ..
@@ -1555,7 +1602,7 @@ async fn an_opened_room_stays_subscribed_after_another_room_opens() {
     .await
     .unwrap();
 
-    let subscribed = core.room_subscriptions.lock().await.clone();
+    let subscribed = session.state().room_subscriptions.lock().await.clone();
     assert!(subscribed.contains(first_room_id));
     assert!(subscribed.contains(second_room_id));
 }
@@ -1570,15 +1617,8 @@ async fn timeline_subscriptions_remain_active_until_each_is_unsubscribed() {
     server.sync_joined_room(&client, second_room_id).await;
     server.mock_room_state_encryption().plain().mount().await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+    let session = core.signed_in().unwrap();
 
     let SubscribeOk {
         subscription: first,
@@ -1603,24 +1643,24 @@ async fn timeline_subscriptions_remain_active_until_each_is_unsubscribed() {
         .await
         .unwrap();
 
-    assert!(core.subscriptions.lock().await.contains_key(&first));
-    assert!(core.subscriptions.lock().await.contains_key(&second));
+    assert!(session.state().subscriptions.lock().contains_key(&first));
+    assert!(session.state().subscriptions.lock().contains_key(&second));
 
     core.run(UnsubscribeParams {
         subscription: first,
     })
     .await
     .unwrap();
-    assert!(!core.subscriptions.lock().await.contains_key(&first));
-    assert!(core.subscriptions.lock().await.contains_key(&second));
-    assert!(core.timelines.lock().await.contains_key(first_room_id));
+    assert!(!session.state().subscriptions.lock().contains_key(&first));
+    assert!(session.state().subscriptions.lock().contains_key(&second));
+    assert!(session.state().timelines.lock().contains_key(first_room_id));
 
     core.run(UnsubscribeParams {
         subscription: second,
     })
     .await
     .unwrap();
-    assert!(core.subscriptions.lock().await.is_empty());
+    assert!(session.state().subscriptions.lock().is_empty());
 }
 
 #[tokio::test]
@@ -1633,13 +1673,17 @@ async fn live_timeline_reports_its_back_pagination_status() {
 
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
 
     let SubscribeOk { subscription, .. } = core
         .run(SubscribeParams {
@@ -1678,19 +1722,14 @@ async fn concurrent_first_access_returns_one_live_timeline() {
     server.sync_joined_room(&client, room_id).await;
     server.mock_room_state_encryption().plain().mount().await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+    let session = core.signed_in().unwrap();
 
     let owned_room_id = room_id.to_owned();
-    let (first, second) =
-        tokio::join!(core.timeline(&owned_room_id), core.timeline(&owned_room_id));
+    let (first, second) = tokio::join!(
+        session.timeline(&owned_room_id),
+        session.timeline(&owned_room_id)
+    );
     assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
 }
 
@@ -1710,23 +1749,17 @@ async fn inactive_timelines_use_least_recently_used_eviction() {
         server.sync_joined_room(&client, room_id).await;
     }
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+    let session = core.signed_in().unwrap();
 
     for room_id in &room_ids[..4] {
-        core.live_timeline(room_id, false).await.unwrap();
+        session.live_timeline(room_id, false).await.unwrap();
     }
-    core.live_timeline(&room_ids[0], false).await.unwrap();
-    core.live_timeline(&room_ids[4], false).await.unwrap();
+    session.live_timeline(&room_ids[0], false).await.unwrap();
+    session.live_timeline(&room_ids[4], false).await.unwrap();
 
-    let timelines = core.timelines.lock().await;
+    let session_state = session.state();
+    let timelines = session_state.timelines.lock();
     assert_eq!(timelines.len(), 4);
     assert!(timelines.contains_key(&room_ids[0]));
     assert!(!timelines.contains_key(&room_ids[1]));
@@ -1816,15 +1849,7 @@ async fn a_sticker_reaches_the_server_as_an_m_sticker_event() {
         .mount()
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     core.run(SubscribeParams {
         room_id: room_id.to_owned(),
@@ -1890,9 +1915,11 @@ async fn send_media_reply(
 ) -> Result<(), RpcError> {
     use crate::protocol::{SendAttachmentRequest, SendGalleryRequest};
 
+    let session = core.signed_in().unwrap();
+
     match kind {
         "attachment" => {
-            Box::pin(core.send_attachment(
+            Box::pin(session.send_attachment(
                 SendAttachmentRequest {
                     room_id: room_id.to_owned(),
                     filename: "picture.png".to_owned(),
@@ -1914,17 +1941,18 @@ async fn send_media_reply(
                 info: None,
                 spoiler: false,
             };
-            core.send_gallery(
-                SendGalleryRequest {
-                    room_id: room_id.to_owned(),
-                    attachments: vec![view(), view()],
-                    caption: None,
-                    formatted_caption: None,
-                    outgoing,
-                },
-                [attachment_bytes(&[1, 2, 3]), attachment_bytes(&[1, 2, 3])].concat(),
-            )
-            .await?;
+            session
+                .send_gallery(
+                    SendGalleryRequest {
+                        room_id: room_id.to_owned(),
+                        attachments: vec![view(), view()],
+                        caption: None,
+                        formatted_caption: None,
+                        outgoing,
+                    },
+                    [attachment_bytes(&[1, 2, 3]), attachment_bytes(&[1, 2, 3])].concat(),
+                )
+                .await?;
         }
         "gif" => {
             core.run(crate::api::messages::SendGifParams {
@@ -2017,16 +2045,7 @@ async fn media_replies_preserve_silent_mentions_on_the_wire() {
                 .await;
             server.mock_room_send().ok(event_id!("$sent")).mount().await;
 
-            let sync_service =
-                Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-            let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-            *core.session.write().await = Some(Session {
-                account_id: "test".to_owned(),
-                client,
-                sync_service,
-                homeserver: server.server().uri(),
-                oauth: false,
-            });
+            let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
             core.run(SubscribeParams {
                 room_id: room_id.to_owned(),
                 focus: TimelineFocusView::Live,
@@ -2119,13 +2138,17 @@ async fn media_config_is_cached_per_account_and_supports_legacy_servers() {
                 .await;
         }
         let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-        *core.session.write().await = Some(Session {
-            account_id: version.to_owned(),
-            client,
-            sync_service,
-            homeserver: server.server().uri(),
-            oauth: false,
-        });
+        crate::test_support::set_session(
+            &core,
+            Some(Session {
+                account_id: version.to_owned(),
+                client,
+                sync_service,
+                homeserver: server.server().uri(),
+                oauth: false,
+                state: Arc::default(),
+            }),
+        );
         for _ in 0..2 {
             let response = core
                 .run(crate::api::messages::MediaConfigParams {})
@@ -2151,15 +2174,8 @@ async fn attachments_use_the_server_upload_limit_instead_of_100_mib() {
             .expect(1)
             .mount()
             .await;
-        let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-        let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-        *core.session.write().await = Some(Session {
-            account_id: "test".to_owned(),
-            client,
-            sync_service,
-            homeserver: server.server().uri(),
-            oauth: false,
-        });
+        let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+        let session = core.signed_in().unwrap();
         let request = serde_json::from_value(json!({
             "room_id": room_id,
             "filename": "large.bin",
@@ -2167,7 +2183,7 @@ async fn attachments_use_the_server_upload_limit_instead_of_100_mib() {
         }))
         .unwrap();
         let result =
-            Box::pin(core.send_attachment(request, attachment_bytes(&vec![0; file_size]))).await;
+            Box::pin(session.send_attachment(request, attachment_bytes(&vec![0; file_size]))).await;
         if u64::try_from(file_size).unwrap() > upload_size {
             assert!(matches!(
                 result,
@@ -2205,53 +2221,47 @@ async fn a_gallery_mixing_a_picture_and_a_pdf_sends_each_as_its_own_itemtype() {
         .mount()
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+    let session = core.signed_in().unwrap();
 
-    core.send_gallery(
-        crate::protocol::SendGalleryRequest {
-            room_id: room_id.to_owned(),
-            attachments: vec![
-                crate::protocol::GalleryAttachmentView {
-                    filename: "beach.png".to_owned(),
-                    mime: "image/png".to_owned(),
-                    info: None,
-                    spoiler: true,
+    session
+        .send_gallery(
+            crate::protocol::SendGalleryRequest {
+                room_id: room_id.to_owned(),
+                attachments: vec![
+                    crate::protocol::GalleryAttachmentView {
+                        filename: "beach.png".to_owned(),
+                        mime: "image/png".to_owned(),
+                        info: None,
+                        spoiler: true,
+                    },
+                    crate::protocol::GalleryAttachmentView {
+                        filename: "report.pdf".to_owned(),
+                        mime: "application/pdf".to_owned(),
+                        info: None,
+                        spoiler: false,
+                    },
+                ],
+                caption: None,
+                formatted_caption: None,
+                outgoing: Outgoing {
+                    selected_quote: None,
+                    mentions: Vec::new(),
+                    mentions_room: false,
+                    in_reply_to: None,
+                    silent_reply: false,
+                    thread_root: None,
+                    persona: None,
                 },
-                crate::protocol::GalleryAttachmentView {
-                    filename: "report.pdf".to_owned(),
-                    mime: "application/pdf".to_owned(),
-                    info: None,
-                    spoiler: false,
-                },
-            ],
-            caption: None,
-            formatted_caption: None,
-            outgoing: Outgoing {
-                selected_quote: None,
-                mentions: Vec::new(),
-                mentions_room: false,
-                in_reply_to: None,
-                silent_reply: false,
-                thread_root: None,
-                persona: None,
             },
-        },
-        [
-            attachment_bytes(&[1, 2, 3]),
-            attachment_bytes(&[4, 5, 6, 7]),
-        ]
-        .concat(),
-    )
-    .await
-    .unwrap();
+            [
+                attachment_bytes(&[1, 2, 3]),
+                attachment_bytes(&[4, 5, 6, 7]),
+            ]
+            .concat(),
+        )
+        .await
+        .unwrap();
 
     let sent = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -2312,6 +2322,7 @@ async fn videos_and_galleries_upload_their_thumbnails() {
             .mount()
             .await;
         let core = core_for(&server, client).await;
+        let session = core.signed_in().unwrap();
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&2_u64.to_le_bytes());
         bytes.extend_from_slice(&3_u64.to_le_bytes());
@@ -2320,18 +2331,19 @@ async fn videos_and_galleries_upload_their_thumbnails() {
         bytes.extend_from_slice(&[1, 2, 255, 216, 255]);
         let attachment = json!({"filename": "video.mp4", "mime": "video/mp4"});
         if gallery {
-            core.send_gallery(
-                serde_json::from_value(json!({
-                    "room_id": room_id, "attachments": [attachment, attachment],
-                }))
-                .unwrap(),
-                [bytes.clone(), bytes].concat(),
-            )
-            .await
-            .unwrap();
+            session
+                .send_gallery(
+                    serde_json::from_value(json!({
+                        "room_id": room_id, "attachments": [attachment, attachment],
+                    }))
+                    .unwrap(),
+                    [bytes.clone(), bytes].concat(),
+                )
+                .await
+                .unwrap();
         } else {
             Box::pin(
-                core.send_attachment(
+                session.send_attachment(
                     serde_json::from_value(json!({
                         "room_id": room_id, "filename": "video.mp4", "mime": "video/mp4",
                     }))
@@ -2408,8 +2420,9 @@ async fn a_silent_clip_is_sent_as_a_gif_unless_the_sender_chose() {
             .await;
         server.mock_room_send().ok(event_id!("$clip")).mount().await;
         let core = core_for(&server, client).await;
+        let session = core.signed_in().unwrap();
         Box::pin(
-            core.send_attachment(
+            session.send_attachment(
                 serde_json::from_value(json!({
                     "room_id": room_id, "filename": "clip.mp4", "mime": "video/mp4",
                     "info": {"duration_ms": 300, "gif": choice},
@@ -3665,6 +3678,58 @@ async fn a_pin_change_reports_what_was_added_and_dropped() {
     ));
 }
 
+/// The overlay decides which rows a ban removes from this flag on the ban's own row.
+#[tokio::test]
+async fn a_ban_row_says_whether_it_removes_the_members_events() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!bans:example.org");
+    let member = |event_id: &str, user: &str, membership: &str, redact_events: bool| {
+        ruma::serde::Raw::<ruma::events::AnySyncTimelineEvent>::from_json_string(
+            json!({
+                "type": "m.room.member",
+                "event_id": event_id,
+                "sender": "@mod:example.org",
+                "state_key": user,
+                "origin_server_ts": 1,
+                "content": {
+                    "membership": membership,
+                    "org.matrix.msc4293.redact_events": redact_events,
+                },
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+
+    server.mock_room_state_encryption().plain().mount().await;
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(member("$removing", "@spam:example.org", "ban", true))
+                // A kick that comes without the content it replaced.
+                .add_timeline_event(member("$kick", "@noise:example.org", "leave", true))
+                .add_timeline_event(member("$plain", "@other:example.org", "ban", false))
+                .add_timeline_event(member("$join", "@new:example.org", "join", true)),
+        )
+        .await;
+
+    let flags: Vec<_> = timeline_views(&client, &room, false)
+        .await
+        .expect("a timeline for a joined room")
+        .into_iter()
+        .filter_map(|item| match item.content {
+            crate::protocol::TimelineItemContentView::Membership { removes_events, .. } => {
+                Some(removes_events)
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(flags, [true, true, false, false]);
+}
+
 #[tokio::test]
 async fn joining_a_call_is_worded_as_a_join() {
     let server = MatrixMockServer::new().await;
@@ -3880,16 +3945,9 @@ async fn dispatch_mark_read(
     private_receipt: bool,
     fully_read: bool,
 ) {
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
-    core.private_receipts
+    let (core, _events) = crate::test_support::signed_in_core(server, client).await;
+    core.settings
+        .private_receipts
         .store(private_receipt, std::sync::atomic::Ordering::Relaxed);
 
     core.run(MarkReadParams {
@@ -4038,15 +4096,7 @@ async fn marking_unread_writes_the_room_account_data_flag() {
         .mount(server.server())
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     core.run(MarkUnreadParams {
         room_id: room_id.to_owned(),
@@ -4108,15 +4158,7 @@ async fn marking_unread_from_a_message_walks_the_read_marker_back() {
         .mount(server.server())
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     core.run(MarkUnreadParams {
         room_id: room_id.to_owned(),
@@ -4320,15 +4362,7 @@ async fn read_marker_for(fully_read: bool) -> Option<String> {
     };
     server.sync_room(&client, room).await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
     core.run(ReadMarkerParams {
         room_id: room_id.to_owned(),
     })
@@ -5296,15 +5330,7 @@ async fn redacting_an_event_outside_the_timeline_redacts_it_in_the_room() {
         .mount()
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     core.run(crate::api::messages::RedactParams {
         room_id: room_id.to_owned(),
@@ -5347,15 +5373,7 @@ async fn a_new_calendar_room_is_set_up_by_its_creator() {
         .mount(server.server())
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     core.run(crate::api::rooms::CreateParams {
         name: Some("Raids".to_owned()),
@@ -5364,6 +5382,7 @@ async fn a_new_calendar_room_is_set_up_by_its_creator() {
         public: false,
         encrypted: false,
         invite: Vec::new(),
+        additional_creators: Vec::new(),
         parent_space: None,
         alias: None,
         room_version: None,
@@ -5396,15 +5415,7 @@ async fn an_encrypted_private_space_includes_encryption_in_its_creation_request(
         .mount(server.server())
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
 
     core.run(crate::api::rooms::CreateParams {
         name: Some("Private space".to_owned()),
@@ -5413,6 +5424,7 @@ async fn an_encrypted_private_space_includes_encryption_in_its_creation_request(
         public: false,
         encrypted: true,
         invite: Vec::new(),
+        additional_creators: Vec::new(),
         parent_space: None,
         alias: None,
         room_version: None,
@@ -5472,21 +5484,14 @@ async fn a_calendar_reload_reads_back_only_to_what_it_already_has() {
         .mount()
         .await;
 
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+    let session = core.signed_in().unwrap();
 
-    let first = core.calendar_entries(&room_id.to_owned()).await.unwrap();
+    let first = session.calendar_entries(&room_id.to_owned()).await.unwrap();
     assert_eq!(first.entries.len(), 1);
     assert_eq!(first.entries[0].event_id, "$a");
 
-    let second = core.calendar_entries(&room_id.to_owned()).await.unwrap();
+    let second = session.calendar_entries(&room_id.to_owned()).await.unwrap();
     let ids: Vec<_> = second
         .entries
         .iter()
@@ -5500,7 +5505,9 @@ async fn a_synced_calendar_entry_tells_the_page_to_reload() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    core.watch_calendars(&client, 1);
+    crate::test_support::sign_in(&core, &server, client.clone()).await;
+    let session = core.signed_in().unwrap();
+    session.watch_calendars(1);
 
     let room_id = room_id!("!calendar:example.org");
     let state = |event: serde_json::Value| ruma::serde::Raw::new(&event).unwrap().cast_unchecked();
@@ -5709,14 +5716,19 @@ async fn an_ignore_change_resyncs_rooms_with_their_history_gap() {
 
     let sync_service = session::start_sync(client.clone()).await.unwrap();
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client: client.clone(),
-        sync_service: sync_service.clone(),
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
-    core.watch_ignored_history(&client, &sync_service);
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client: client.clone(),
+            sync_service: sync_service.clone(),
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let session = core.signed_in().unwrap();
+    session.watch_ignored_history(&sync_service);
 
     tokio::time::timeout(Duration::from_secs(10), async {
         while client.get_room(room_id).is_none() {
@@ -5725,7 +5737,7 @@ async fn an_ignore_change_resyncs_rooms_with_their_history_gap() {
     })
     .await
     .unwrap();
-    let timeline = core.timeline(&room_id.to_owned()).await.unwrap();
+    let timeline = session.timeline(&room_id.to_owned()).await.unwrap();
     ignore_change.store(true, Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(10), async {
         while !event_ids(timeline.items().await).contains(&"$new1".to_owned()) {
@@ -5952,13 +5964,17 @@ async fn thread_lists_are_notified_when_room_cache_changes() {
     server.mock_room_state_encryption().plain().mount().await;
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client: client.clone(),
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client: client.clone(),
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
     core.run(SubscribeParams {
         room_id: room_id.to_owned(),
         focus: TimelineFocusView::Live,
@@ -5989,6 +6005,56 @@ async fn thread_lists_are_notified_when_room_cache_changes() {
     })
     .await
     .expect("room cache update must refresh thread discovery");
+}
+
+#[tokio::test]
+async fn thread_actions_refuse_the_context_of_a_thread_root() {
+    let server = MatrixMockServer::new().await;
+    let client = server
+        .client_builder()
+        .on_builder(|builder| builder.with_threading_support(session::THREADING_SUPPORT))
+        .build()
+        .await;
+    let room_id = room_id!("!linked-root:example.org");
+    let root = event_id!("$root");
+    let factory = EventFactory::new().room(room_id).sender(User::Alice);
+    server
+        .sync_room(&client, JoinedRoomBuilder::new(room_id))
+        .await;
+    server.mock_room_state_encryption().plain().mount().await;
+    server
+        .mock_room_event_context()
+        .match_event_id()
+        .ok(RoomContextResponseTemplate::new(
+            factory.text_msg("root").event_id(root).into_event(),
+        ))
+        .mount()
+        .await;
+    let core = core_for(&server, client).await;
+    let session = core.signed_in().unwrap();
+    let result = core
+        .run(SubscribeParams {
+            room_id: room_id.to_owned(),
+            focus: TimelineFocusView::Event {
+                event_id: root.to_owned(),
+            },
+            hidden_events: false,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        session
+            .subscribed_timeline(
+                &room_id.to_owned(),
+                Some(&root.to_owned()),
+                Some(result.subscription)
+            )
+            .await,
+        Err(RpcError {
+            code: RpcCode::UnknownSubscription,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -6024,6 +6090,7 @@ async fn thread_actions_accept_linked_context_only_for_its_inferred_root() {
         .mount()
         .await;
     let core = core_for(&server, client).await;
+    let session = core.signed_in().unwrap();
     let result = core
         .run(SubscribeParams {
             room_id: room_id.to_owned(),
@@ -6034,7 +6101,7 @@ async fn thread_actions_accept_linked_context_only_for_its_inferred_root() {
         })
         .await
         .unwrap();
-    let timeline = core
+    let timeline = session
         .subscribed_timeline(
             &room_id.to_owned(),
             Some(&root.to_owned()),
@@ -6043,25 +6110,36 @@ async fn thread_actions_accept_linked_context_only_for_its_inferred_root() {
         .await
         .unwrap();
     assert!(timeline.is_threaded());
-    assert!(matches!(
-        core.subscribed_timeline(
+    session
+        .fetch_event_details(
             &room_id.to_owned(),
-            Some(&event_id!("$other").to_owned()),
-            Some(result.subscription)
+            &target.to_owned(),
+            Some(&root.to_owned()),
+            Some(result.subscription),
         )
-        .await,
+        .await
+        .expect("the linked context holds the reply, which the thread's own timeline does not");
+    assert!(matches!(
+        session
+            .subscribed_timeline(
+                &room_id.to_owned(),
+                Some(&event_id!("$other").to_owned()),
+                Some(result.subscription)
+            )
+            .await,
         Err(RpcError {
             code: RpcCode::UnknownSubscription,
             ..
         })
     ));
     assert!(matches!(
-        core.subscribed_timeline(
-            &room_id!("!other:example.org").to_owned(),
-            Some(&root.to_owned()),
-            Some(result.subscription)
-        )
-        .await,
+        session
+            .subscribed_timeline(
+                &room_id!("!other:example.org").to_owned(),
+                Some(&root.to_owned()),
+                Some(result.subscription)
+            )
+            .await,
         Err(RpcError {
             code: RpcCode::UnknownSubscription,
             ..
@@ -6123,6 +6201,57 @@ async fn redacting_a_topic_the_server_already_stripped_leaves_the_room_without_t
         serde_json::to_value(stored).unwrap()["unsigned"]
             .get("redacted_because")
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn room_summary_carries_the_rooms_own_media_preview_level() {
+    use crate::protocol::MediaPreviewsView;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!previews:example.org");
+    let level = |event_type: &str, level: &str| {
+        ruma::serde::Raw::new(&json!({
+            "type": event_type,
+            "content": { "media_previews": level },
+        }))
+        .unwrap()
+        .cast_unchecked()
+    };
+    let unstable = level("io.element.msc4278.media_preview_config", "off");
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id).add_account_data(unstable),
+        )
+        .await;
+    let item =
+        matrix_sdk_ui::room_list_service::RoomListItem::from(client.get_room(room_id).unwrap());
+    let mut cache = std::collections::HashMap::new();
+    super::view::enrich_rooms([&item], &mut cache).await;
+    assert_eq!(
+        room_row(&item, &cache).media_previews,
+        Some(MediaPreviewsView::Off)
+    );
+
+    let stable = level("m.media_preview_config", "private");
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id).add_account_data(stable),
+        )
+        .await;
+    super::view::enrich_rooms([&item], &mut cache).await;
+    assert_eq!(
+        room_row(&item, &cache).media_previews,
+        Some(MediaPreviewsView::Off),
+        "a row update alone does not read the store again"
+    );
+    super::view::refresh_media_previews([&item], &mut cache).await;
+    assert_eq!(
+        room_row(&item, &cache).media_previews,
+        Some(MediaPreviewsView::Private)
     );
 }
 

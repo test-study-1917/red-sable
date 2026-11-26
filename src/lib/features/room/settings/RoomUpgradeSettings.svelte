@@ -23,6 +23,7 @@
   import SettingsRow from '#lib/ui/primitives/SettingsRow.svelte';
   import SettingsSection from '#lib/ui/primitives/SettingsSection.svelte';
   import Switch from '#lib/ui/primitives/Switch.svelte';
+  import { isComposingKey } from '#lib/ui/shortcuts/binding.js';
 
   import '#lib/ui/primitives/settings-row.css';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
@@ -77,7 +78,7 @@
             (space) =>
               space.room_kind === 'space' &&
               space.state === 'joined' &&
-              space.space_children.some((child) => child.room_id === roomId)
+              space.space_children.some((child) => child.room_id === roomId && !child.private)
           )
           .map((space) => space.room_id)
   );
@@ -192,15 +193,16 @@
   }
 
   async function manageableSpaces(): Promise<string[]> {
+    const spaces = parentSpaces;
     const checks = await Promise.all(
-      parentSpaces.map((spaceId) =>
+      spaces.map((spaceId) =>
         core.rpc.members
           .permissions({ room_id: spaceId })
           .then((permissions) => permissions.can_manage_children)
           .catch(() => false)
       )
     );
-    return parentSpaces.filter((_, index) => checks[index]);
+    return spaces.filter((_, index) => checks[index]);
   }
 
   async function replaceWithNewRoom(id: string): Promise<string> {
@@ -425,7 +427,7 @@
             placeholder={i18n.t('room.createInvitePlaceholder')}
             disabled={upgrading}
             onkeydown={(event: KeyboardEvent) => {
-              if (event.key !== 'Enter') return;
+              if (event.key !== 'Enter' || isComposingKey(event)) return;
               event.preventDefault();
               addCreator();
             }}

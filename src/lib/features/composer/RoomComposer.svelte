@@ -14,6 +14,7 @@
     ImageSourcePackView,
     PackImageView,
     PersonaView,
+    UrlPreviewView,
   } from '#src/generated/protocol';
   import type { Node as ProseMirrorNode } from 'prosemirror-model';
   import { onDestroy, tick, untrack } from 'svelte';
@@ -26,7 +27,7 @@
   import type { ReplyDirection } from '#lib/features/room/timeline/timeline-format.js';
   import DeleteMessageDialog from '#lib/features/room/messages/DeleteMessageDialog.svelte';
   import { previewSources } from '#lib/features/room/media/link-preview-cache.js';
-  import { previewableLinks } from '#lib/features/room/media/link-preview.js';
+  import { outgoingPreviewableLinks } from '#lib/features/room/media/link-preview.js';
   import { i18n } from '#lib/i18n.js';
   import { serverNameOf } from '#lib/matrix-id.js';
   import { isPackChange } from '#lib/emoji/load-packs.js';
@@ -36,6 +37,7 @@
   import { outgoingPersona } from '#lib/personas/outgoing-persona.js';
   import { personaSpaces } from './persona-spaces.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
+  import { matrixLinkHost } from '#lib/rooms/matrix-link.js';
   import { enterInsertsNewline } from '#lib/settings/enter-key.svelte.js';
   import { preferences, setPreference } from '#lib/settings/preferences.svelte.js';
   import { SETTINGS_DEVICES_SECTION } from '#lib/settings/registry.js';
@@ -197,6 +199,7 @@
     encrypted?: boolean | null;
     dismissedPreviews?: readonly string[];
     onDismissPreview?: (url: string) => void;
+    loadLinkPreview?: (url: string) => Promise<UrlPreviewView | null>;
     /** What the next send relates to: a message being replied to, or edited. */
     context?: ComposerContext | null;
     restoredContext?: ComposerContext | null;
@@ -231,6 +234,7 @@
     encrypted = null,
     dismissedPreviews = [],
     onDismissPreview,
+    loadLinkPreview,
     context = null,
     restoredContext = null,
     onCancelContext,
@@ -726,7 +730,7 @@
     if (!doc) return null;
     const text = commandTextOf(doc).trim();
     if (admin && text.startsWith(adminPrefix)) return text;
-    return parseSlash(text).kind === 'unknown' ? text : null;
+    return parseSlash(text, null, matrixLinkHost()).kind === 'unknown' ? text : null;
   }
 
   async function typedBotCommand(text: string): Promise<boolean> {
@@ -758,7 +762,7 @@
       return true;
     }
     const drafts = draftsFromText(matched.command, matched.args);
-    const result = buildInvocation(matched.command, drafts, typed.prefix);
+    const result = buildInvocation(matched.command, drafts, typed.prefix, matrixLinkHost());
     if (result.kind === 'built') {
       if (!(await sendBotCommand(matched.command, result.body, result.invocation))) {
         restore();
@@ -809,7 +813,7 @@
     draftLinksTimeout = setTimeout(() => {
       const doc = editor.doc();
       const message = doc ? (richSend ? serializeComposer(doc) : serializePlain(doc)) : null;
-      draftLinks = message?.formatted ? previewableLinks(message.formatted, message.body) : [];
+      draftLinks = message ? outgoingPreviewableLinks(message.formatted, message.body) : [];
     }, 300);
   }
 
@@ -904,6 +908,7 @@
     inFlight += 1;
     error = null;
     editor.clear();
+    draftLinks = [];
     expanded = false;
     sourceMode = editor.leaveSource();
     staged = [];
@@ -1223,11 +1228,13 @@
     input.value = '';
   }
 
-  /** The servers cost a round trip, so the mention is inserted without them. */
+  /** The servers cost a round trip. Only joined rooms are offered by id, so ours can stand in. */
   async function attachVia(address: string): Promise<void> {
     if (!address.startsWith('!')) return;
+    const own = serverNameOf(core.session?.user_id ?? '');
+    editor.attachVia(address, [own]);
     try {
-      editor.attachVia(address, await core.rpc.rooms.viaServers({ room_id: address }));
+      editor.attachVia(address, await core.rpc.rooms.viaServers({ room_id: address }), own);
     } catch (error) {
       console.debug('[sable composer] via servers unavailable', error);
     }
@@ -1510,7 +1517,7 @@
           {/key}
         {/if}
         {#if onDismissPreview && context?.kind !== 'edit' && shownLinks.length > 0}
-          <ComposerLinkPreviews urls={shownLinks} onDismiss={onDismissPreview} />
+          <ComposerLinkPreviews urls={shownLinks} onDismiss={onDismissPreview} {loadLinkPreview} />
         {/if}
         {#if error}
           <ComposerError

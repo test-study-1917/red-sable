@@ -36,6 +36,7 @@ fn row(room_id: &str) -> Row {
         supports_knock_restricted: false,
         space_children: Vec::new(),
         bridge: None,
+        media_previews: None,
         unread: 0,
         notifying: 0,
         highlight: 0,
@@ -89,6 +90,7 @@ fn space(room_id: &str, children: &[&str]) -> Row {
                 order: None,
                 origin_server_ts: 0,
                 suggested: false,
+                private: false,
             })
             .collect(),
         ..row(room_id)

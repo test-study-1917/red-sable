@@ -49,6 +49,7 @@
     onSearch: () => void;
     onTopic?: (() => void) | null;
     phone?: boolean;
+    showMobileActions?: boolean;
     pins?: Snippet;
     actions?: Snippet;
     menu?: Snippet;
@@ -78,6 +79,7 @@
     onSearch,
     onTopic = null,
     phone = false,
+    showMobileActions = false,
     pins,
     actions,
     menu,
@@ -220,8 +222,8 @@
         <PhoneIcon />
       </PanelHeaderButton>
     {/if}
+    {#if !phone || showMobileActions}{@render actions?.()}{/if}
     {#if !phone}
-      {@render actions?.()}
       <PanelHeaderButton
         class="members-button"
         label={i18n.t('timeline.members')}

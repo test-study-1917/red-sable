@@ -1,6 +1,6 @@
 import en from '../../src/locales/en.json' with { type: 'json' };
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { historyItems, timelineItem } from './fixtures/timeline-items';
+import { historyItems, threadSummary, timelineItem } from './fixtures/timeline-items';
 
 test.use({ storageState: SIGNED_OUT });
 
@@ -30,11 +30,11 @@ for (const [surface, mode, path] of [
       }
       const root = {
         ...timelineItem('root', 'Original discussion'),
-        thread_summary: {
+        thread_summary: threadSummary({
           num_replies: 32,
           latest_body: 'A reply',
           latest_sender: '@alice:example.test',
-        },
+        }),
       };
       await expect.poll(() => core.subscribeCount()).toBe(1);
       await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [root] }]);

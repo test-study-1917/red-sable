@@ -1,5 +1,6 @@
 <script lang="ts">
   import { setContext } from 'svelte';
+  import type { ThreadRoots } from '#lib/rooms/thread-roots.svelte.js';
   import {
     HISTORY_EXPORT_CONTEXT,
     type RoomHistoryExportContext,
@@ -30,6 +31,7 @@
     autoOpenWidgetId?: string | null;
     onActiveWidgetChange?: (widgetId: string | null) => void;
     desktop: boolean;
+    threads: ThreadRoots;
     memberLoader: RoomMemberLoader;
     roomSession: RoomSession;
     canManageWidgets: boolean;
@@ -52,6 +54,7 @@
     autoOpenWidgetId = null,
     onActiveWidgetChange,
     desktop,
+    threads,
     memberLoader,
     roomSession,
     canManageWidgets,
@@ -75,6 +78,7 @@
 {#if panels.threadsOpen}
   <RoomThreadsPanel
     {roomId}
+    {threads}
     members={memberLoader.members}
     modal={!desktop}
     {onOpenThread}

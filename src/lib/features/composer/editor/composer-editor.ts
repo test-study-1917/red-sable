@@ -33,7 +33,12 @@ import type { PackImageView } from '#src/generated/protocol';
 
 import { enterInsertsNewline, noteKeyboardInput } from '#lib/settings/enter-key.svelte.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
-import { isNumpadEvent, matchesBinding, toProseMirrorKey } from '#lib/ui/shortcuts/binding.js';
+import {
+  isComposingKey,
+  isNumpadEvent,
+  matchesBinding,
+  toProseMirrorKey,
+} from '#lib/ui/shortcuts/binding.js';
 import { bindingFor } from '#lib/ui/shortcuts/bindings.svelte.js';
 import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
 import type { ShortcutId } from '#lib/ui/shortcuts/shortcuts.js';
@@ -204,6 +209,20 @@ const headingToParagraphBackward: Command = (state, dispatch) => {
     return false;
   }
   dispatch?.(state.tr.setBlockType($from.before(), $from.after(), composerSchema.nodes.paragraph));
+  return true;
+};
+
+const deleteEmptyLineAfterQuote: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  if (!empty || $from.parent.type !== composerSchema.nodes.paragraph) return false;
+  if ($from.parent.content.size > 0) return false;
+  const before = $from.before();
+  if (state.doc.resolve(before).nodeBefore?.type !== composerSchema.nodes.blockquote) return false;
+
+  if (dispatch) {
+    const tr = state.tr.delete(before, $from.after());
+    dispatch(tr.setSelection(Selection.near(tr.doc.resolve(before), -1)).scrollIntoView());
+  }
   return true;
 };
 
@@ -866,7 +885,8 @@ export class ComposerEditor {
           undoBlockRule,
           deleteInlineAtomBackward,
           joinListItemBackward,
-          headingToParagraphBackward
+          headingToParagraphBackward,
+          deleteEmptyLineAfterQuote
         ),
         ArrowUp: (state, dispatch, view) =>
           this.options.onNavigate('ArrowUp') ||
@@ -973,7 +993,7 @@ export class ComposerEditor {
             },
             keydown: (_view, event) => {
               noteKeyboardInput(event);
-              if (event.key === 'Escape' && !event.isComposing) {
+              if (event.key === 'Escape' && !isComposingKey(event)) {
                 if (this.options.onNavigate('Escape')) event.preventDefault();
                 return true;
               }
@@ -1359,14 +1379,15 @@ export class ComposerEditor {
 
   /** The servers arrive after the mention is inserted, so they are patched in
       rather than replacing what has been typed since. */
-  attachVia(userId: string, via: readonly string[]): void {
+  attachVia(userId: string, via: readonly string[], placeholder?: string): void {
     const view = this.view;
     if (!view || via.length === 0) return;
 
     const tr = view.state.tr;
     view.state.doc.descendants((node, pos) => {
       if (node.type !== composerSchema.nodes.mention) return true;
-      if (node.attrs.userId !== userId || (node.attrs.via as string[]).length > 0) return false;
+      if (node.attrs.userId !== userId) return false;
+      if ((node.attrs.via as string[]).some((server) => server !== placeholder)) return false;
       tr.setNodeMarkup(pos, undefined, { ...node.attrs, via: [...via] });
       return false;
     });

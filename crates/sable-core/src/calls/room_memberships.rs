@@ -6,9 +6,11 @@ use matrix_sdk::ruma::OwnedRoomId;
 use parking_lot::Mutex;
 use tokio::sync::{Mutex as RoomGate, OwnedMutexGuard};
 
+type RoomGates = HashMap<(u64, OwnedRoomId), Weak<RoomGate<()>>>;
+
 #[derive(Default)]
 pub(crate) struct RoomMemberships {
-    rooms: Mutex<HashMap<(u64, OwnedRoomId), Weak<RoomGate<()>>>>,
+    rooms: Mutex<RoomGates>,
     retired_through: AtomicU64,
 }
 
@@ -31,13 +33,11 @@ impl RoomMemberships {
             let mut rooms = self.rooms.lock();
             rooms.retain(|_, gate| gate.strong_count() > 0);
             let entry = rooms.entry((generation, room_id.clone())).or_default();
-            if let Some(gate) = entry.upgrade() {
-                gate
-            } else {
+            entry.upgrade().unwrap_or_else(|| {
                 let gate = Arc::new(RoomGate::new(()));
                 *entry = Arc::downgrade(&gate);
                 gate
-            }
+            })
         };
         gate.lock_owned().await
     }

@@ -15,6 +15,7 @@ accepts the same settings except those marked deployment only.
 - `language` (Language): One of `system`, `ar`, `bg`, `ca`, `cs`, `de`, `en`, `es`, `fi`, `fr`, `hu`, `it`, `mi`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `th`, `tok`, `tr`, `uk`, `zh-Hans`. Default `system`.
 - `theme` (Light or dark): One of `system`, `dark`, `light`. Default `system`.
 - `deploymentTheme` (Use this server’s theme): `true` or `false`. Default `true`.
+- `saturation` (Saturation): Number from 0 to 2. Default `1`. Deployment only.
 - `underlineLinks` (Always underline links): `true` or `false`. Default `true`.
 - `renderRoomColors` (Use room colours instead of profile colours): `true` or `false`. Default `true`.
 - `renderProfileColors` (Show profile name colours): `true` or `false`. Default `true`.
@@ -43,6 +44,7 @@ accepts the same settings except those marked deployment only.
 - `tintRoomIcons` (Theme vector room icons): `true` or `false`. Default `false`.
 - `showBridgeBadges` (Show the bridged network on room icons): `true` or `false`. Default `true`.
 - `showSpaceEvents` (Show today’s events in spaces): `true` or `false`. Default `true`.
+- `showActiveThreadsInSidebar` (Show recent threads in the sidebar): `true` or `false`. Default `true`.
 
 ## Timeline
 
@@ -141,6 +143,8 @@ accepts the same settings except those marked deployment only.
 - `sendAttachmentAsCaption` (Use message text as attachment caption): `true` or `false`. Default `true`.
 - `sendAttachmentsAsGallery` (Combine attachments into a gallery): `true` or `false`. Default `false`.
 - `imageMetadata` (Image metadata): One of `location`, `all`, `keep`. Default `location`. Deployment only.
+- `matrixLinkSelector` (External Matrix links): One of `sable`, `matrix`, `custom`. Default `sable`.
+- `matrixLinkCustom` (Custom link host): Text. Default empty.
 
 ## Per-message profiles
 

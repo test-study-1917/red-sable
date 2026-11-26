@@ -15,14 +15,12 @@ mod state;
 mod thread;
 
 pub use diff::map_diff;
-pub use directory::{
-    public_room, room_preview_from_stripped_state, room_preview_view, via_servers,
-};
+pub use directory::{public_room, room_preview_from_stripped_state, room_preview_view};
 #[cfg(test)]
 pub(crate) use item::forged_state;
-pub use item::{
-    Highlights, LocalContent, aggregation_item, latest_edit_id, standalone_item, timeline_item,
-};
+pub(crate) use item::forged_state_event;
+pub(crate) use item::standalone_item;
+pub use item::{Highlights, LocalContent, aggregation_item, latest_edit_id, timeline_item};
 pub use member::{member_event_view, member_view, room_permissions, room_power_levels};
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use room::room_avatar_url;
@@ -46,12 +44,12 @@ pub(crate) use media::{
 pub(crate) use member::clamp_power_level;
 pub(crate) use profile::{authored_body, per_message_profile};
 pub(crate) use raw::ObjectOnly;
-pub(crate) use room::{enrich_rooms, latest_items};
+pub(crate) use room::{enrich_rooms, latest_items, refresh_media_previews};
 pub(crate) use search::search_hit_view;
 pub(crate) use state::{
     CALL_MEMBER_TYPE, CALL_SLOT_ID, CALL_TYPE, FORUM_ROOM_TYPE, FORUM_TITLE, RTC_SLOT_TYPE,
 };
-pub(crate) use thread::reply_without_body;
+pub(crate) use thread::{reply_without_body, thread_reply};
 
 #[cfg(test)]
 pub(crate) use media::audio_metadata;

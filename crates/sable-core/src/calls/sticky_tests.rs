@@ -782,7 +782,7 @@ async fn test_members_in_the_sdk_sticky_map_feed_the_call() {
             assert!(members.apply(&earlier, now));
             let at = crate::now_ms();
             super::merge_sdk(&room, &mut members, false, at);
-            assert!(members.members(at).is_empty());
+            assert_eq!(members.members(at), []);
             assert!(room.sticky_events().unexpired().is_empty());
             continue;
         }

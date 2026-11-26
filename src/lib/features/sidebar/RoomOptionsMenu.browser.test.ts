@@ -33,6 +33,7 @@ const currentRoom = withCounts({
   supports_knock_restricted: false,
   space_children: [],
   bridge: null,
+  media_previews: null,
   unread: 0,
   notifying: 0,
   highlight: 0,
@@ -144,6 +145,7 @@ test('sets the space notification mode and moves the rooms that followed it', as
     order: null,
     origin_server_ts: 0,
     suggested: false,
+    private: false,
   });
   const following = withCounts({
     ...currentRoom,
@@ -217,7 +219,14 @@ test('a room carrying its space mode shows it as following the space', async () 
     room_id: '!space',
     room_kind: 'space',
     space_children: [
-      { room_id: muted.room_id, via: [], order: null, origin_server_ts: 0, suggested: false },
+      {
+        room_id: muted.room_id,
+        via: [],
+        order: null,
+        origin_server_ts: 0,
+        suggested: false,
+        private: false,
+      },
     ],
   });
   const setRoomNotificationMode = vi.fn().mockResolvedValue(null);

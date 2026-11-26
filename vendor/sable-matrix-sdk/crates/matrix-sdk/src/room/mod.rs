@@ -73,7 +73,9 @@ use ruma::events::{
     AnySyncTimelineEvent, SyncMessageLikeEvent, room::encrypted::OriginalSyncRoomEncryptedEvent,
 };
 use ruma::{
-    EventId, Int, MatrixToUri, MatrixUri, MxcUri, OwnedEventId, OwnedRoomId, OwnedServerName, OwnedTransactionId, OwnedUserId, RoomId, TransactionId, UInt, UserId, api::{
+    EventId, Int, MatrixToUri, MatrixUri, MxcUri, OwnedEventId, OwnedRoomId, OwnedServerName,
+    OwnedTransactionId, OwnedUserId, RoomId, TransactionId, UInt, UserId,
+    api::{
         client::{
             config::{set_global_account_data, set_room_account_data},
             context,
@@ -101,8 +103,21 @@ use ruma::{
             },
         },
         error::ErrorKind,
-    }, assign, events::{
-        AnyRoomAccountDataEvent, AnyRoomAccountDataEventContent, AnyTimelineEvent, EmptyStateKey, Mentions, MessageLikeEventContent, OriginalSyncStateEvent, RedactContent, RedactedStateEventContent, RoomAccountDataEvent, RoomAccountDataEventContent, RoomAccountDataEventType, StateEventContent, StateEventType, StaticEventContent, StaticStateEventContent, SyncStateEvent, beacon::BeaconEventContent, beacon_info::BeaconInfoEventContent, direct::DirectEventContent, marked_unread::MarkedUnreadEventContent, receipt::{Receipt, ReceiptThread, ReceiptType}, relation::RelationType, room::{
+    },
+    assign,
+    events::{
+        AnyRoomAccountDataEvent, AnyRoomAccountDataEventContent, AnyTimelineEvent, EmptyStateKey,
+        Mentions, MessageLikeEventContent, OriginalSyncStateEvent, RedactContent,
+        RedactedStateEventContent, RoomAccountDataEvent, RoomAccountDataEventContent,
+        RoomAccountDataEventType, StateEventContent, StateEventType, StaticEventContent,
+        StaticStateEventContent, SyncStateEvent,
+        beacon::BeaconEventContent,
+        beacon_info::BeaconInfoEventContent,
+        direct::DirectEventContent,
+        marked_unread::MarkedUnreadEventContent,
+        receipt::{Receipt, ReceiptThread, ReceiptType},
+        relation::RelationType,
+        room::{
             ImageInfo, MediaSource, ThumbnailInfo,
             avatar::{self, RoomAvatarEventContent},
             encryption::PossiblyRedactedRoomEncryptionEventContent,
@@ -122,8 +137,16 @@ use ruma::{
             retention::RoomRetentionEventContent,
             server_acl::RoomServerAclEventContent,
             topic::RoomTopicEventContent,
-        }, space::{child::SpaceChildEventContent, parent::SpaceParentEventContent}, tag::{TagInfo, TagName}, typing::SyncTypingEvent,
-    }, int, push::{Action, AnyPushRuleRef, PushConditionRoomCtx, Ruleset}, serde::Raw, time::Instant, uint,
+        },
+        space::{child::SpaceChildEventContent, parent::SpaceParentEventContent},
+        tag::{TagInfo, TagName},
+        typing::SyncTypingEvent,
+    },
+    int,
+    push::{Action, AnyPushRuleRef, PushConditionRoomCtx, Ruleset},
+    serde::Raw,
+    time::Instant,
+    uint,
 };
 #[cfg(feature = "experimental-encrypted-state-events")]
 use ruma::{
@@ -2567,14 +2590,25 @@ impl Room {
         self.enable_encryption_inner(true).await
     }
 
+    /// Do the work an encrypted send would otherwise wait on: sync the
+    /// members, query their keys and share a room key with their devices.
+    ///
+    /// Call it when the user starts typing so the next send goes out
+    /// without that round trip. Does nothing if the room is not encrypted.
+    #[cfg(feature = "e2e-encryption")]
+    pub async fn prepare_to_encrypt(&self) -> Result<()> {
+        if !self.latest_encryption_state().await?.is_encrypted() {
+            return Ok(());
+        }
+        futures::ensure_room_encryption_ready(self).await
+    }
+
     /// Share a room key with users in the given room.
     ///
     /// This will create Olm sessions with all the users/device pairs in the
     /// room if necessary and share a room key that can be shared with them.
     ///
     /// Does nothing if no room key needs to be shared.
-    // TODO: expose this publicly so people can pre-share a group session if
-    // e.g. a user starts to type a message for a room.
     #[cfg(feature = "e2e-encryption")]
     #[instrument(skip_all, fields(room_id = ?self.room_id()))]
     async fn preshare_room_key(&self) -> Result<()> {
@@ -4461,11 +4495,7 @@ impl Room {
         can_refresh_global_configuration: bool,
     ) -> Result<Option<RoomRetentionEventContent>> {
         let config = if can_refresh_global_configuration {
-            match self.client.retention_configuration().await {
-                Ok(config) => Some(config),
-                Err(e) if e.is_endpoint_not_implemented() => None,
-                Err(e) => return Err(e.into()),
-            }
+            self.client.retention_configuration().await?
         } else {
             self.client.inner.caches.retention_configuration.get().map(|config| config.into_data())
         };
@@ -5917,7 +5947,8 @@ mod tests {
 
     #[async_test]
     async fn test_subscribe_to_effective_retention() {
-        use futures_util::pin_mut;
+        use std::pin::pin;
+
         use stream_assert::assert_pending;
 
         use crate::assert_next_matches_with_timeout;
@@ -5928,7 +5959,7 @@ mod tests {
         let f = EventFactory::new().sender(user_id!("@alice:b.c"));
 
         let stream = room.subscribe_to_effective_retention();
-        pin_mut!(stream);
+        let mut stream = pin!(stream);
 
         // The server configuration was never fetched.
         assert_next_matches_with_timeout!(stream, None);

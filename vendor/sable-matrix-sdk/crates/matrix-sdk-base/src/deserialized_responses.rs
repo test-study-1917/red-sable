@@ -311,14 +311,16 @@ impl RawAnySyncOrStrippedState {
         }
     }
 
-    /// Turns this `RawAnySyncOrStrippedState` into `Raw<AnyStrippedStateEvent>`.
+    /// Turns this `RawAnySyncOrStrippedState` into
+    /// `Raw<AnyStrippedStateEvent>`.
     pub fn to_stripped(self) -> Raw<AnyStrippedStateEvent> {
         match self {
             Self::Stripped(raw) => raw,
             Self::Sync(raw) => {
-                // this is fine because sync state events are a superset of stripped state events
+                // this is fine because sync state events are a superset of
+                // stripped state events
                 raw.cast_unchecked()
-            },
+            }
         }
     }
 }

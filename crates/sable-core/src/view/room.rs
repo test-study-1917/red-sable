@@ -21,9 +21,9 @@ use matrix_sdk_ui::{eyeball_im, room_list_service::RoomListItem};
 
 use crate::api::rooms::RoomKind;
 use crate::protocol::{
-    BridgeView, LatestEventKind, LatestEventView, NotificationModeView, NotificationSettingsView,
-    PredecessorRoomView, RoomJoinRuleView, RoomListItemView, RoomTag, RoomUnreadView,
-    SpaceChildEdge,
+    BridgeView, LatestEventKind, LatestEventView, MediaPreviewsView, NotificationModeView,
+    NotificationSettingsView, PredecessorRoomView, PreviewEmote, RoomJoinRuleView,
+    RoomListItemView, RoomTag, RoomUnreadView, SpaceChildEdge,
 };
 
 use super::diff::diff_values;
@@ -54,6 +54,8 @@ pub struct RoomInfo {
     pub tags: Vec<RoomTag>,
     pub(crate) voice_roster: Option<crate::calls::VoiceRoomRoster>,
     pub avatar_override: Option<String>,
+    /// Read once per row, then by `refresh_media_previews` when the room's account data changes.
+    pub media_previews: Option<MediaPreviewsView>,
     /// Read once per row, as a bridge sets it when it creates the room.
     pub bridge: Option<BridgeView>,
     pub latest_sender: Option<LatestSender>,
@@ -139,6 +141,7 @@ pub fn room_list_item<S: BuildHasher>(
         supports_knock_restricted: info.is_some_and(|i| i.supports_knock_restricted),
         space_children: info.map(|i| i.children.clone()).unwrap_or_default(),
         bridge: info.and_then(|i| i.bridge.clone()),
+        media_previews: info.and_then(|i| i.media_previews),
         unread,
         notifying,
         highlight,
@@ -305,6 +308,7 @@ async fn latest_sender(room: &Room) -> Option<LatestSender> {
 struct Preview {
     kind: LatestEventKind,
     body: String,
+    emotes: Vec<PreviewEmote>,
 }
 
 impl Preview {
@@ -312,6 +316,7 @@ impl Preview {
         Self {
             kind: LatestEventKind::Text,
             body: body.to_owned(),
+            emotes: Vec::new(),
         }
     }
 
@@ -319,6 +324,7 @@ impl Preview {
         Self {
             kind,
             body: body.unwrap_or_default().to_owned(),
+            emotes: Vec::new(),
         }
     }
 }
@@ -337,7 +343,17 @@ fn message_preview(msgtype: &MessageType, content: Option<&serde_json::Value>) -
         ),
         MessageType::File(file) => Preview::labelled(LatestEventKind::File, file.caption()),
         MessageType::Location(_) => Preview::labelled(LatestEventKind::Location, None),
-        other => Preview::text(&authored_body(other.body(), content)),
+        other => Preview {
+            emotes: crate::preview::message_emotes(other),
+            ..Preview::text(
+                &content
+                    .and_then(crate::notifications::push_preview)
+                    .map_or_else(
+                        || authored_body(other.body(), content),
+                        |text| authored_body(&text, None),
+                    ),
+            )
+        },
     }
 }
 
@@ -351,6 +367,7 @@ pub(super) fn latest_event(item: &RoomListItem) -> Option<LatestEventView> {
             sender_label: None,
             kind: preview.kind,
             body: preview.body,
+            emotes: preview.emotes,
             timestamp,
             sending,
             event_id,
@@ -484,6 +501,20 @@ pub(crate) async fn enrich_rooms<'a, S: BuildHasher>(
 
     for (room_id, info) in futures_util::future::join_all(lookups).await {
         room_cache.insert(room_id, info);
+    }
+}
+
+pub(crate) async fn refresh_media_previews<'a, S: BuildHasher>(
+    rooms: impl IntoIterator<Item = &'a RoomListItem>,
+    room_cache: &mut HashMap<OwnedRoomId, RoomInfo, S>,
+) {
+    for room in rooms {
+        if let (Some(info), Ok(level)) = (
+            room_cache.get_mut(room.room_id()),
+            crate::account_documents::room_media_previews(room).await,
+        ) {
+            info.media_previews = level;
+        }
     }
 }
 
@@ -629,6 +660,12 @@ async fn room_info(room: &Room, previous: Option<&RoomInfo>) -> RoomInfo {
             None
         },
         avatar_override,
+        media_previews: match previous {
+            Some(previous) => previous.media_previews,
+            None => crate::account_documents::room_media_previews(room)
+                .await
+                .unwrap_or_default(),
+        },
         latest_sender: latest_sender(room).await,
     }
 }
@@ -914,6 +951,53 @@ mod tests {
     }
 
     #[test]
+    fn a_rich_text_preview_shows_emotes_by_their_alt_text() {
+        let content = serde_json::json!({
+            "msgtype": "m.text",
+            "body": "Eve: hi :love:",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<strong data-mx-profile-fallback>Eve: </strong>hi <img data-mx-emoticon src=\"mxc://example.org/love\" alt=\"love\">",
+            "com.beeper.per_message_profile": {"displayname": "Eve", "has_fallback": true}
+        });
+        let message: RoomMessageEventContent = serde_json::from_value(content.clone()).unwrap();
+        let preview = message_preview(&message.msgtype, Some(&content));
+        assert_eq!(preview.body, "hi love");
+        assert_eq!(
+            preview.emotes,
+            [PreviewEmote {
+                alt: "love".to_owned(),
+                source: "mxc://example.org/love".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_rich_text_preview_keeps_its_custom_emotes() {
+        let content = serde_json::json!({
+            "msgtype": "m.text",
+            "body": "hi :blob:",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\">"
+        });
+        let message: RoomMessageEventContent = serde_json::from_value(content.clone()).unwrap();
+        let preview = message_preview(&message.msgtype, Some(&content));
+        assert_eq!(preview.body, "hi :blob:");
+        assert_eq!(
+            preview.emotes,
+            [PreviewEmote {
+                alt: ":blob:".to_owned(),
+                source: "mxc://example.org/blob".to_owned(),
+            }]
+        );
+
+        let forwarded = forwarded_room_preview(&serde_json::json!({
+            "org.matrix.msc4553.forwarded": { "content": content },
+        }))
+        .expect("a forwarded preview");
+        assert_eq!(forwarded.emotes, preview.emotes);
+    }
+
+    #[test]
     fn a_latest_sender_is_applied_only_to_the_event_it_sent() {
         let event = |sender: Option<&str>| LatestEventView {
             sender: sender.map(|id| OwnedUserId::try_from(id).unwrap()),
@@ -921,6 +1005,7 @@ mod tests {
             sender_label: None,
             kind: LatestEventKind::Text,
             body: String::new(),
+            emotes: Vec::new(),
             timestamp: None,
             sending: false,
             event_id: None,

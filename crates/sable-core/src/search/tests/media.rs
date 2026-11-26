@@ -8,41 +8,38 @@ use crate::search::MessageIndex;
 #[test]
 fn test_a_migrated_picture_without_media_asks_to_be_hydrated_once() {
     let room = ruma::RoomId::parse("!migrated:localhost").expect("room id");
-    let mut index = MessageIndex::new();
-    index
-        .rooms
-        .entry(room.clone())
-        .or_insert_with(crate::search::RoomIndex::new)
-        .upsert(document(
+    let index = MessageIndex::new();
+    index.upsert(
+        &room,
+        document(
             "old",
             "beach.png",
             "@kris:localhost",
             1,
             Some(crate::protocol::SearchAttachment::Image),
             Vec::new(),
-        ));
+        ),
+    );
     let page = |tried: std::collections::HashSet<ruma::OwnedEventId>| {
-        index.attachment_page(
+        crate::search::exec::block_on(index.store().attachment_page(
             &room,
             crate::protocol::RoomAttachmentKind::Media,
             &[],
             None,
             10,
-            &crate::search::index::PageWork {
-                tried,
-                ..crate::search::index::PageWork::default()
-            },
-        )
+            &tried,
+        ))
+        .expect("attachment page")
     };
 
-    let crate::search::index::PageStep::Hydrate(asked) = page(std::collections::HashSet::new())
+    let crate::search::store::PageStep::Hydrate(asked) = page(std::collections::HashSet::new())
     else {
         panic!("expected a hydrate step");
     };
     assert_eq!(asked, [event_id!("$old").to_owned()]);
 
     assert!(
-        matches!(page(asked.into_iter().collect()), crate::search::index::PageStep::Done(items, None) if items.is_empty())
+        matches!(page(asked.into_iter().collect()), crate::search::store::PageStep::Done(items, None) if items.is_empty())
     );
 }
 
@@ -68,22 +65,20 @@ async fn test_the_gallery_fills_in_media_for_a_migrated_message() {
         )
         .await;
     let core = logged_in(&server, &client, "search-hydrate").await;
-    core.search_index
-        .lock()
-        .await
-        .rooms
-        .entry(room_id.clone())
-        .or_insert_with(crate::search::RoomIndex::new)
-        .upsert(document(
+    let session = core.signed_in().unwrap();
+    session.state().search_index.lock().await.upsert(
+        &room_id,
+        document(
             "image",
             "beach.png",
             "@kris:localhost",
             1,
             Some(crate::protocol::SearchAttachment::Image),
             Vec::new(),
-        ));
+        ),
+    );
 
-    let (items, _) = core
+    let (items, _) = session
         .attachment_page(
             &room_id,
             crate::protocol::RoomAttachmentKind::Media,
@@ -100,12 +95,13 @@ async fn test_the_gallery_fills_in_media_for_a_migrated_message() {
             ..
         }] if source == "mxc://localhost/beach"
     ));
-    let index = core.search_index.lock().await;
-    let stored = index.rooms[&room_id]
-        .document(&event_id!("$image").to_owned())
+    let session_state = session.state();
+    let index = session_state.search_index.lock().await;
+    let stored = index
+        .document(&room_id, &event_id!("$image").to_owned())
+        .await
         .expect("still indexed");
     assert_eq!(stored.media.len(), 1);
-    assert!(index.rooms[&room_id].dirty);
     drop(room);
 }
 
@@ -163,15 +159,21 @@ async fn test_room_attachments_sort_the_index_into_media_files_and_links() {
         .await;
 
     let core = logged_in(&server, &client, "room-attachments").await;
+    let session = core.signed_in().unwrap();
     let (cache, _drop_handles) = client
         .event_cache()
         .unwrap()
         .room(&room_id)
         .await
         .expect("room event cache");
-    reingest_whole_room(&mut *core.search_index.lock().await, &cache, &room_id).await;
+    reingest_whole_room(
+        &*session.state().search_index.lock().await,
+        &cache,
+        &room_id,
+    )
+    .await;
 
-    let (media, next) = core
+    let (media, next) = session
         .room_attachments(&room_id, RoomAttachmentKind::Media, 10, None)
         .await
         .expect("media");
@@ -184,7 +186,7 @@ async fn test_room_attachments_sort_the_index_into_media_files_and_links() {
         }] if filename == "beach.png" && source == "mxc://localhost/beach"
     ));
 
-    let (files, _) = core
+    let (files, _) = session
         .room_attachments(&room_id, RoomAttachmentKind::File, 10, None)
         .await
         .expect("files");
@@ -196,7 +198,7 @@ async fn test_room_attachments_sort_the_index_into_media_files_and_links() {
         }] if filename == "notes.pdf"
     ));
 
-    let (links, _) = core
+    let (links, _) = session
         .room_attachments(&room_id, RoomAttachmentKind::Link, 10, None)
         .await
         .expect("links");
@@ -261,15 +263,21 @@ async fn test_room_attachments_list_each_gallery_item_under_its_tab() {
         .await;
 
     let core = logged_in(&server, &client, "gallery-attachments").await;
+    let session = core.signed_in().unwrap();
     let (cache, _drop_handles) = client
         .event_cache()
         .unwrap()
         .room(&room_id)
         .await
         .expect("room event cache");
-    reingest_whole_room(&mut *core.search_index.lock().await, &cache, &room_id).await;
+    reingest_whole_room(
+        &*session.state().search_index.lock().await,
+        &cache,
+        &room_id,
+    )
+    .await;
 
-    let (media, _) = core
+    let (media, _) = session
         .room_attachments(&room_id, RoomAttachmentKind::Media, 10, None)
         .await
         .expect("media");
@@ -281,7 +289,7 @@ async fn test_room_attachments_list_each_gallery_item_under_its_tab() {
     assert_eq!(media[1]["gallery_index"], 2);
     assert_eq!(media[1]["content"]["kind"], "video");
 
-    let (files, _) = core
+    let (files, _) = session
         .room_attachments(&room_id, RoomAttachmentKind::File, 10, None)
         .await
         .expect("files");
@@ -295,7 +303,7 @@ async fn test_room_attachments_list_each_gallery_item_under_its_tab() {
         rooms: vec![room_id.clone()],
         ..crate::search::IndexFilter::default()
     };
-    let hits = core
+    let hits = session
         .search_messages(
             "notes",
             &filter,

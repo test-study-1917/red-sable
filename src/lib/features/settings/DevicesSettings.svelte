@@ -13,11 +13,9 @@
   import { CoreError, isCoreError } from '#src/transport';
   import { useCoreClient } from '#lib/core/context.js';
   import { formatDate, formatTime } from '#lib/ui/date-time.js';
-  import {
-    openExternalAuthUrl,
-    openExternalAuthWindow,
-    type ExternalAuthWindow,
-  } from '#lib/platform/external-auth.js';
+  import { openExternalAuthWindow, type ExternalAuthWindow } from '#lib/platform/external-auth.js';
+  import { openAccountManagementUrl } from '#lib/platform/account-management.js';
+  import { opensExternalUrls } from '#lib/platform/external-links.js';
   import { i18n, t } from '#lib/i18n.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -54,6 +52,7 @@
   let newRecoveryKey = $state<string | null>(null);
   let confirmingReset = $state(false);
   let confirmingReplaceBackup = $state(false);
+  let confirmingResumeBackup = $state(false);
   let deleting = $state<string | null>(null);
   let removing = $state<string | null>(null);
   let verificationOpen = $state(false);
@@ -182,7 +181,7 @@
       });
       if (managementUrl) {
         if (authWindow) await authWindow.navigate(managementUrl);
-        else await openExternalAuthUrl(managementUrl);
+        else await openAccountManagementUrl(managementUrl);
       } else {
         await refresh();
       }
@@ -226,7 +225,7 @@
           device_id: deviceId,
           password: accountManagementUrl ? null : bulkPassword || null,
         });
-        if (managementUrl) await openExternalAuthUrl(managementUrl);
+        if (managementUrl) await openAccountManagementUrl(managementUrl);
       } catch (cause) {
         console.warn('[sable settings] device removal failed', cause);
         failed.push(deviceName(devices.find((device) => device.device_id === deviceId)));
@@ -248,6 +247,10 @@
       deleting = deviceId;
       return;
     }
+    if (opensExternalUrls()) {
+      void removeDevice(deviceId);
+      return;
+    }
 
     const authWindow = openExternalAuthWindow(`sable-device-${crypto.randomUUID()}`);
     if (!authWindow) {
@@ -257,7 +260,11 @@
     void removeDevice(deviceId, authWindow);
   }
 
-  async function manageRecovery(reset = false, replaceBackup = false): Promise<void> {
+  async function manageRecovery(
+    reset = false,
+    replaceBackup = false,
+    resumeBackup = false
+  ): Promise<void> {
     managingRecovery = true;
     error = null;
     try {
@@ -266,12 +273,16 @@
         : await core.rpc.encryption.enableRecovery({
             passphrase: null,
             replace_backup: replaceBackup,
+            resume_backup: resumeBackup,
           });
       confirmingReplaceBackup = false;
+      confirmingResumeBackup = false;
       await refresh();
     } catch (cause) {
       if (isCoreError(cause, 'backup_exists')) {
         confirmingReplaceBackup = true;
+      } else if (isCoreError(cause, 'backup_paused')) {
+        confirmingResumeBackup = true;
       } else {
         error = messageFor(cause);
       }
@@ -709,6 +720,16 @@
     {i18n.t('settings.replaceKeyBackupUseExisting')}
   </Button>
 </ConfirmDialog>
+
+<ConfirmDialog
+  bind:open={confirmingResumeBackup}
+  title={i18n.t('settings.resumeKeyBackupConfirmTitle')}
+  description={i18n.t('settings.resumeKeyBackupConfirmDescription')}
+  confirmLabel={i18n.t('settings.resumeKeyBackup')}
+  confirmVariant="primary"
+  busy={managingRecovery}
+  onConfirm={() => void manageRecovery(false, false, true)}
+/>
 
 {#if status}
   <VerifyDeviceDialog

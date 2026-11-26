@@ -27,6 +27,7 @@ function edge(roomId: string, overrides: Partial<SpaceChildEdge> = {}): SpaceChi
     origin_server_ts: 0,
     suggested: false,
     ...overrides,
+    private: false,
   };
 }
 
@@ -249,6 +250,7 @@ function summary(roomId: string, overrides: Partial<RoomListItemView> = {}): Roo
     supports_knock_restricted: false,
     space_children: [],
     bridge: null,
+    media_previews: null,
     unread: 0,
     notifying: 0,
     highlight: 0,

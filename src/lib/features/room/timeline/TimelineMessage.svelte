@@ -232,8 +232,8 @@
     actionable={row.actionable}
     onReact={row.actions.onReact}
     {onToggleReaction}
-    onViewReactions={(index: number) => {
-      row.dialogs.open(item, { kind: 'reactions', active: index });
+    onViewReactions={(key: string) => {
+      row.dialogs.open(item, { kind: 'reactions', active: key });
     }}
   />
 {/snippet}
@@ -365,7 +365,7 @@
     style:--timeline-emote-align={defaultEmoteSize ? 'bottom' : undefined}
     style:transform={row.swipe.offset === 0
       ? undefined
-      : `translateX(${String(-row.swipe.offset)}px)`}
+      : `translateX(calc(${String(-row.swipe.offset)}px * var(--inline-sign)))`}
     style:transition={row.swipe.dragging ? 'none' : undefined}
     onpointerdown={row.pointerDown}
     onpointermove={row.press.move}
@@ -605,7 +605,13 @@
           {@const target = threadTarget}
           <TimelineThreadSummary
             summary={threadSummary}
+            {roomId}
+            rootId={target}
+            rootSender={item.sender}
+            {members}
+            {currentUserId}
             persona={threadPersona}
+            {preview}
             onOpen={() => {
               onOpenThread(target);
             }}
@@ -1000,17 +1006,9 @@
     user-select: none;
   }
 
-  .has-receipts:global([data-receipt-narrow]) {
-    padding-inline-end: calc(var(--receipt-reserve) + var(--space-200));
-  }
-
   /* Move the badge, not the text: Firefox left-aligns an RTL line after a <br> on reflow. */
   .has-receipts:global([data-receipt-flip]) .receipt-slot {
     inset-inline: 0 auto;
-  }
-
-  .has-receipts:global([data-receipt-narrow]) .receipt-space {
-    display: none;
   }
 
   .message header {
@@ -1103,7 +1101,8 @@
     line-height: var(--line-height-body);
   }
 
-  .has-edited :global(.formatted-body) {
+  .has-edited :global(.formatted-body),
+  .has-edited :global(.formatted-body > :is(p, sub[data-md='-#']):last-child) {
     display: inline;
   }
 

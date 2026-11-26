@@ -114,15 +114,13 @@ pub(super) fn local_members(members: &[CallMember], own: &CallMember) -> Vec<Cal
                 && member.user_id == own.user_id
                 && own.member_id.is_some()
                 && member.member_id == own.member_id;
-            if member.is_own(&own.user_id, own.own_device_id()) || known_without_device {
+            (member.is_own(&own.user_id, own.own_device_id()) || known_without_device).then(|| {
                 let mut member = member.clone();
                 if known_without_device {
                     member.device_id.clone_from(&own.device_id);
                 }
-                Some(member)
-            } else {
-                None
-            }
+                member
+            })
         })
         .collect()
 }

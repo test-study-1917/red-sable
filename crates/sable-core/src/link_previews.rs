@@ -1,4 +1,4 @@
-use crate::Core;
+use crate::SignedIn;
 use crate::protocol::{
     PostAuthorView, PostMediaKindView, PostMediaView, PostSensitivityView, PostStatsView, PostView,
     RpcError, UrlPreviewVideoView, UrlPreviewView,
@@ -302,7 +302,13 @@ const MAX_PREVIEW_IMAGE_BYTES: usize = 1024 * 1024;
 const MAX_POST_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 const MAX_BUNDLED_IMAGES: usize = 10;
+pub(crate) const MAX_PREPARED_IMAGES: usize = 32;
 
+/// The room, whether it is encrypted, and the image's URL.
+pub(crate) type PreparedImageKey = (OwnedRoomId, bool, String);
+pub(crate) type PreparedImage = std::sync::Arc<tokio::sync::OnceCell<PreviewImage>>;
+
+#[derive(Clone)]
 pub(crate) struct PreviewImage {
     source: MediaSource,
     size: u64,
@@ -368,13 +374,9 @@ pub(crate) fn bundled_link_previews(
     serde_json::to_value(bundles).ok()
 }
 
-impl Core {
-    async fn preview_image_bytes(
-        &self,
-        client: &matrix_sdk::Client,
-        image: &str,
-        max_bytes: usize,
-    ) -> Option<Vec<u8>> {
+impl SignedIn {
+    async fn preview_image_bytes(&self, image: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        let client = self.client();
         if !is_mxc(image) {
             return self.tunnel_media(image, max_bytes).await?.ok();
         }
@@ -405,44 +407,66 @@ impl Core {
         if wanted.is_empty() {
             return images;
         }
-        let Ok(room) = self.room(room_id).await else {
+        let Ok(room) = self.room(room_id) else {
             return images;
         };
-        let Ok(encrypted) = self.room_is_encrypted(&room).await else {
+        let Ok(encrypted) = self.core().room_is_encrypted(&room).await else {
             return images;
         };
         let client = room.client();
-        for WantedImage {
-            source: image,
-            mime,
-            max_bytes,
-        } in wanted
-        {
-            let Some(data) = self.preview_image_bytes(&client, image, max_bytes).await else {
-                continue;
-            };
-            if data.is_empty() || data.len() > max_bytes {
-                continue;
+        for wanted in wanted {
+            let prepared =
+                self.prepared_image((room_id.clone(), encrypted, wanted.source.to_owned()));
+            if let Ok(image) = prepared
+                .get_or_try_init(|| async {
+                    self.upload_preview_image(&client, &wanted, encrypted)
+                        .await
+                        .ok_or(())
+                })
+                .await
+            {
+                images.insert(wanted.source.to_owned(), image.clone());
             }
-            let size = data.len() as u64;
-            let source = if encrypted {
-                let mut reader = std::io::Cursor::new(data);
-                let Ok(file) = client.upload_encrypted_file(&mut reader).await else {
-                    continue;
-                };
-                MediaSource::Encrypted(Box::new(file))
-            } else {
-                let mime = mime
-                    .and_then(|mime| mime.parse::<mime::Mime>().ok())
-                    .unwrap_or(mime::APPLICATION_OCTET_STREAM);
-                let Ok(response) = client.media().upload(&mime, data, None).await else {
-                    continue;
-                };
-                MediaSource::Plain(response.content_uri)
-            };
-            images.insert(image.to_owned(), PreviewImage { source, size });
         }
         images
+    }
+
+    /// Shared by the composer's early preparation and the send, so an image uploads once.
+    fn prepared_image(&self, key: PreparedImageKey) -> PreparedImage {
+        let state = self.state();
+        let mut prepared = state.preview_images.lock();
+        if let Some(image) = prepared.get(&key) {
+            return image.clone();
+        }
+        let image = PreparedImage::default();
+        prepared.insert(key, image.clone());
+        image
+    }
+
+    async fn upload_preview_image(
+        &self,
+        client: &matrix_sdk::Client,
+        image: &WantedImage<'_>,
+        encrypted: bool,
+    ) -> Option<PreviewImage> {
+        let data = self
+            .preview_image_bytes(image.source, image.max_bytes)
+            .await
+            .filter(|data| !data.is_empty() && data.len() <= image.max_bytes)?;
+        let size = data.len() as u64;
+        let source = if encrypted {
+            let mut reader = std::io::Cursor::new(data);
+            let file = client.upload_encrypted_file(&mut reader).await.ok()?;
+            MediaSource::Encrypted(Box::new(file))
+        } else {
+            let mime = image
+                .mime
+                .and_then(|mime| mime.parse::<mime::Mime>().ok())
+                .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+            let response = client.media().upload(&mime, data, None).await.ok()?;
+            MediaSource::Plain(response.content_uri)
+        };
+        Some(PreviewImage { source, size })
     }
 }
 

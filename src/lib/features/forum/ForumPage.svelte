@@ -46,6 +46,7 @@
   import { readText, writeText } from '#lib/platform/local-json.js';
   import { afterOverlayPops, holdOverlayBack } from '#lib/platform/overlay-back.svelte.js';
   import { BREAKPOINTS } from '#lib/ui/breakpoints.js';
+  import { AppLayout } from '#lib/ui/app-layout.svelte.js';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import { toasts } from '#lib/ui/toasts.svelte.js';
@@ -73,6 +74,7 @@
   const roomList = useRoomList();
   const messageMenu = provideMessageMenu(new OpenMessageMenu());
   const forumThreads = new ForumThreads(core);
+  const appLayout = new AppLayout();
   const memberLoader = new RoomMemberLoader();
   const pinnedEvents = new PinnedEvents(core.rpc.timeline);
   providePinnedEvents(pinnedEvents);
@@ -92,6 +94,10 @@
     return null;
   });
   let linkedEventId = $derived(page.url.searchParams.get('event') ?? page.state.notified ?? null);
+  let drawerCovered = $derived(appLayout.drawerCovers(page.state));
+  let linkedThreadId = $derived(page.url.searchParams.get('thread'));
+  let openedLinkedThread: string | null = null;
+  let handledLinkedThread: string | null = null;
   let threadEventId = $state<string | null>(null);
   const sidePanels = new MediaQuery(BREAKPOINTS.sidePanels);
   let threadInPanel = $derived(sidePanels.current && preferences.threadPresentation === 'panel');
@@ -124,6 +130,7 @@
     encrypted: () => resolvedRoom?.encrypted ?? null,
     publicRoom: () => resolvedRoom?.join_rule === 'public',
     canRedactOwn: () => permissions?.can_redact_own ?? true,
+    findItem: (eventId) => forumThreads.threads.find((thread) => thread.eventId === eventId)?.item,
     afterSend: (id) => {
       composing = false;
       donateSentMessage(core, roomList.byId(id));
@@ -153,6 +160,11 @@
   $effect(() => {
     void resolvedRoomId;
     memberLoader.reset();
+    untrack(() => conversation.followRoom());
+    composing = false;
+    query = '';
+    openedLinkedThread = null;
+    handledLinkedThread = null;
   });
 
   $effect(() => {
@@ -160,10 +172,32 @@
   });
 
   $effect(() => {
+    forumThreads.loadListedReactions();
+  });
+
+  $effect(() => {
     void mediaPreviews.load(resolvedRoomId);
   });
 
   $effect(() => {
+    const root = linkedThreadId;
+    if (root?.startsWith('$')) {
+      if (!drawerCovered && handledLinkedThread !== root) {
+        handledLinkedThread = root;
+        openedLinkedThread = root;
+        threadRootId = root;
+        threadEventId = null;
+      }
+      return;
+    }
+    handledLinkedThread = null;
+    if (openedLinkedThread !== null) {
+      if (untrack(() => threadRootId) === openedLinkedThread) {
+        threadRootId = null;
+        threadEventId = null;
+      }
+      openedLinkedThread = null;
+    }
     const target = linkedEventId;
     const targetRoomId = resolvedRoomId;
     if (target === null) return;
@@ -211,6 +245,7 @@
   $effect(() => {
     const activeRoomId = resolvedRoomId;
     let current = true;
+    permissions = null;
     core.rpc.members
       .permissions({ room_id: activeRoomId })
       .then((next) => {
@@ -238,11 +273,22 @@
   function openThread(eventId: string): void {
     threadRootId = eventId;
     threadEventId = null;
+    openedLinkedThread = null;
     void clearLinkedEvent();
   }
 
   function editThread(thread: (typeof forumThreads.threads)[number]): void {
     conversation.edit(thread.eventId, thread.preview, thread.html, thread.mediaCaption);
+  }
+
+  function reactToPost(eventId: string, key: string): void {
+    conversation
+      .react(eventId, key)
+      .then(() => forumThreads.refreshReactions(eventId))
+      .catch((error: unknown) => {
+        console.warn('[sable forum] reacting to a post failed', error);
+        toasts.error(i18n.t('errors.actionFailed'));
+      });
   }
 
   function deleteThread(eventId: string, reason: string | null): void {
@@ -289,7 +335,7 @@
     },
     onDelete: deleteThread,
     get onReact() {
-      return permissions?.can_react === false ? undefined : conversation.toggleReaction;
+      return permissions?.can_react === false ? undefined : reactToPost;
     },
     onCopyLink: copyEventLink,
     get onPin() {
@@ -300,17 +346,30 @@
   holdOverlayBack(() => threadRootId !== null, closeThread);
 
   function closeThread(): void {
+    // A vote cast inside the post went through the thread's own timeline.
+    if (threadRootId !== null) void forumThreads.refreshReactions(threadRootId);
     threadRootId = null;
     threadEventId = null;
-    void afterOverlayPops().then(clearLinkedEvent);
+    openedLinkedThread = null;
+    const { href } = page.url;
+    void afterOverlayPops().then(() => {
+      if (href === page.url.href) void clearLinkedEvent();
+    });
   }
 
   function clearLinkedEvent(): Promise<void> | undefined {
-    if (!page.url.searchParams.has('event') && !page.state.notified) return;
+    if (!page.url.searchParams.has('event') && !linkedThreadId && !page.state.notified) return;
     const url = new URL(page.url.href);
     url.searchParams.delete('event');
+    url.searchParams.delete('thread');
+    const state = page.state.notified ? { ...page.state, notified: undefined } : page.state;
     // eslint-disable-next-line svelte/no-navigation-without-resolve -- rewrites the query of the current, already resolved URL
-    return goto(`${url.pathname}${url.search}`, { replace: true, reset: false });
+    return goto(`${url.pathname}${url.search}`, {
+      replace: true,
+      reset: false,
+      state,
+      persistState: page.state.mobileDrawer !== undefined,
+    });
   }
 
   function loadMoreThreads(): void {

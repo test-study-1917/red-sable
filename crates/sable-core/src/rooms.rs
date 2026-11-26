@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{
     collections::BTreeSet,
     sync::atomic::{AtomicBool, Ordering},
@@ -13,26 +14,27 @@ use matrix_sdk::ruma::api::FeatureFlag;
 use matrix_sdk::ruma::api::client::directory::get_public_rooms_filtered;
 use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::api::client::push::get_pushrules_all;
-use matrix_sdk::ruma::api::client::space::get_hierarchy;
+use matrix_sdk::ruma::api::client::space::{SpaceHierarchyRoomsChunk, get_hierarchy};
+use matrix_sdk::ruma::api::client::state::send_state_event;
 use matrix_sdk::ruma::api::error::ErrorKind;
-use matrix_sdk::ruma::directory::{Filter, RoomTypeFilter};
+use matrix_sdk::ruma::directory::{Filter, PublicRoomsChunk, RoomTypeFilter};
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::room::join_rules::{AllowRule, JoinRule, RoomJoinRulesEventContent};
 use matrix_sdk::ruma::events::room::member::MembershipState;
-use matrix_sdk::ruma::events::room::tombstone::RoomTombstoneEventContent;
 use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
-use matrix_sdk::ruma::{
-    OwnedEventId, OwnedRoomId, OwnedServerName, RoomId, RoomOrAliasId, ServerName, UInt,
-};
-use matrix_sdk::send_queue::SendHandle;
+use matrix_sdk::ruma::{OwnedRoomId, OwnedServerName, RoomId, RoomOrAliasId, ServerName, UInt};
+use matrix_sdk::send_queue::{LocalEchoContent, SendHandle};
 use matrix_sdk::{Client, EncryptionState, RoomMemberships, RoomState};
 use matrix_sdk_base::{RawStateEventWithKeys, RoomInfo, RoomInfoNotableUpdateReasons};
 
 use crate::ResultExt;
+use crate::SignedIn;
 use crate::api::rooms::PublicRoomsOk;
 use crate::api::spaces::HierarchyOk;
 use crate::errors::CoreResultExt as _;
-use crate::protocol::{JoinRuleView, RoomPreviewView, RpcCode, RpcError};
+use crate::protocol::{
+    JoinRuleView, PublicRoomView, RoomPreviewView, RpcCode, RpcError, SpaceHierarchyRoomView,
+};
 
 use crate::Core;
 use crate::view;
@@ -87,15 +89,33 @@ pub(crate) async fn migrate_saved_tombstones(client: &Client) -> Result<(), matr
     Ok(())
 }
 
+/// Leaves alone a room that changed while the request was out, since sync knows better than the
+/// snapshot, and the whole pass when updates were missed.
 pub(crate) async fn reconcile_memberships(client: &Client) -> Result<(), matrix_sdk::Error> {
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    let mut updates = client.room_info_notable_update_receiver();
     let joined: std::collections::HashSet<_> = client
         .send(joined_rooms::v3::Request::new())
         .await?
         .joined_rooms
         .into_iter()
         .collect();
+    let mut changed = std::collections::HashSet::new();
+    loop {
+        match updates.try_recv() {
+            Ok(update) => {
+                changed.insert(update.room_id);
+            }
+            Err(TryRecvError::Lagged(_)) => return Ok(()),
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        }
+    }
 
     for room in client.rooms() {
+        if changed.contains(room.room_id()) {
+            continue;
+        }
         let mark: fn(&mut RoomInfo) = match (room.state(), joined.contains(room.room_id())) {
             (RoomState::Joined, false) => RoomInfo::mark_as_left,
             (RoomState::Left | RoomState::Invited | RoomState::Knocked, true) => {
@@ -112,10 +132,10 @@ pub(crate) async fn reconcile_memberships(client: &Client) -> Result<(), matrix_
     Ok(())
 }
 
-pub(crate) async fn poll_memberships(core: std::sync::Arc<Core>, client: Client) {
+pub(crate) async fn poll_memberships(core: SignedIn, client: Client) {
     loop {
         matrix_sdk::sleep::sleep(MEMBERSHIP_POLL_INTERVAL).await;
-        core.wait_until_active().await;
+        core.core().wait_until_active().await;
         if let Err(error) = reconcile_memberships(&client).await {
             tracing::debug!("could not poll room memberships: {error}");
         }
@@ -200,8 +220,14 @@ impl Core {
     /// # Errors
     ///
     /// When no account is signed in.
-    pub async fn left_rooms(&self) -> Result<(String, Vec<String>), RpcError> {
-        let client = self.client().await?;
+    pub fn left_rooms(self: &Arc<Self>) -> Result<(String, Vec<String>), RpcError> {
+        self.signed_in()?.left_rooms()
+    }
+}
+
+impl SignedIn {
+    pub(crate) fn left_rooms(&self) -> Result<(String, Vec<String>), RpcError> {
+        let client = self.client();
         let user_id = client.user_id().ok_or(RpcCode::NotLoggedIn)?.to_string();
         let rooms = client
             .rooms()
@@ -218,14 +244,14 @@ impl Core {
         direct: bool,
         user_id: Option<ruma::OwnedUserId>,
     ) -> Result<(), RpcError> {
-        let client = self.client().await?;
-        let room = self.room(room_id).await?;
+        let client = self.client();
+        let room = self.room(room_id)?;
 
         let others = if direct {
             let members = room
                 .members(RoomMemberships::ACTIVE)
                 .await
-                .or_failed(self, "set_direct_members")?;
+                .or_failed(self.core(), "set_direct_members")?;
             match &user_id {
                 Some(user_id)
                     if Some(user_id.as_ref()) != client.user_id()
@@ -252,11 +278,11 @@ impl Core {
                 |user_id| serde_json::json!({ "user_id": user_id }),
             );
             let raw = ruma::serde::Raw::new(&content)
-                .or_failed(self, "set_direct_partner")?
+                .or_failed(self.core(), "set_direct_partner")?
                 .cast_unchecked();
             room.set_account_data_raw(view::DIRECT_PARTNER_EVENT.into(), raw)
                 .await
-                .or_failed(self, "set_direct_partner")?;
+                .or_failed(self.core(), "set_direct_partner")?;
         }
 
         if direct {
@@ -264,9 +290,9 @@ impl Core {
                 .account()
                 .mark_as_dm(room_id, &others)
                 .await
-                .or_failed(self, "set_direct")?;
+                .or_failed(self.core(), "set_direct")?;
             let rules = self.push_rules().await?;
-            let snapshot = rules.snapshot().await;
+            let snapshot = rules.snapshot();
             if !crate::push_rules::direct_defaults(
                 &snapshot,
                 true,
@@ -276,12 +302,12 @@ impl Core {
                 rules
                     .apply(writes)
                     .await
-                    .or_report(self, "set_direct_notifications")?;
+                    .or_report(self.core(), "set_direct_notifications")?;
             }
         } else {
             room.set_is_direct(false)
                 .await
-                .or_failed(self, "unset_direct")?;
+                .or_failed(self.core(), "unset_direct")?;
         }
 
         Ok(())
@@ -292,7 +318,7 @@ impl Core {
         room_id: &OwnedRoomId,
         rule: JoinRuleView,
     ) -> Result<(), RpcError> {
-        let room = self.room(room_id).await?;
+        let room = self.room(room_id)?;
         let (supports_knock, supports_restricted, supports_knock_restricted) =
             join_rule_support(&room);
         let content = match rule {
@@ -309,8 +335,8 @@ impl Core {
                 return Err(RpcCode::Unsupported.into());
             }
             JoinRuleView::Restricted | JoinRuleView::KnockRestricted => {
-                let client = self.client().await?;
-                let allow: Vec<_> = view::restricted_parents(&client, &room)
+                let client = self.client();
+                let allow: Vec<_> = view::restricted_parents(client, &room)
                     .await
                     .into_iter()
                     .map(AllowRule::room_membership)
@@ -328,33 +354,32 @@ impl Core {
 
         room.send_state_event(content)
             .await
-            .or_failed(self, "set_room_join_rule")?;
+            .or_failed(self.core(), "set_room_join_rule")?;
         Ok(())
     }
 
     pub(crate) async fn fill_own_members(&self) {
-        let Ok(client) = self.client().await else {
-            return;
-        };
-        if let Err(error) = fill_own_members(&client).await {
+        let client = self.client();
+        if let Err(error) = fill_own_members(client).await {
             tracing::warn!("could not fill in our own room memberships: {error}");
         }
     }
 
     pub(crate) async fn after_sync_running(&self, generation: u64, rules_cleaned: &AtomicBool) {
-        self.until_stores_close(async {
-            self.resubscribe_timeline_rooms().await;
-            self.reconcile_memberships().await;
-            self.fill_own_members().await;
-            if !rules_cleaned.load(Ordering::SeqCst) {
-                self.retry_rule_cleanup(generation, rules_cleaned).await;
-            }
-        })
-        .await;
+        self.core()
+            .until_stores_close(async {
+                self.resubscribe_timeline_rooms().await;
+                self.reconcile_memberships().await;
+                self.fill_own_members().await;
+                if !rules_cleaned.load(Ordering::SeqCst) {
+                    self.retry_rule_cleanup(generation, rules_cleaned).await;
+                }
+            })
+            .await;
     }
 
     pub(crate) async fn retry_rule_cleanup(&self, generation: u64, completed: &AtomicBool) {
-        while self.is_current(generation) && !self.sync_paused() {
+        while self.core().is_current(generation) && !self.core().sync_paused() {
             if self.cleanup_notification_rules().await {
                 completed.store(true, Ordering::SeqCst);
                 return;
@@ -364,9 +389,7 @@ impl Core {
     }
 
     pub(crate) async fn cleanup_notification_rules(&self) -> bool {
-        let Ok(client) = self.client().await else {
-            return false;
-        };
+        let client = self.client();
         let Some(user_id) = client.user_id() else {
             return false;
         };
@@ -386,7 +409,7 @@ impl Core {
             tracing::warn!("could not clean up notification rules: {error}");
             return false;
         }
-        if let Err(error) = clear_dm_default(&client).await {
+        if let Err(error) = clear_dm_default(client).await {
             tracing::warn!("could not clear the old DM notification default: {error}");
             return false;
         }
@@ -394,23 +417,81 @@ impl Core {
     }
 
     pub(crate) async fn reconcile_memberships(&self) {
-        let Ok(client) = self.client().await else {
-            return;
-        };
-        if let Err(error) = reconcile_memberships(&client).await {
+        let client = self.client();
+        if let Err(error) = reconcile_memberships(client).await {
             tracing::warn!("could not reconcile room memberships: {error}");
         }
     }
 
-    pub(crate) async fn room_is_encrypted(&self, room: &Room) -> Result<bool, RpcError> {
-        match room
-            .latest_encryption_state()
-            .await
-            .or_failed(self, "room_encryption_state")?
-        {
-            EncryptionState::Encrypted => Ok(true),
-            EncryptionState::NotEncrypted => Ok(false),
-            EncryptionState::Unknown => Err(RpcCode::Unavailable.into()),
+    /// Synapse carries neither side of a space link across an upgrade and the
+    /// spec leaves it to MSC4168, so the replacement claims the old room's
+    /// spaces and each space we manage lists it in the old room's place. Best
+    /// effort, and harmless to repeat where the homeserver already did it.
+    pub(crate) async fn carry_space_links(&self, old: &RoomId, new: &RoomId) {
+        let client = self.client();
+        if let Some(room) = client.get_room(old) {
+            match self
+                .core()
+                .with_open_stores(async || room.get_state_events(StateEventType::SpaceParent).await)
+                .await
+            {
+                Ok(parents) => {
+                    let parents = parents
+                        .into_iter()
+                        .filter_map(|event| match event {
+                            RawAnySyncOrStrippedState::Sync(raw) => {
+                                raw.deserialize_as_unchecked().ok()
+                            }
+                            RawAnySyncOrStrippedState::Stripped(_) => None,
+                        })
+                        .collect();
+                    copy_state(client, new, &[StateEventType::SpaceParent], parents).await;
+                }
+                Err(error) => {
+                    tracing::warn!(room = %old, %error, "space parents not read for the upgraded room");
+                }
+            }
+        }
+
+        let Some(me) = client.user_id() else {
+            return;
+        };
+        for space in client.joined_space_rooms() {
+            let Ok(Some(mut child)) = self
+                .core()
+                .space_child_content(&space, old, "carry_space_links")
+                .await
+            else {
+                continue;
+            };
+            let managed = space
+                .power_levels()
+                .await
+                .is_ok_and(|levels| levels.user_can_send_state(me, StateEventType::SpaceChild));
+            if !managed {
+                continue;
+            }
+            // The replacement has no other server in it yet.
+            child.via = vec![me.server_name().to_owned()];
+            let space_id = space.room_id().to_owned();
+            let listed = self
+                .send_state(space_id.clone(), "m.space.child", new.as_str(), &child)
+                .await;
+            let moved = match listed {
+                Ok(_) => self
+                    .send_state(
+                        space_id.clone(),
+                        "m.space.child",
+                        old.as_str(),
+                        &serde_json::Map::new(),
+                    )
+                    .await
+                    .map(drop),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = moved {
+                tracing::warn!(space = %space_id, ?error, "space listing not moved to the upgraded room");
+            }
         }
     }
 
@@ -422,8 +503,9 @@ impl Core {
         room_id: &RoomId,
         suggested: Option<bool>,
     ) -> Result<(), RpcError> {
-        let space = self.room(space_id).await?;
+        let space = self.room(space_id)?;
         if let Some(mut content) = self
+            .core()
             .space_child_content(&space, room_id, "add_to_space")
             .await?
         {
@@ -434,16 +516,12 @@ impl Core {
             space
                 .send_state_event_for_key(room_id, content)
                 .await
-                .or_failed(self, "add_to_space")?;
+                .or_failed(self.core(), "add_to_space")?;
             return Ok(());
         }
 
-        let via = self
-            .child_via(room_id)
-            .await?
-            .iter()
-            .filter_map(|server| ServerName::parse(server).ok())
-            .collect();
+        self.refuse_private_child(&space, room_id).await?;
+        let via = self.child_via(room_id).await?;
 
         let mut content = SpaceChildEventContent::new(via);
         content.suggested = suggested.unwrap_or(false);
@@ -451,89 +529,42 @@ impl Core {
         space
             .send_state_event_for_key(room_id, content)
             .await
-            .or_failed(self, "add_to_space")?;
+            .or_failed(self.core(), "add_to_space")?;
 
         Ok(())
     }
 
-    async fn child_via(&self, room_id: &RoomId) -> Result<Vec<String>, RpcError> {
-        let client = self.client().await?;
-        let own = client
-            .user_id()
-            .ok_or(RpcCode::NotLoggedIn)?
-            .server_name()
-            .to_string();
-
-        let via = match client.get_room(room_id) {
-            Some(room) => self.room_via_servers(&room).await.unwrap_or_else(|error| {
-                tracing::warn!("add_to_space: no via for {room_id}: {error:?}");
-                Vec::new()
-            }),
-            None => Vec::new(),
-        };
-
-        Ok(if via.is_empty() { vec![own] } else { via })
-    }
-
-    pub(crate) async fn room_via_servers(&self, room: &Room) -> Result<Vec<String>, RpcError> {
-        let members = room
-            .members(RoomMemberships::JOIN)
-            .await
-            .or_failed(self, "room_via_servers")?;
-
-        let ranked: Vec<(String, i64)> = members
-            .iter()
-            .map(|member| {
-                (
-                    member.user_id().to_string(),
-                    view::clamp_power_level(member.power_level()),
-                )
-            })
-            .collect();
-
-        let mut via = view::via_servers(&ranked);
-        if let Some(event) = room
-            .get_state_event_static::<RoomTombstoneEventContent>()
-            .await
-            .or_failed(self, "room_via_servers")?
-            .and_then(|event| event.deserialize().ok())
+    async fn child_via(&self, room_id: &RoomId) -> Result<Vec<OwnedServerName>, RpcError> {
+        let client = self.client();
+        if let Some(room) = client.get_room(room_id)
+            && let Some(route) = crate::routing::Route::of(&room).await
         {
-            let sender = match &event {
-                SyncOrStrippedState::Sync(event) => event.as_original().map(|event| &event.sender),
-                SyncOrStrippedState::Stripped(event) => Some(&event.sender),
-            };
-            if let Some(sender) = sender {
-                let server = sender.server_name().to_string();
-                if !via.contains(&server) {
-                    via.insert(0, server);
-                }
-            }
+            return Ok(route.into_servers());
         }
-        Ok(via)
+        let listed = crate::routing::Route::listed(client, room_id).await;
+        Ok(listed.ok_or(RpcCode::UnknownRoom)?.into_servers())
     }
 
-    async fn space_child_content(
+    /// Space state would show every member a chat this account filed there privately.
+    pub(crate) async fn refuse_private_child(
         &self,
         space: &Room,
         room_id: &RoomId,
-        context: &str,
-    ) -> Result<Option<SpaceChildEventContent>, RpcError> {
-        let Some(raw) = space
-            .get_state_event_static_for_key::<SpaceChildEventContent, _>(room_id)
+    ) -> Result<(), RpcError> {
+        let private = Core::synced_dm_spaces_of(&space.client(), room_id)
             .await
-            .or_failed(self, context)?
-        else {
-            return Ok(None);
-        };
-
-        let Ok(SyncOrStrippedState::Sync(event)) = raw.deserialize() else {
-            return Ok(None);
-        };
-
-        Ok(event
-            .as_original()
-            .map(|event| event.content.clone())
-            .filter(|content| !content.via.is_empty()))
+            .iter()
+            .any(|linked| linked == space.room_id());
+        if private
+            && self
+                .core()
+                .space_child_content(space, room_id, "refuse_private_child")
+                .await?
+                .is_none()
+        {
+            return Err(RpcCode::Unsupported.into());
+        }
+        Ok(())
     }
 
     async fn space_child_content_or_via(
@@ -543,11 +574,13 @@ impl Core {
         via: Option<Vec<String>>,
     ) -> Result<SpaceChildEventContent, RpcError> {
         if let Some(content) = self
+            .core()
             .space_child_content(space, room_id, "space_child_content: read")
             .await?
         {
             Ok(content)
         } else {
+            self.refuse_private_child(space, room_id).await?;
             let via = via.ok_or(RpcCode::UnknownRoom)?;
             let via: Vec<_> = via
                 .into_iter()
@@ -567,7 +600,7 @@ impl Core {
         order: Option<String>,
         via: Option<Vec<String>>,
     ) -> Result<(), RpcError> {
-        let space = self.room(space_id).await?;
+        let space = self.room(space_id)?;
         let mut content = self
             .space_child_content_or_via(&space, room_id, via)
             .await?;
@@ -575,7 +608,7 @@ impl Core {
         content.order = match order {
             Some(order) => Some(
                 SpaceChildOrder::parse(order)
-                    .or_failed(self, "set_space_child_order_invalid_order")?,
+                    .or_failed(self.core(), "set_space_child_order_invalid_order")?,
             ),
             None => None,
         };
@@ -583,7 +616,7 @@ impl Core {
         space
             .send_state_event_for_key(room_id, content)
             .await
-            .or_failed(self, "set_space_child_order")?;
+            .or_failed(self.core(), "set_space_child_order")?;
 
         Ok(())
     }
@@ -595,7 +628,7 @@ impl Core {
         suggested: bool,
         via: Option<Vec<String>>,
     ) -> Result<(), RpcError> {
-        let space = self.room(space_id).await?;
+        let space = self.room(space_id)?;
 
         let mut content = self
             .space_child_content_or_via(&space, room_id, via)
@@ -605,43 +638,9 @@ impl Core {
         space
             .send_state_event_for_key(room_id, content)
             .await
-            .or_failed(self, "set_space_child_suggested")?;
+            .or_failed(self.core(), "set_space_child_suggested")?;
 
         Ok(())
-    }
-
-    /// The SDK resolves an alias but joins by the alias, losing the servers that know the room.
-    async fn join_route(
-        &self,
-        client: &Client,
-        address: &str,
-        via: &[String],
-        context: &str,
-    ) -> Result<(OwnedRoomId, Vec<OwnedServerName>), RpcError> {
-        let address = RoomOrAliasId::parse(address).map_err(|_| RpcCode::UnknownRoom)?;
-        let mut servers = via
-            .iter()
-            .filter_map(|server| ServerName::parse(server).ok())
-            .collect::<Vec<_>>();
-
-        let (room_id, resolved) = match <&RoomId>::try_from(&*address) {
-            Ok(room_id) => (room_id.to_owned(), Vec::new()),
-            Err(alias) => {
-                let resolved = client
-                    .resolve_room_alias(alias)
-                    .await
-                    .or_failed(self, context)?;
-                servers.push(alias.server_name().to_owned());
-                (resolved.room_id, resolved.servers)
-            }
-        };
-        servers.extend(room_id.server_name().map(ToOwned::to_owned));
-        servers.extend(resolved);
-
-        let mut seen = std::collections::HashSet::new();
-        servers.retain(|server| seen.insert(server.clone()));
-        servers.truncate(MAX_JOIN_SERVERS);
-        Ok((room_id, servers))
     }
 
     pub(crate) async fn join_room(
@@ -649,8 +648,11 @@ impl Core {
         address: &str,
         via: &[String],
     ) -> Result<OwnedRoomId, RpcError> {
-        let client = self.client().await?;
-        let (room_id, servers) = self.join_route(&client, address, via, "join_room").await?;
+        let client = self.client();
+        let (room_id, servers) = self
+            .core()
+            .join_route(client, address, via, "join_room")
+            .await?;
 
         let room = match client
             .join_room_by_id_or_alias((&*room_id).into(), &servers)
@@ -665,7 +667,7 @@ impl Core {
                 {
                     return Err(RpcCode::Banned { reason }.into());
                 }
-                return Err(self.rpc_error("join_room", &error));
+                return Err(self.core().rpc_error("join_room", &error));
             }
         };
 
@@ -678,13 +680,16 @@ impl Core {
         via: &[String],
         reason: Option<String>,
     ) -> Result<OwnedRoomId, RpcError> {
-        let client = self.client().await?;
-        let (room_id, servers) = self.join_route(&client, address, via, "knock_room").await?;
+        let client = self.client();
+        let (room_id, servers) = self
+            .core()
+            .join_route(client, address, via, "knock_room")
+            .await?;
 
         let room = client
             .knock(room_id.into(), reason, servers)
             .await
-            .or_failed(self, "knock_room")?;
+            .or_failed(self.core(), "knock_room")?;
 
         Ok(room.room_id().to_owned())
     }
@@ -694,7 +699,7 @@ impl Core {
         address: &str,
         via: &[String],
     ) -> Result<RoomPreviewView, RpcError> {
-        let client = self.client().await?;
+        let client = self.client();
         let address = RoomOrAliasId::parse(address).map_err(|_| RpcCode::UnknownRoom)?;
         let via = via
             .iter()
@@ -746,7 +751,7 @@ impl Core {
         let mut preview = client
             .get_room_preview(&address, via)
             .await
-            .or_failed(self, "room_preview")?;
+            .or_failed(self.core(), "room_preview")?;
 
         // If the server didn't provide the state, but we have it locally,
         // fill it in before returning
@@ -791,13 +796,12 @@ impl Core {
 
         let response = self
             .client()
-            .await?
-            .public_rooms_filtered(request)
+            .send(lenient_public_rooms::Request::new(request))
             .await
-            .or_failed(self, "public_rooms")?;
+            .or_failed(self.core(), "public_rooms")?;
 
         Ok(PublicRoomsOk {
-            rooms: response.chunk.iter().map(view::public_room).collect(),
+            rooms: public_rooms(&response.chunk),
             next_batch: response.next_batch,
             total: response.total_room_count_estimate.map(u64::from),
         })
@@ -808,7 +812,7 @@ impl Core {
         space_id: &OwnedRoomId,
         from: Option<String>,
     ) -> Result<HierarchyOk, RpcError> {
-        let client = self.client().await?;
+        let client = self.client();
 
         let mut request = get_hierarchy::v1::Request::new(space_id.clone());
         request.from = from;
@@ -816,48 +820,132 @@ impl Core {
         request.max_depth = Some(UInt::from(HIERARCHY_MAX_DEPTH));
 
         let response = client
-            .send(request)
+            .send(lenient_hierarchy::Request::new(request))
             .with_request_config(RequestConfig::short_retry())
             .await
-            .or_failed(self, "space_hierarchy")?;
-
-        // Ordering lives on each parent's `m.space.child` edges, so the chunks
-        // are passed through unsorted.
-        let rooms = response
-            .rooms
-            .into_iter()
-            .map(|chunk| {
-                let children = view::hierarchy_child_edges(&chunk.children_state);
-                view::space_hierarchy_room(&chunk.summary, children)
-            })
-            .collect();
+            .or_failed(self.core(), "space_hierarchy")?;
 
         Ok(HierarchyOk {
-            rooms,
+            rooms: hierarchy_rooms(&response.rooms),
             next_batch: response.next_batch,
         })
     }
 
-    /// The handle lives on the timeline item, so the id has to be looked up.
+    /// The send queue's local echoes carry the handle, whatever timeline shows them.
     pub(crate) async fn local_echo(
         &self,
         room_id: &OwnedRoomId,
         transaction_id: &str,
-        thread_root: Option<&OwnedEventId>,
     ) -> Result<SendHandle, RpcError> {
-        self.timeline_for(room_id, thread_root)
-            .await?
-            .items()
+        let (echoes, _updates) = self
+            .room(room_id)?
+            .send_queue()
+            .subscribe()
             .await
-            .iter()
-            .filter_map(|item| item.as_event())
-            .find(|event| {
-                event
-                    .transaction_id()
-                    .is_some_and(|id| id == transaction_id)
+            .or_failed(self.core(), "local_echo")?;
+        echoes
+            .into_iter()
+            .find_map(|echo| match echo.content {
+                LocalEchoContent::Event { send_handle, .. }
+                    if echo.transaction_id == transaction_id =>
+                {
+                    Some(send_handle)
+                }
+                _ => None,
             })
-            .and_then(matrix_sdk_ui::timeline::EventTimelineItem::local_echo_send_handle)
             .ok_or_else(|| RpcCode::UnknownLocalEcho.into())
+    }
+}
+
+/// Sends the non-empty content of each event of `types` as the same state in `to`. Best effort.
+pub(crate) async fn copy_state(
+    client: &Client,
+    to: &RoomId,
+    types: &[StateEventType],
+    events: Vec<serde_json::Value>,
+) {
+    for value in events {
+        let (Some(event_type), Some(state_key)) = (
+            value.get("type").and_then(serde_json::Value::as_str),
+            value.get("state_key").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let event_type = StateEventType::from(event_type);
+        if !types.contains(&event_type) {
+            continue;
+        }
+        let Some(Ok(content)) = value
+            .get("content")
+            .filter(|content| content.as_object().is_some_and(|map| !map.is_empty()))
+            .map(ruma::serde::Raw::new)
+        else {
+            continue;
+        };
+        let request = send_state_event::v3::Request::new_raw(
+            to.to_owned(),
+            event_type.clone(),
+            state_key.to_owned(),
+            content.cast_unchecked(),
+        );
+        if let Err(error) = client.send(request).await {
+            tracing::warn!(room = %to, %event_type, state_key, %error, "state not copied to the upgraded room");
+        }
+    }
+}
+
+/// Ordering lives on each parent's `m.space.child` edges, so the chunks are passed through
+/// unsorted.
+fn hierarchy_rooms(
+    chunks: &[ruma::serde::Raw<SpaceHierarchyRoomsChunk>],
+) -> Vec<SpaceHierarchyRoomView> {
+    chunks
+        .iter()
+        .filter_map(|raw| crate::lenient::parse_or_skip(raw, "hierarchy room"))
+        .map(|chunk| {
+            let children = view::hierarchy_child_edges(&chunk.children_state);
+            view::space_hierarchy_room(&chunk.summary, children)
+        })
+        .collect()
+}
+
+fn public_rooms(chunks: &[ruma::serde::Raw<PublicRoomsChunk>]) -> Vec<PublicRoomView> {
+    chunks
+        .iter()
+        .filter_map(|raw| crate::lenient::parse_or_skip(raw, "public room"))
+        .map(|chunk| view::public_room(&chunk))
+        .collect()
+}
+
+mod lenient_hierarchy {
+    use ruma::api::client::space::{SpaceHierarchyRoomsChunk, get_hierarchy};
+    use ruma::api::response;
+    use ruma::serde::Raw;
+
+    pub(crate) type Request = crate::lenient::Request<get_hierarchy::v1::Request, Response>;
+
+    #[response]
+    pub(crate) struct Response {
+        pub next_batch: Option<String>,
+        pub rooms: Vec<Raw<SpaceHierarchyRoomsChunk>>,
+    }
+}
+
+mod lenient_public_rooms {
+    use ruma::UInt;
+    use ruma::api::client::directory::get_public_rooms_filtered;
+    use ruma::api::response;
+    use ruma::directory::PublicRoomsChunk;
+    use ruma::serde::Raw;
+
+    pub(crate) type Request =
+        crate::lenient::Request<get_public_rooms_filtered::v3::Request, Response>;
+
+    #[response]
+    pub(crate) struct Response {
+        pub chunk: Vec<Raw<PublicRoomsChunk>>,
+        pub next_batch: Option<String>,
+        pub total_room_count_estimate: Option<UInt>,
     }
 }
 
@@ -884,6 +972,83 @@ pub(crate) fn join_rule_support(room: &Room) -> (bool, bool, bool) {
     )
 }
 
+impl Core {
+    pub(crate) async fn room_is_encrypted(&self, room: &Room) -> Result<bool, RpcError> {
+        match room
+            .latest_encryption_state()
+            .await
+            .or_failed(self, "room_encryption_state")?
+        {
+            EncryptionState::Encrypted => Ok(true),
+            EncryptionState::NotEncrypted => Ok(false),
+            EncryptionState::Unknown => Err(RpcCode::Unavailable.into()),
+        }
+    }
+
+    async fn space_child_content(
+        &self,
+        space: &Room,
+        room_id: &RoomId,
+        context: &str,
+    ) -> Result<Option<SpaceChildEventContent>, RpcError> {
+        let Some(raw) = space
+            .get_state_event_static_for_key::<SpaceChildEventContent, _>(room_id)
+            .await
+            .or_failed(self, context)?
+        else {
+            return Ok(None);
+        };
+
+        let Ok(SyncOrStrippedState::Sync(event)) = raw.deserialize() else {
+            return Ok(None);
+        };
+
+        Ok(event
+            .as_original()
+            .map(|event| event.content.clone())
+            .filter(|content| !content.via.is_empty()))
+    }
+
+    /// The SDK resolves an alias but joins by the alias, losing the servers that know the room.
+    async fn join_route(
+        &self,
+        client: &Client,
+        address: &str,
+        via: &[String],
+        context: &str,
+    ) -> Result<(OwnedRoomId, Vec<OwnedServerName>), RpcError> {
+        let address = RoomOrAliasId::parse(address).map_err(|_| RpcCode::UnknownRoom)?;
+        let mut servers = via
+            .iter()
+            .filter_map(|server| ServerName::parse(server).ok())
+            .collect::<Vec<_>>();
+
+        let (room_id, resolved) = match <&RoomId>::try_from(&*address) {
+            Ok(room_id) => (room_id.to_owned(), Vec::new()),
+            Err(alias) => {
+                let resolved = client
+                    .resolve_room_alias(alias)
+                    .await
+                    .or_failed(self, context)?;
+                servers.push(alias.server_name().to_owned());
+                (resolved.room_id, resolved.servers)
+            }
+        };
+        if let Some(room) = client.get_room(&room_id)
+            && let Some(route) = crate::routing::Route::cached(&room).await
+        {
+            servers.extend(route.into_servers());
+        }
+        servers.extend(room_id.server_name().map(ToOwned::to_owned));
+        servers.extend(resolved);
+
+        let mut seen = std::collections::HashSet::new();
+        servers.retain(|server| seen.insert(server.clone()));
+        servers.truncate(MAX_JOIN_SERVERS);
+        Ok((room_id, servers))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use matrix_sdk::EncryptionState;
@@ -893,6 +1058,97 @@ mod tests {
     #[test]
     fn an_unknown_encryption_state_is_treated_as_encrypted() {
         assert!(maybe_encrypted(&EncryptionState::Unknown));
+    }
+
+    #[test]
+    fn an_invalid_hierarchy_room_does_not_fail_the_page() {
+        use ruma::api::IncomingResponseExt as _;
+        use serde_json::json;
+
+        let room = |room_id: &str, alias: &str| {
+            json!({
+                "room_id": room_id,
+                "canonical_alias": alias,
+                "num_joined_members": 1,
+                "world_readable": false,
+                "guest_can_join": false,
+                "join_rule": "public",
+                "children_state": [],
+            })
+        };
+        let body = json!({
+            "rooms": [
+                room("!space:example.org", "#space:example.org"),
+                room("!broken:example.org", "broken:example.org"),
+                room("!fine:example.org", "#fine:example.org"),
+            ],
+            "next_batch": "next",
+        })
+        .to_string();
+
+        let response = super::lenient_hierarchy::Response::try_from_http_response(
+            http::Response::new(body.as_bytes()),
+        )
+        .expect("the page parses");
+        let rooms: Vec<_> = super::hierarchy_rooms(&response.rooms)
+            .into_iter()
+            .map(|room| room.room_id.to_string())
+            .collect();
+
+        assert_eq!(rooms, ["!space:example.org", "!fine:example.org"]);
+        assert_eq!(response.next_batch.as_deref(), Some("next"));
+    }
+
+    #[tokio::test]
+    async fn the_directory_request_reaches_the_server_unchanged() {
+        use matrix_sdk::test_utils::mocks::MatrixMockServer;
+        use serde_json::json;
+        use wiremock::matchers::{body_json, method, path, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = MatrixMockServer::new().await;
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/publicRooms"))
+            .and(query_param("server", "other.example.org"))
+            .and(body_json(json!({
+                "limit": super::DIRECTORY_PAGE_SIZE,
+                "since": "start",
+                "filter": {"generic_search_term": "matrix"},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "chunk": [
+                    {"room_id": "!first:example.org", "canonical_alias": "#first:example.org", "num_joined_members": 1, "world_readable": false, "guest_can_join": false},
+                    {"room_id": "!broken:example.org", "canonical_alias": "broken", "num_joined_members": 1, "world_readable": false, "guest_can_join": false},
+                    {"room_id": "!fine:example.org", "num_joined_members": 2, "world_readable": true, "guest_can_join": false},
+                ],
+                "next_batch": "next",
+                "total_room_count_estimate": 3,
+            })))
+            .expect(1)
+            .mount(server.server())
+            .await;
+        let client = server.client_builder().build().await;
+        let (core, _events) = crate::test_support::signed_in_core(&server, client).await;
+        let session = core.signed_in().unwrap();
+
+        let page = session
+            .public_rooms(crate::api::rooms::PublicRoomsParams {
+                server: Some("other.example.org".to_owned()),
+                search: Some("matrix".to_owned()),
+                since: Some("start".to_owned()),
+                room_type: None,
+            })
+            .await
+            .unwrap();
+
+        let rooms: Vec<_> = page
+            .rooms
+            .iter()
+            .map(|room| room.room_id.as_str())
+            .collect();
+        assert_eq!(rooms, ["!first:example.org", "!fine:example.org"]);
+        assert_eq!(page.next_batch.as_deref(), Some("next"));
+        assert_eq!(page.total, Some(3));
     }
 
     #[tokio::test]
@@ -1050,55 +1306,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upgrade_routes_include_the_tombstone_sender() {
-        use matrix_sdk::ruma::{room_id, serde::Raw};
-        use matrix_sdk::test_utils::mocks::MatrixMockServer;
-        use matrix_sdk_test::JoinedRoomBuilder;
-        use serde_json::json;
-        use wiremock::{
-            Mock, ResponseTemplate,
-            matchers::{method, path_regex},
-        };
-
-        let server = MatrixMockServer::new().await;
-        let client = server.client_builder().build().await;
-        let room_id = room_id!("!old:example.org");
-        server
-            .sync_room(
-                &client,
-                JoinedRoomBuilder::new(room_id).add_state_event(
-                    Raw::new(&json!({
-                        "type": "m.room.tombstone", "state_key": "", "event_id": "$upgrade",
-                        "sender": "@upgrader:[2001:db8::1]:8448", "origin_server_ts": 1,
-                        "content": {"body": "upgraded", "replacement_room": "!new:example.org"}
-                    }))
-                    .unwrap()
-                    .cast_unchecked(),
-                ),
-            )
-            .await;
-        Mock::given(method("GET"))
-            .and(path_regex("/_matrix/client/v3/rooms/.*/members"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": []})))
-            .mount(server.server())
-            .await;
-        let (core, _events) = crate::Core::new(
-            "routes",
-            Box::new(crate::store::MemorySessionStore::default()),
-        );
-        let via = core
-            .room_via_servers(&client.get_room(room_id).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(
-            via.iter()
-                .filter(|server| *server == "[2001:db8::1]:8448")
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
     async fn converting_to_a_chat_with_one_person_remembers_them() {
         use matrix_sdk::ruma::{room_id, user_id};
         use matrix_sdk::test_utils::mocks::MatrixMockServer;
@@ -1156,8 +1363,10 @@ mod tests {
             .mount(server.server())
             .await;
         let (core, _events) = crate::test_support::signed_in_core(&server, client.clone()).await;
+        let session = core.signed_in().unwrap();
 
-        core.set_direct(&room_id.to_owned(), true, Some(partner.to_owned()))
+        session
+            .set_direct(&room_id.to_owned(), true, Some(partner.to_owned()))
             .await
             .unwrap();
     }

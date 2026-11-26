@@ -141,12 +141,7 @@ async fn primary_1_older_stable_event_lives_exactly_its_remaining_ttl_in_each_ro
         assert!((sdk_sync_started..=sdk_sync_completed).contains(&lease.received_at));
         assert_eq!(lease.expires_at, lease.received_at + 1_000);
         assert_eq!(sdk_members.sticky.members(lease.received_at + 999).len(), 1);
-        assert!(
-            sdk_members
-                .sticky
-                .members(lease.received_at + 1_000)
-                .is_empty()
-        );
+        assert_eq!(sdk_members.sticky.members(lease.received_at + 1_000), []);
     }
 }
 
@@ -172,7 +167,7 @@ async fn delayed_processing_does_not_restart_the_sdk_lease() {
     let mut state = call_state(&room, StickyMemberships::default());
     merge_sdk_sticky(&room, &mut state, crate::now_ms());
     assert_eq!(state.sticky.members(received + 999).len(), 1);
-    assert!(state.sticky.members(received + 1_000).is_empty());
+    assert_eq!(state.sticky.members(received + 1_000), []);
 }
 
 #[tokio::test]

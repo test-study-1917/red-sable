@@ -7,11 +7,13 @@
   import RoomIcon from '#lib/ui/primitives/RoomIcon.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
+  import { isComposingKey } from '#lib/ui/shortcuts/binding.js';
   import '#lib/ui/primitives/menu.css';
 
   import { fuzzyMatchParts } from './fuzzy.js';
   import { filterRoomsByQuery, parentSpaceNames, parseJumpQuery } from './room-jump.js';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import '#lib/ui/primitives/dialog-body.css';
 
   interface Props {
     onSelect: (room: RoomListItemView) => void;
@@ -46,6 +48,7 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
+    if (isComposingKey(event)) return;
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       if (results.length > 0) activeIndex = (active + 1) % results.length;
@@ -63,7 +66,7 @@
   }
 </script>
 
-<div class="jump-list">
+<div class="dialog-body jump-list">
   <TextInput
     id={inputId}
     bind:value={query}
@@ -137,7 +140,11 @@
               >
               {#if parent}<span class="parent">{parent}</span>{/if}
             </span>
-            <UnreadBadge counts={roomList.unreadFor(room)} dm={room.is_direct} aria-hidden="true" />
+            <UnreadBadge
+              counts={roomList.badgeUnreadFor(room)}
+              dm={room.is_direct}
+              aria-hidden="true"
+            />
           </button>
         </li>
       {/each}
@@ -147,7 +154,6 @@
 
 <style>
   .jump-list {
-    display: grid;
     gap: var(--space-200);
   }
 
@@ -156,7 +162,7 @@
     gap: var(--space-100);
     list-style: none;
     margin: 0;
-    max-height: min(60vh, 24rem);
+    max-height: 24rem;
     overflow-y: auto;
     padding: 0;
   }

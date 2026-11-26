@@ -30,6 +30,8 @@ pub(crate) const KNOWN_TYPES: &[&str] = &[
     "moe.sable.next.settings",
     "moe.sable.next.drafts",
     "moe.sable.next.workspace",
+    "moe.sable.next.sticker_history",
+    "moe.sable.next.thread_sidebar",
 ];
 
 fn account_data_filter() -> FilterDefinition {

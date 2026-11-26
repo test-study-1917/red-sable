@@ -24,6 +24,7 @@ export type TimelineLayout = 'modern' | 'compact' | 'bubble';
 export type MessageSpacing = 'none' | 'compact' | 'cozy' | 'roomy';
 export type MediaAutoLoad = MediaPreviewsView;
 export type ImageMetadata = 'location' | 'all' | 'keep';
+export type MatrixLinkSelector = 'sable' | 'matrix' | 'custom';
 export type TimelineEmoteSize = 'default' | '20' | '24' | '32' | '48' | '64';
 export type DateFormat = 'auto' | 'dmy' | 'mdy' | 'ymd';
 export type WeekStart = 'sunday' | 'monday' | 'saturday';
@@ -275,6 +276,7 @@ const SETTINGS = {
   ),
   theme: choice<ThemeMode>(['system', 'dark', 'light'], 'system', { account: true }),
   deploymentTheme: toggle(true, { account: true }),
+  saturation: range(0, 2, 1, { device: true }),
   quickCss: text(''),
   fontFamily: text('', { account: true, device: true }),
   fontFamilyMono: text('', { account: true, device: true }),
@@ -331,6 +333,7 @@ const SETTINGS = {
   tintRoomIcons: toggle(false, { account: true }),
   showBridgeBadges: toggle(true, { account: true }),
   showSpaceEvents: toggle(true, { account: true }),
+  showActiveThreadsInSidebar: toggle(true, { account: true }),
   showAlertZoo: toggle(false),
 
   hour24Clock: toggle(false, { account: true }),
@@ -409,6 +412,10 @@ const SETTINGS = {
   sendAttachmentAsCaption: toggle(true, { account: true }),
   sendAttachmentsAsGallery: toggle(false, { account: true }),
   imageMetadata: choice<ImageMetadata>(['location', 'all', 'keep'], 'location'),
+  matrixLinkSelector: choice<MatrixLinkSelector>(['sable', 'matrix', 'custom'], 'sable', {
+    account: true,
+  }),
+  matrixLinkCustom: text('', { account: true }),
 
   personaPicker: toggle(true, { account: true }),
   personaPickerSortOrder: choice<PersonaPickerSortOrder>(

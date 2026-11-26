@@ -14,6 +14,7 @@
   import { i18n } from '#lib/i18n.js';
   import { nativeFilePicker } from '#lib/platform/native-file-picker.js';
   import { useRoomList } from '#lib/rooms/room-list.svelte.js';
+  import SpaceApplySettings from './SpaceApplySettings.svelte';
   import Alert from '#lib/ui/primitives/Alert.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import ConfirmDialog from '#lib/ui/primitives/ConfirmDialog.svelte';
@@ -133,13 +134,6 @@
       : (syncSpaceIds[0] ?? null)
   );
 
-  let childIds = $derived(
-    roomId && room?.room_kind === 'space' ? (roomList.roomSpaces(roomId)?.descendants ?? []) : []
-  );
-  let childConfirm = $state(false);
-  let childSyncing = $state(false);
-  let childResult = $state<{ updated: number; skipped: number } | null>(null);
-
   $effect(() => {
     data.sync(roomId);
   });
@@ -194,25 +188,6 @@
       syncFailed = true;
     } finally {
       syncing = false;
-    }
-  }
-
-  async function syncChildren(): Promise<void> {
-    const spaceId = roomId;
-    if (!spaceId || childSyncing) return;
-
-    childSyncing = true;
-    try {
-      childResult = await core.rpc.members.syncChildPowerLevels({
-        space_id: spaceId,
-        child_ids: childIds,
-      });
-    } catch (error) {
-      console.warn('[sable room] child permission sync failed', error);
-      childResult = { updated: 0, skipped: childIds.length };
-    } finally {
-      childSyncing = false;
-      childConfirm = false;
     }
   }
 
@@ -415,7 +390,7 @@
           {levels}
           {ownLevel}
           {canEdit}
-          busy={saving || syncing || childSyncing}
+          busy={saving || syncing}
           onUpdate={(next) => (data.levels = next)}
         />
       {/key}
@@ -699,32 +674,7 @@
       </SettingsSection>
     {/if}
 
-    {#if canEdit && childIds.length > 0}
-      <SettingsSection headingId="room-perm-children" title={i18n.t('room.permChildrenTitle')}>
-        <ul class="settings-rows">
-          <SettingsRow
-            title={i18n.t('room.permChildrenRow', { count: childIds.length })}
-            description={childResult
-              ? i18n.t('room.permChildrenDone', {
-                  count: childResult.updated,
-                  skipped: childResult.skipped,
-                })
-              : i18n.t('room.permChildrenHint')}
-          >
-            <Button
-              variant="secondary"
-              disabled={saving || childSyncing}
-              onclick={() => {
-                childResult = null;
-                childConfirm = true;
-              }}
-            >
-              {i18n.t('common.apply')}
-            </Button>
-          </SettingsRow>
-        </ul>
-      </SettingsSection>
-    {/if}
+    <SpaceApplySettings {room} {canEdit} disabled={saving} />
 
     {#each groups as group (group.label)}
       <SettingsSection headingId={`room-perm-${group.label}`} title={i18n.t(group.label)}>
@@ -772,15 +722,6 @@
   busy={syncing}
   error={syncFailed ? i18n.t('room.permFailed') : null}
   onConfirm={() => void syncFromSpace()}
-/>
-
-<ConfirmDialog
-  bind:open={childConfirm}
-  title={i18n.t('room.permChildrenConfirm', { count: childIds.length })}
-  description={i18n.t('room.permSyncConfirmHint')}
-  confirmLabel={i18n.t('common.apply')}
-  busy={childSyncing}
-  onConfirm={() => void syncChildren()}
 />
 
 <ConfirmDialog

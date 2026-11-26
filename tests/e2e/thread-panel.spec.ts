@@ -1,8 +1,43 @@
 import en from '../../src/locales/en.json' with { type: 'json' };
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { timelineItem } from './fixtures/timeline-items';
+import { threadSummary, timelineItem } from './fixtures/timeline-items';
+import { COLD_BOOT_TIMEOUT } from './pages/AppShell';
 
 test.use({ storageState: SIGNED_OUT, viewport: { width: 900, height: 800 }, hasTouch: true });
+
+test('personal pins and recent participated threads open directly from the room tree', async ({
+  page,
+  installRoomCore,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installRoomCore('thread_discovery');
+  await page.goto('/space/!alpha%3Aexample.test/!room%3Aexample.test');
+  await expect(page.locator('.timeline-viewport:not(.initial)')).toBeVisible({
+    timeout: COLD_BOOT_TIMEOUT,
+  });
+
+  const nav = page.getByRole('navigation', { name: en.nav.primary });
+  await expect(nav.getByRole('treeitem', { name: /Release follow-up/ })).toBeVisible();
+  await expect(
+    nav.getByRole('treeitem', { name: /Archived discussion|Welcome thread/ })
+  ).toHaveCount(0);
+
+  await page
+    .locator('.room-header')
+    .getByRole('button', { name: /^Threads/ })
+    .click();
+  const archived = page.getByRole('listitem').filter({ hasText: 'Archived discussion' });
+  await archived.getByRole('button', { name: en.timeline.threadPin }).click();
+  const pinned = nav.getByRole('treeitem', { name: 'Archived discussion' });
+  await expect(pinned).toBeVisible();
+
+  await pinned.click();
+  const thread = page.getByRole('region', { name: en.timeline.thread, exact: true });
+  await expect(thread).toBeVisible();
+  await expect(thread.getByRole('heading', { name: 'Archived discussion' })).toBeVisible();
+  await thread.getByRole('button', { name: en.timeline.threadUnpin }).click();
+  await expect(pinned).toHaveCount(0);
+});
 
 test('the thread screen keeps the timeline and the composer inside the viewport', async ({
   app,
@@ -19,11 +54,11 @@ test('the thread screen keeps the timeline and the composer inside the viewport'
       values: [
         {
           ...timelineItem('thread-root', 'Root message'),
-          thread_summary: {
+          thread_summary: threadSummary({
             num_replies: 3,
             latest_body: 'a reply',
             latest_sender: '@bob:example.test',
-          },
+          }),
         },
       ],
     },
@@ -70,11 +105,11 @@ test('the formatting toolbar keeps the thread composer inside the timeline', asy
       values: [
         {
           ...timelineItem('thread-root', 'Root message'),
-          thread_summary: {
+          thread_summary: threadSummary({
             num_replies: 3,
             latest_body: 'a reply',
             latest_sender: '@bob:example.test',
-          },
+          }),
         },
       ],
     },
@@ -100,6 +135,22 @@ test('the formatting toolbar keeps the thread composer inside the timeline', asy
 test.describe('on mobile', () => {
   test.use({ viewport: { width: 412, height: 839 } });
 
+  async function swipe(page: import('@playwright/test').Page, fromX: number, toX: number) {
+    const cdp = await page.context().newCDPSession(page);
+    const y = 450;
+    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x: number) =>
+      cdp.send('Input.dispatchTouchEvent', {
+        type,
+        touchPoints: type === 'touchEnd' ? [] : [{ x, y }],
+      });
+    await touch('touchStart', fromX);
+    for (let step = 1; step <= 8; step += 1) {
+      await touch('touchMove', fromX + ((toX - fromX) * step) / 8);
+    }
+    await touch('touchEnd', toX);
+    await cdp.detach();
+  }
+
   test('a thread covers the timeline and a swipe right closes it', async ({
     app,
     page,
@@ -119,11 +170,11 @@ test.describe('on mobile', () => {
         values: [
           {
             ...timelineItem('thread-root', 'Root message'),
-            thread_summary: {
+            thread_summary: threadSummary({
               num_replies: 3,
               latest_body: 'a reply',
               latest_sender: '@bob:example.test',
-            },
+            }),
           },
         ],
       },
@@ -138,20 +189,39 @@ test.describe('on mobile', () => {
     expect(box.x).toBe(0);
     expect(box.width).toBe(page.viewportSize()?.width);
 
-    const cdp = await page.context().newCDPSession(page);
-    const y = box.y + box.height / 2;
-    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x: number) =>
-      cdp.send('Input.dispatchTouchEvent', {
-        type,
-        touchPoints: type === 'touchEnd' ? [] : [{ x, y }],
-      });
-    await touch('touchStart', 40);
-    for (let x = 60; x <= 300; x += 40) await touch('touchMove', x);
-    await touch('touchEnd', 300);
+    await swipe(page, 40, 300);
 
     await expect(panel).toBeHidden();
     await expect(page.locator('#drawer-toggle')).toHaveAttribute('aria-pressed', 'false');
     await expect(page).toHaveURL(/\/rooms\/!room%3Aexample\.test$/);
+  });
+
+  test('swiping right leaves a sidebar thread and then opens the sidebar', async ({
+    page,
+    installRoomCore,
+    browserName,
+  }) => {
+    test.skip(browserName !== 'chromium', 'touch is driven over CDP');
+    await installRoomCore('thread_discovery');
+    await page.goto('/space/!alpha%3Aexample.test');
+
+    const sidebarThread = page
+      .locator('.navigation-panel')
+      .getByRole('treeitem', { name: /Release follow-up/ });
+    const panel = page.getByRole('region', { name: en.timeline.thread, exact: true });
+    const drawer = page.locator('#drawer-toggle');
+    await expect(sidebarThread).toBeVisible({ timeout: COLD_BOOT_TIMEOUT });
+    await sidebarThread.click();
+    await expect(panel).toBeVisible();
+
+    await swipe(page, 40, 320);
+    await expect(panel).toBeHidden();
+    await expect(drawer).toHaveAttribute('aria-pressed', 'false');
+    await expect(page).toHaveURL(/\/space\/!alpha%3Aexample\.test\/!room%3Aexample\.test$/);
+
+    await swipe(page, 40, 320);
+    await expect(drawer).toHaveAttribute('aria-pressed', 'true');
+    await expect(panel).toBeHidden();
   });
 });
 
@@ -173,11 +243,11 @@ test.describe('in place of the room', () => {
         values: [
           {
             ...timelineItem('thread-root', 'Root message'),
-            thread_summary: {
+            thread_summary: threadSummary({
               num_replies: 3,
               latest_body: 'a reply',
               latest_sender: '@bob:example.test',
-            },
+            }),
           },
         ],
       },
@@ -218,11 +288,11 @@ for (const context of ['desktop', 'mobile'] as const) {
           op: 'reset',
           values: Array.from({ length: 40 }, (_, index) => ({
             ...timelineItem(`root-${index}`, `Discussion ${index}`),
-            thread_summary: {
+            thread_summary: threadSummary({
               num_replies: 3,
               latest_body: 'A reply',
               latest_sender: '@bob:example.test',
-            },
+            }),
           })),
         },
       ]);
@@ -326,11 +396,11 @@ for (const context of ['desktop', 'mobile'] as const) {
           values: [
             {
               ...timelineItem('root', 'Discussion about the next release '.repeat(8)),
-              thread_summary: {
+              thread_summary: threadSummary({
                 num_replies: 2,
                 latest_body: 'A reply',
                 latest_sender: '@bob:example.test',
-              },
+              }),
             },
           ],
         },
@@ -427,11 +497,11 @@ for (const context of ['desktop', 'mobile'] as const) {
         values: [
           {
             ...timelineItem('root', 'Release discussion'),
-            thread_summary: {
+            thread_summary: threadSummary({
               num_replies: 2,
               latest_body: 'A reply',
               latest_sender: '@bob:example.test',
-            },
+            }),
           },
         ],
       },
@@ -469,11 +539,11 @@ for (const threadPresentation of ['timeline', 'panel']) {
     const subscription = await core.subscription();
     await core.setTimelineItemById(subscription, 'general-19', {
       ...timelineItem('general-19', 'Thread root'),
-      thread_summary: {
+      thread_summary: threadSummary({
         num_replies: 3,
         latest_body: 'Reply',
         latest_sender: '@alice:example.test',
-      },
+      }),
     });
     await page.locator('[data-item-id="general-19"] .thread-summary').click();
     const thread = page.getByRole('region', { name: en.timeline.thread, exact: true });
@@ -507,11 +577,11 @@ for (const threadPresentation of ['timeline', 'panel']) {
     const subscription = await core.subscription();
     await core.setTimelineItemById(subscription, 'general-19', {
       ...timelineItem('general-19', 'Thread root'),
-      thread_summary: {
+      thread_summary: threadSummary({
         num_replies: 3,
         latest_body: 'Reply',
         latest_sender: '@alice:example.test',
-      },
+      }),
     });
     await page.locator('[data-item-id="general-19"] .thread-summary').click();
     const thread = page.getByRole('region', { name: en.timeline.thread, exact: true });

@@ -16,7 +16,7 @@ vi.mock('#lib/platform/overlay-back.svelte.js', () => ({
 }));
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  useRoomList: () => ({ rooms, unreadFor: roomUnread }),
+  useRoomList: () => ({ rooms, badgeUnreadFor: roomUnread }),
 }));
 
 import CommandPalette from './CommandPalette.svelte';
@@ -51,6 +51,7 @@ const rooms = ['Alpha', 'Beta'].map((name) =>
     supports_knock_restricted: false,
     space_children: [],
     bridge: null,
+    media_previews: null,
     unread: 0,
     notifying: 0,
     highlight: 0,

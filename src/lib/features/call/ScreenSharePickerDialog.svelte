@@ -7,6 +7,7 @@
   import Button from '#lib/ui/primitives/Button.svelte';
   import DialogActions from '#lib/ui/primitives/DialogActions.svelte';
   import DialogFrame from '#lib/ui/primitives/DialogFrame.svelte';
+  import '#lib/ui/primitives/dialog-body.css';
 
   interface Props {
     sources: readonly ScreenShareCandidate[];
@@ -45,7 +46,7 @@
   label={i18n.t('call.screenSourcePicker')}
   onConfirm={share}
 >
-  <div class="screen-picker">
+  <div class="dialog-body screen-picker">
     <Dialog.Title>
       {#snippet child({ props })}
         <h2 {...props}>{i18n.t('call.screenSourcePicker')}</h2>
@@ -90,7 +91,6 @@
 
 <style>
   .screen-picker {
-    display: grid;
     gap: var(--space-300);
     max-width: 100%;
     width: min(44rem, calc(100vw - 2rem));
@@ -110,7 +110,7 @@
   :global(.screen-picker-groups) {
     display: grid;
     gap: var(--space-300);
-    max-height: min(60vh, 32rem);
+    max-height: 32rem;
     overflow-y: auto;
   }
 

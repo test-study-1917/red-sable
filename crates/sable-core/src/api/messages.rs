@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use matrix_sdk::ruma::api::client::authenticated_media::get_media_preview;
 use matrix_sdk::ruma::events::relation::{InReplyTo, Reply, Thread};
 use matrix_sdk::ruma::events::room::ImageInfo;
@@ -9,7 +7,7 @@ use matrix_sdk::ruma::{OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId};
 use matrix_sdk_ui::timeline::{Error as TimelineError, RedactError, TimelineEventItemId};
 use serde::{Deserialize, Serialize};
 
-use super::Handler;
+use super::SessionHandler;
 use crate::link_previews::BUNDLED_LINK_PREVIEWS;
 use crate::link_previews::LEGACY_BUNDLED_LINK_PREVIEWS;
 use crate::link_previews::bundled_link_previews;
@@ -28,14 +26,14 @@ use crate::outgoing::reaction_shortcode;
 use crate::outgoing::sticker_info;
 use crate::outgoing::{gif_content, location_content, message_content, reply_to, thread_reply};
 use crate::protocol::{
-    AttachmentInfoView, ComposerContent, ComposerPill, GestureView, ImageSourcePackReferenceView,
-    ImageSourcePackView, MessageKind, PackImageInfoView, PerMessageProfileView,
-    ReactionShortcodeView, RpcCode, RpcError, ScheduledMessageView, SubscriptionId, UrlPreviewView,
+    AttachmentInfoView, GestureView, ImageSourcePackReferenceView, ImageSourcePackView,
+    MessageKind, PackImageInfoView, PerMessageProfileView, ReactionGroup, ReactionShortcodeView,
+    RpcCode, RpcError, ScheduledMessageView, SubscriptionId, UrlPreviewView,
 };
-use crate::{Core, ResultExt, view};
+use crate::tasks::JoinHandleExt as _;
+use crate::{ResultExt, SignedIn, view};
 
 domain! {
-    markdown_to_content,
     send,
     send_raw_event,
     send_redaction,
@@ -63,34 +61,18 @@ domain! {
     end_poll,
     send_gesture,
     url_preview,
+    prepare_preview_images,
+    event_reactions,
     reaction_shortcodes,
     reaction_event_ids,
     redact_reaction,
     frequent_reactions,
     remember_emoji,
+    recent_stickers,
+    remember_sticker,
     set_typing,
+    prepare_to_encrypt,
     media_config,
-}
-
-/// A typed message as the web composer's plain mode sends it, each
-/// `\u{FFFC}` in `markdown` standing for the next of `pills`.
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
-pub struct MarkdownToContentParams {
-    pub markdown: String,
-    #[serde(default)]
-    pub pills: Vec<ComposerPill>,
-}
-
-impl Handler for MarkdownToContentParams {
-    type Ok = ComposerContent;
-
-    fn run(self, _core: &Arc<Core>) -> impl Future<Output = Result<ComposerContent, RpcError>> {
-        std::future::ready(Ok(sable_model::markdown::markdown_to_content(
-            &self.markdown,
-            &self.pills,
-        )))
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,14 +117,14 @@ pub struct SendParams {
     pub forum_title: Option<String>,
 }
 
-impl Handler for SendParams {
+impl SessionHandler for SendParams {
     /// The local echo arrives on the timeline diff stream.
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
         let room_id = self.room_id;
         let thread_root = self.thread_root;
-        let timeline = core.timeline_for(&room_id, thread_root.as_ref()).await?;
+        let timeline = session.timeline_for(&room_id, thread_root.as_ref()).await?;
         let (body, formatted, persona) = match self.persona {
             Some(persona) => {
                 let (body, formatted, persona) =
@@ -160,7 +142,7 @@ impl Handler for SendParams {
         );
 
         let reply = thread_reply(self.in_reply_to, thread_root.clone(), self.silent_reply);
-        let content = core
+        let content = session
             .with_reply(&room_id, content, reply, thread_root.clone(), "send_reply")
             .await?;
 
@@ -178,7 +160,13 @@ impl Handler for SendParams {
             .collect();
         let opt_out = (self.no_link_previews || (had_previews && link_previews.is_empty()))
             .then(|| serde_json::Value::Array(Vec::new()));
-        let images = core.prepare_preview_images(&room_id, &link_previews).await;
+        let images = session
+            .prepare_preview_images(&room_id, &link_previews)
+            .await;
+        let mut bot_command = self.bot_command;
+        if let Some(command) = &mut bot_command {
+            crate::bot_commands::route_rooms(session.client(), command).await;
+        }
         let extra = extra_content(
             persona.as_ref().map(crate::personas::profile_extra_content),
             [
@@ -196,7 +184,7 @@ impl Handler for SendParams {
                     IMAGE_SOURCE_PACKS,
                     image_source_pack_references(&self.image_source_packs),
                 ),
-                (crate::bot_commands::COMMAND_FIELD, self.bot_command),
+                (crate::bot_commands::COMMAND_FIELD, bot_command),
                 (
                     crate::outgoing::SELECTED_QUOTE,
                     self.selected_quote
@@ -209,7 +197,7 @@ impl Handler for SendParams {
         timeline
             .send_with_extra_content(content.into(), extra)
             .await
-            .or_failed(core, "send_message")?;
+            .or_failed(session.core(), "send_message")?;
 
         Ok(())
     }
@@ -227,10 +215,10 @@ pub struct SendRawEventParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for SendRawEventParams {
+impl SessionHandler for SendRawEventParams {
     type Ok = String;
 
-    async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<String, RpcError> {
         let mut content = self.content;
         ensure_empty_mentions(&mut content);
         if let Some(profile) = self.persona.as_ref() {
@@ -239,12 +227,11 @@ impl Handler for SendRawEventParams {
                 &crate::personas::without_fallback(profile),
             );
         }
-        let response = core
-            .room(&self.room_id)
-            .await?
+        let response = session
+            .room(&self.room_id)?
             .send_raw(&self.event_type, content)
             .await
-            .or_failed(core, "send_raw_event")?;
+            .or_failed(session.core(), "send_raw_event")?;
 
         Ok(response.response.event_id.to_string())
     }
@@ -261,16 +248,15 @@ pub struct SendRedactionParams {
     pub reason: Option<String>,
 }
 
-impl Handler for SendRedactionParams {
+impl SessionHandler for SendRedactionParams {
     type Ok = String;
 
-    async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
-        let response = core
-            .room(&self.room_id)
-            .await?
+    async fn run(self, session: &SignedIn) -> Result<String, RpcError> {
+        let response = session
+            .room(&self.room_id)?
             .redact(&self.event_id, self.reason.as_deref(), None)
             .await
-            .or_failed(core, "send_redaction")?;
+            .or_failed(session.core(), "send_redaction")?;
         Ok(response.event_id.to_string())
     }
 }
@@ -298,17 +284,17 @@ pub struct SendStickerParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for SendStickerParams {
+impl SessionHandler for SendStickerParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
         let url = OwnedMxcUri::from(self.url);
         if url.parts().is_err() {
             return Err(RpcCode::InvalidMedia.into());
         }
         let source = image_source_pack_extra(url.as_str(), self.source_pack);
 
-        let timeline = core
+        let timeline = session
             .timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?;
         let mut content = StickerEventContent::new(self.body, sticker_info(self.info), url);
@@ -338,7 +324,7 @@ impl Handler for SendStickerParams {
         timeline
             .send_with_extra_content(content.into(), extra)
             .await
-            .or_failed(core, "send_sticker")?;
+            .or_failed(session.core(), "send_sticker")?;
 
         Ok(())
     }
@@ -375,10 +361,10 @@ pub struct SendGifParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for SendGifParams {
+impl SessionHandler for SendGifParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
         let url = OwnedMxcUri::from(self.url);
         if url.parts().is_err() {
             return Err(RpcCode::InvalidMedia.into());
@@ -392,11 +378,11 @@ impl Handler for SendGifParams {
 
         let room_id = self.room_id;
         let thread_root = self.thread_root;
-        let timeline = core.timeline_for(&room_id, thread_root.as_ref()).await?;
+        let timeline = session.timeline_for(&room_id, thread_root.as_ref()).await?;
         let content = gif_content(self.body, url, info);
 
         let reply = thread_reply(self.in_reply_to, thread_root.clone(), self.silent_reply);
-        let content = core
+        let content = session
             .with_reply(&room_id, content, reply, thread_root, "send_gif_reply")
             .await?;
         timeline
@@ -412,7 +398,7 @@ impl Handler for SendGifParams {
                 ),
             )
             .await
-            .or_failed(core, "send_gif")?;
+            .or_failed(session.core(), "send_gif")?;
 
         Ok(())
     }
@@ -430,11 +416,11 @@ pub struct RemoveLinkPreviewsParams {
     pub thread_root: Option<OwnedEventId>,
 }
 
-impl Handler for RemoveLinkPreviewsParams {
+impl SessionHandler for RemoveLinkPreviewsParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        Box::pin(core.remove_link_previews(
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        Box::pin(session.remove_link_previews(
             &self.room_id,
             &self.event_id,
             self.thread_root.as_ref(),
@@ -457,11 +443,11 @@ pub struct ReprofileParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for ReprofileParams {
+impl SessionHandler for ReprofileParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        Box::pin(core.reprofile_message(
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        Box::pin(session.reprofile_message(
             &self.room_id,
             &self.event_id,
             self.thread_root.as_ref(),
@@ -502,11 +488,11 @@ pub struct EditParams {
     pub forum_title: Option<String>,
 }
 
-impl Handler for EditParams {
+impl SessionHandler for EditParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.edit_message(self).await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session.edit_message(self).await
     }
 }
 
@@ -524,13 +510,14 @@ pub struct RedactParams {
     pub thread_root: Option<OwnedEventId>,
 }
 
-impl Handler for RedactParams {
+impl SessionHandler for RedactParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.redact_edits(&self.room_id, &self.event_id, self.reason.as_deref())
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session
+            .redact_edits(&self.room_id, &self.event_id, self.reason.as_deref())
             .await?;
-        let redacted = core
+        let redacted = session
             .timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
             .redact(
@@ -540,13 +527,13 @@ impl Handler for RedactParams {
             .await;
         match redacted {
             Err(TimelineError::RedactError(RedactError::ItemNotFound(_))) => {
-                core.room(&self.room_id)
-                    .await?
+                session
+                    .room(&self.room_id)?
                     .redact(&self.event_id, self.reason.as_deref(), None)
                     .await
-                    .or_failed(core, "redact")?;
+                    .or_failed(session.core(), "redact")?;
             }
-            other => other.or_failed(core, "redact")?,
+            other => other.or_failed(session.core(), "redact")?,
         }
 
         Ok(())
@@ -564,11 +551,12 @@ pub struct DeleteThreadParams {
     pub reason: Option<String>,
 }
 
-impl Handler for DeleteThreadParams {
+impl SessionHandler for DeleteThreadParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.delete_thread(&self.room_id, &self.root_event_id, self.reason.as_deref())
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session
+            .delete_thread(&self.room_id, &self.root_event_id, self.reason.as_deref())
             .await
     }
 }
@@ -586,20 +574,21 @@ pub struct BulkRedactParams {
     pub reason: Option<String>,
 }
 
-impl Handler for BulkRedactParams {
+impl SessionHandler for BulkRedactParams {
     /// How many events were redacted.
     type Ok = u32;
 
-    async fn run(self, core: &Arc<Core>) -> Result<u32, RpcError> {
-        core.bulk_redact(
-            &self.room_id,
-            &self.senders,
-            self.after_ts,
-            &self.event_types,
-            false,
-            self.reason.as_deref(),
-        )
-        .await
+    async fn run(self, session: &SignedIn) -> Result<u32, RpcError> {
+        session
+            .bulk_redact(
+                &self.room_id,
+                &self.senders,
+                self.after_ts,
+                &self.event_types,
+                false,
+                self.reason.as_deref(),
+            )
+            .await
     }
 }
 
@@ -624,10 +613,10 @@ pub struct ReactParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for ReactParams {
+impl SessionHandler for ReactParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
         let Self {
             room_id,
             event_id,
@@ -638,8 +627,8 @@ impl Handler for ReactParams {
             subscription,
             persona,
         } = self;
-        core.ensure_reaction_target(&room_id, &event_id).await?;
-        let timeline = core
+        session.ensure_reaction_target(&room_id, &event_id).await?;
+        let timeline = session
             .subscribed_timeline(&room_id, thread_root.as_ref(), subscription)
             .await?;
         let shortcode = match shortcode
@@ -647,41 +636,42 @@ impl Handler for ReactParams {
         {
             Some(shortcode) => Some(shortcode),
             None => {
-                core.known_reaction_shortcode(&room_id, &event_id, &key)
+                session
+                    .known_reaction_shortcode(&room_id, &event_id, &key)
                     .await
             }
         };
         let shortcode = reaction_shortcode(&key, shortcode.as_deref());
-        let added = if let Some(source) = image_source_pack_extra(&key, source_pack) {
-            timeline
-                .toggle_reaction_with_extra_content(
-                    &TimelineEventItemId::EventId(event_id),
-                    &key,
-                    extra_content(
-                        message_extra_content(persona.as_ref()),
-                        [
-                            (IMAGE_SOURCE_PACKS, Some(source)),
-                            (REACTION_SHORTCODE, shortcode),
-                            ("m.mentions", Some(empty_mentions())),
-                        ],
-                    ),
-                )
-                .await
-                .or_failed(core, "react")?
+        let extra = if let Some(source) = image_source_pack_extra(&key, source_pack) {
+            extra_content(
+                message_extra_content(persona.as_ref()),
+                [
+                    (IMAGE_SOURCE_PACKS, Some(source)),
+                    (REACTION_SHORTCODE, shortcode),
+                    ("m.mentions", Some(empty_mentions())),
+                ],
+            )
         } else {
+            extra_content(
+                message_extra_content(persona.as_ref()),
+                [(REACTION_SHORTCODE, shortcode)],
+            )
+        };
+        let added = if timeline.item_by_event_id(&event_id).await.is_some() {
             timeline
                 .toggle_reaction_with_extra_content(
                     &TimelineEventItemId::EventId(event_id),
                     &key,
-                    extra_content(
-                        message_extra_content(persona.as_ref()),
-                        [(REACTION_SHORTCODE, shortcode)],
-                    ),
+                    extra,
                 )
                 .await
-                .or_failed(core, "react")?
+                .or_failed(session.core(), "react")?
+        } else {
+            session
+                .toggle_reaction_outside_timeline(&room_id, &event_id, &key, extra)
+                .await?
         };
-        if added && let Err(error) = core.remember_reaction(&key).await {
+        if added && let Err(error) = session.remember_reaction(&key).await {
             tracing::warn!("reaction history could not be saved: {error:?}");
         }
 
@@ -710,10 +700,10 @@ pub struct SendLocationParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for SendLocationParams {
+impl SessionHandler for SendLocationParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
         if view::geo_coordinates(&self.geo_uri).is_none() {
             return Err(RpcCode::InvalidLocation.into());
         }
@@ -721,12 +711,12 @@ impl Handler for SendLocationParams {
         let room_id = self.room_id;
         let thread_root = self.thread_root;
         let silent_reply = self.silent_reply;
-        let timeline = core.timeline_for(&room_id, thread_root.as_ref()).await?;
+        let timeline = session.timeline_for(&room_id, thread_root.as_ref()).await?;
         let content = location_content(self.body, self.geo_uri);
         let reply = self
             .in_reply_to
             .map(|event_id| reply_to(event_id, thread_root.is_some(), silent_reply));
-        let content = core
+        let content = session
             .with_reply(&room_id, content, reply, thread_root, "send_location")
             .await?;
         timeline
@@ -742,7 +732,7 @@ impl Handler for SendLocationParams {
                 ),
             )
             .await
-            .or_failed(core, "send_location")?;
+            .or_failed(session.core(), "send_location")?;
 
         Ok(())
     }
@@ -763,18 +753,19 @@ pub struct ForwardParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for ForwardParams {
+impl SessionHandler for ForwardParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.forward_message(
-            &self.room_id,
-            &self.event_id,
-            &self.to_room_id,
-            self.persona.as_ref(),
-            self.include_metadata.unwrap_or(true),
-        )
-        .await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session
+            .forward_message(
+                &self.room_id,
+                &self.event_id,
+                &self.to_room_id,
+                self.persona.as_ref(),
+                self.include_metadata.unwrap_or(true),
+            )
+            .await
     }
 }
 
@@ -789,11 +780,12 @@ pub struct ReportParams {
     pub reason: Option<String>,
 }
 
-impl Handler for ReportParams {
+impl SessionHandler for ReportParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.report_message(&self.room_id, self.event_id, self.reason)
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session
+            .report_message(&self.room_id, self.event_id, self.reason)
             .await
     }
 }
@@ -809,21 +801,21 @@ pub struct RetrySendParams {
     pub thread_root: Option<OwnedEventId>,
 }
 
-impl Handler for RetrySendParams {
+impl SessionHandler for RetrySendParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.client().await?.send_queue().set_enabled(true).await;
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        let client = session.client();
+        if !session.core().sync_paused() {
+            client.send_queue().set_enabled(true).await;
+        }
 
-        core.local_echo(
-            &self.room_id,
-            &self.transaction_id,
-            self.thread_root.as_ref(),
-        )
-        .await?
-        .unwedge()
-        .await
-        .or_failed(core, "retry_send")
+        session
+            .local_echo(&self.room_id, &self.transaction_id)
+            .await?
+            .unwedge()
+            .await
+            .or_failed(session.core(), "retry_send")
     }
 }
 
@@ -839,23 +831,22 @@ pub struct CancelSendParams {
     pub thread_root: Option<OwnedEventId>,
 }
 
-impl Handler for CancelSendParams {
+impl SessionHandler for CancelSendParams {
     /// False when there was no such echo left to discard.
     type Ok = bool;
 
-    async fn run(self, core: &Arc<Core>) -> Result<bool, RpcError> {
-        let cancelled = core
-            .local_echo(
-                &self.room_id,
-                &self.transaction_id,
-                self.thread_root.as_ref(),
-            )
+    async fn run(self, session: &SignedIn) -> Result<bool, RpcError> {
+        let cancelled = session
+            .local_echo(&self.room_id, &self.transaction_id)
             .await?
             .abort()
             .await
-            .or_failed(core, "cancel_send")?;
+            .or_failed(session.core(), "cancel_send")?;
 
-        core.client().await?.send_queue().set_enabled(true).await;
+        let client = session.client();
+        if !session.core().sync_paused() {
+            client.send_queue().set_enabled(true).await;
+        }
 
         Ok(cancelled)
     }
@@ -875,11 +866,11 @@ pub struct ScheduleParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for ScheduleParams {
+impl SessionHandler for ScheduleParams {
     /// The delay id.
     type Ok = String;
 
-    async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<String, RpcError> {
         let content = message_content(
             self.body,
             self.formatted,
@@ -887,7 +878,8 @@ impl Handler for ScheduleParams {
             Vec::new(),
             false,
         );
-        core.schedule_message(&self.room_id, content, self.delay_ms, self.persona.as_ref())
+        session
+            .schedule_message(&self.room_id, content, self.delay_ms, self.persona.as_ref())
             .await
     }
 }
@@ -912,12 +904,12 @@ pub struct ScheduleAttachmentParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for ScheduleAttachmentParams {
+impl SessionHandler for ScheduleAttachmentParams {
     /// The delay id.
     type Ok = String;
 
-    async fn run(self, core: &Arc<Core>) -> Result<String, RpcError> {
-        core.schedule_attachment(self).await
+    async fn run(self, session: &SignedIn) -> Result<String, RpcError> {
+        session.schedule_attachment(self).await
     }
 }
 
@@ -929,11 +921,11 @@ pub struct ScheduledParams {
     pub room_id: Option<OwnedRoomId>,
 }
 
-impl Handler for ScheduledParams {
+impl SessionHandler for ScheduledParams {
     type Ok = Vec<ScheduledMessageView>;
 
-    async fn run(self, core: &Arc<Core>) -> Result<Vec<ScheduledMessageView>, RpcError> {
-        core.scheduled_messages(self.room_id.as_ref()).await
+    async fn run(self, session: &SignedIn) -> Result<Vec<ScheduledMessageView>, RpcError> {
+        session.scheduled_messages(self.room_id.as_ref()).await
     }
 }
 
@@ -943,11 +935,11 @@ pub struct CancelScheduledParams {
     pub delay_id: String,
 }
 
-impl Handler for CancelScheduledParams {
+impl SessionHandler for CancelScheduledParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.cancel_scheduled_message(self).await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session.cancel_scheduled_message(self).await
     }
 }
 
@@ -957,11 +949,11 @@ pub struct SendScheduledParams {
     pub delay_id: String,
 }
 
-impl Handler for SendScheduledParams {
+impl SessionHandler for SendScheduledParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.send_scheduled_message_now(self).await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session.send_scheduled_message_now(self).await
     }
 }
 
@@ -984,10 +976,10 @@ pub struct CreatePollParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for CreatePollParams {
+impl SessionHandler for CreatePollParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
         let content = crate::polls::start(
             &self.question,
             &self.answers,
@@ -996,15 +988,14 @@ impl Handler for CreatePollParams {
         )
         .ok_or(RpcCode::InvalidPoll)?;
         let content =
-            ruma::events::poll::unstable_start::UnstablePollStartEventContent::from(
-                content,
-            );
+            ruma::events::poll::unstable_start::UnstablePollStartEventContent::from(content);
 
-        core.timeline_for(&self.room_id, self.thread_root.as_ref())
+        session
+            .timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
             .send_with_extra_content(content.into(), message_extra_content(self.persona.as_ref()))
             .await
-            .or_failed(core, "create_poll")?;
+            .or_failed(session.core(), "create_poll")?;
 
         Ok(())
     }
@@ -1028,21 +1019,21 @@ pub struct VotePollParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for VotePollParams {
+impl SessionHandler for VotePollParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let content =
-            ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
-                self.answers,
-                self.event_id,
-            );
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        let content = ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
+            self.answers,
+            self.event_id,
+        );
 
-        core.timeline_for(&self.room_id, self.thread_root.as_ref())
+        session
+            .timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
             .send_with_extra_content(content.into(), message_extra_content(self.persona.as_ref()))
             .await
-            .or_failed(core, "vote_poll")?;
+            .or_failed(session.core(), "vote_poll")?;
 
         Ok(())
     }
@@ -1063,21 +1054,21 @@ pub struct EndPollParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for EndPollParams {
+impl SessionHandler for EndPollParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let content =
-            ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
-                "The poll has closed.",
-                self.event_id,
-            );
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        let content = ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
+            "The poll has closed.",
+            self.event_id,
+        );
 
-        core.timeline_for(&self.room_id, self.thread_root.as_ref())
+        session
+            .timeline_for(&self.room_id, self.thread_root.as_ref())
             .await?
             .send_with_extra_content(content.into(), message_extra_content(self.persona.as_ref()))
             .await
-            .or_failed(core, "end_poll")?;
+            .or_failed(session.core(), "end_poll")?;
 
         Ok(())
     }
@@ -1096,17 +1087,44 @@ pub struct SendGestureParams {
     pub persona: Option<PerMessageProfileView>,
 }
 
-impl Handler for SendGestureParams {
+impl SessionHandler for SendGestureParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.send_gesture(
-            &self.room_id,
-            self.gesture,
-            self.target.as_ref(),
-            self.persona.as_ref(),
-        )
-        .await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session
+            .send_gesture(
+                &self.room_id,
+                self.gesture,
+                self.target.as_ref(),
+                self.persona.as_ref(),
+            )
+            .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PreparePreviewImagesParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    pub previews: Vec<UrlPreviewView>,
+}
+
+/// Uploads the images of previews shown in the composer, so sending one does not wait on them.
+impl SessionHandler for PreparePreviewImagesParams {
+    type Ok = ();
+
+    fn run(self, session: &SignedIn) -> impl Future<Output = Result<(), RpcError>> {
+        let prepared = session.clone();
+        session.track_session_task(
+            matrix_sdk::executor::spawn(async move {
+                prepared
+                    .prepare_preview_images(&self.room_id, &self.previews)
+                    .await;
+            })
+            .abort_on_drop(),
+        );
+        std::future::ready(Ok(()))
     }
 }
 
@@ -1122,25 +1140,24 @@ pub struct UrlPreviewParams {
     pub tunnel: bool,
 }
 
-impl Handler for UrlPreviewParams {
+impl SessionHandler for UrlPreviewParams {
     type Ok = Option<UrlPreviewView>;
 
-    async fn run(self, core: &Arc<Core>) -> Result<Option<UrlPreviewView>, RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<Option<UrlPreviewView>, RpcError> {
         let url = self.url;
         if self.client {
             let Some(base) = self.service else {
                 return Ok(None);
             };
             if self.tunnel {
-                return core.tunnel_preview(&base, &url).await;
+                return session.tunnel_preview(&base, &url).await;
             }
             let data = crate::link_previews::soliditas_preview(&base, &url).await?;
             return Ok(data.and_then(|data| url_preview(url, &data)));
         }
 
-        let sent = core
+        let sent = session
             .client()
-            .await?
             .send(get_media_preview::v1::Request::new(url.clone()))
             .await;
 
@@ -1150,7 +1167,7 @@ impl Handler for UrlPreviewParams {
                 tracing::info!(context = "url_preview", "the homeserver refused the url");
                 return Ok(None);
             }
-            Err(error) => return Err(core.rpc_error("url_preview", &error)),
+            Err(error) => return Err(session.core().rpc_error("url_preview", &error)),
         };
 
         Ok(response
@@ -1170,11 +1187,11 @@ pub struct FrequentReactionsParams {
     pub recent: Vec<String>,
 }
 
-impl Handler for FrequentReactionsParams {
+impl SessionHandler for FrequentReactionsParams {
     type Ok = Vec<String>;
 
-    async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
-        core.frequent_reactions(self.legacy, &self.recent).await
+    async fn run(self, session: &SignedIn) -> Result<Self::Ok, RpcError> {
+        session.frequent_reactions(self.legacy, &self.recent).await
     }
 }
 
@@ -1184,11 +1201,63 @@ pub struct RememberEmojiParams {
     pub key: String,
 }
 
-impl Handler for RememberEmojiParams {
+impl SessionHandler for RememberEmojiParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<Self::Ok, RpcError> {
-        core.remember_reaction(&self.key).await
+    async fn run(self, session: &SignedIn) -> Result<Self::Ok, RpcError> {
+        session.remember_reaction(&self.key).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct RecentStickersParams {
+    pub sync: bool,
+    #[serde(default)]
+    pub legacy: Vec<String>,
+    #[serde(default)]
+    pub synced: Option<Vec<String>>,
+}
+
+impl SessionHandler for RecentStickersParams {
+    type Ok = Vec<sable_model::emote_picker::RecentUse>;
+
+    async fn run(self, session: &SignedIn) -> Result<Self::Ok, RpcError> {
+        session
+            .recent_stickers(self.sync, &self.legacy, self.synced.as_deref())
+            .await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct RememberStickerParams {
+    pub key: String,
+    pub sync: bool,
+}
+
+impl SessionHandler for RememberStickerParams {
+    type Ok = ();
+
+    async fn run(self, session: &SignedIn) -> Result<Self::Ok, RpcError> {
+        session.remember_sticker(&self.key, self.sync).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct EventReactionsParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub event_id: OwnedEventId,
+}
+
+impl SessionHandler for EventReactionsParams {
+    type Ok = Vec<ReactionGroup>;
+
+    async fn run(self, session: &SignedIn) -> Result<Vec<ReactionGroup>, RpcError> {
+        session.event_reactions(&self.room_id, &self.event_id).await
     }
 }
 
@@ -1201,11 +1270,12 @@ pub struct ReactionShortcodesParams {
     pub event_id: OwnedEventId,
 }
 
-impl Handler for ReactionShortcodesParams {
+impl SessionHandler for ReactionShortcodesParams {
     type Ok = Vec<ReactionShortcodeView>;
 
-    async fn run(self, core: &Arc<Core>) -> Result<Vec<ReactionShortcodeView>, RpcError> {
-        core.reaction_shortcodes(&self.room_id, &self.event_id)
+    async fn run(self, session: &SignedIn) -> Result<Vec<ReactionShortcodeView>, RpcError> {
+        session
+            .reaction_shortcodes(&self.room_id, &self.event_id)
             .await
     }
 }
@@ -1222,11 +1292,11 @@ pub struct ReactionEventIdsParams {
     pub sender: OwnedUserId,
 }
 
-impl Handler for ReactionEventIdsParams {
+impl SessionHandler for ReactionEventIdsParams {
     type Ok = Vec<String>;
 
-    async fn run(self, core: &Arc<Core>) -> Result<Vec<String>, RpcError> {
-        let ids = core
+    async fn run(self, session: &SignedIn) -> Result<Vec<String>, RpcError> {
+        let ids = session
             .reaction_event_ids(&self.room_id, &self.event_id, &self.key, &self.sender)
             .await?;
         Ok(ids.into_iter().map(String::from).collect())
@@ -1245,18 +1315,18 @@ pub struct RedactReactionParams {
     pub sender: OwnedUserId,
 }
 
-impl Handler for RedactReactionParams {
+impl SessionHandler for RedactReactionParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let room = core.room(&self.room_id).await?;
-        for id in core
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        let room = session.room(&self.room_id)?;
+        for id in session
             .reaction_event_ids(&self.room_id, &self.event_id, &self.key, &self.sender)
             .await?
         {
             room.redact(&id, None, None)
                 .await
-                .or_failed(core, "redact_reaction")?;
+                .or_failed(session.core(), "redact_reaction")?;
         }
         Ok(())
     }
@@ -1271,17 +1341,38 @@ pub struct SetTypingParams {
     pub typing: bool,
 }
 
-impl Handler for SetTypingParams {
+impl SessionHandler for SetTypingParams {
     type Ok = ();
 
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let room = core.room(&self.room_id).await?;
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        let room = session.room(&self.room_id)?;
         if room.state() != matrix_sdk::RoomState::Joined {
             return Ok(());
         }
         room.typing_notice(self.typing)
             .await
-            .or_failed(core, "set_typing")
+            .or_failed(session.core(), "set_typing")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
+pub struct PrepareToEncryptParams {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+}
+
+impl SessionHandler for PrepareToEncryptParams {
+    type Ok = ();
+
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        let room = session.room(&self.room_id)?;
+        if room.state() != matrix_sdk::RoomState::Joined {
+            return Ok(());
+        }
+        Box::pin(room.prepare_to_encrypt())
+            .await
+            .or_failed(session.core(), "prepare_to_encrypt")
     }
 }
 
@@ -1297,12 +1388,12 @@ pub struct MediaConfigOk {
     pub upload_size: u64,
 }
 
-impl Handler for MediaConfigParams {
+impl SessionHandler for MediaConfigParams {
     type Ok = MediaConfigOk;
 
-    async fn run(self, core: &Arc<Core>) -> Result<MediaConfigOk, RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<MediaConfigOk, RpcError> {
         Ok(MediaConfigOk {
-            upload_size: core.max_upload_size().await?,
+            upload_size: session.max_upload_size().await?,
         })
     }
 }

@@ -1,5 +1,5 @@
 The two crates in this directory come from
-[SableClient/matrix-rust-sdk at f6dc480](https://git.sable.moe/SableClient/matrix-rust-sdk/src/commit/f6dc480fda2a6c2d27fe8d43abe527d6adc64194)
+[SableClient/matrix-rust-sdk at 7614a19](https://git.sable.moe/SableClient/matrix-rust-sdk/src/commit/7614a19dd8fcde9355815d2d00be07c8777c6d57)
 (Apache-2.0). The root Cargo patch selects them for all SDK consumers, including
 WASM. Their sibling crates still come from that same pinned revision.
 

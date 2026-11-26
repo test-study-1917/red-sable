@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde_with::{InspectError, MapSkipError, serde_as};
 
 use crate::ResultExt;
 use crate::protocol::{
@@ -22,11 +23,22 @@ const MAX_SPACE_CHAIN: usize = 4;
 const STATE_FETCH_CONCURRENCY: usize = 4;
 const MAX_CACHED_ROOMS: usize = 256;
 
+/// An image with an invalid field is dropped instead of hiding the whole pack.
+#[serde_as]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PackContent {
     #[serde(default)]
+    #[serde_as(as = "MapSkipError<_, _, LogSkippedImage>")]
     pub images: BTreeMap<String, PackImage>,
     pub pack: Option<PackMeta>,
+}
+
+struct LogSkippedImage;
+
+impl InspectError for LogSkippedImage {
+    fn inspect_error(error: impl serde::de::Error) {
+        tracing::warn!("skipping an invalid pack image: {error}");
+    }
 }
 
 impl PackContent {
@@ -167,11 +179,11 @@ pub fn pack_view(
 }
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 
+use crate::tasks::JoinHandleExt as _;
 use futures_util::{StreamExt, future, stream};
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
-use matrix_sdk::executor::{JoinHandleExt as _, spawn};
+use matrix_sdk::executor::spawn;
 use matrix_sdk::ruma::api::client::state::get_state_events;
 use matrix_sdk::ruma::events::{
     AnyGlobalAccountDataEvent, AnyGlobalAccountDataEventContent, AnyStateEvent, AnySyncStateEvent,
@@ -181,6 +193,7 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 
 use crate::Core;
+use crate::SignedIn;
 use crate::api::packs::ListOk;
 use crate::protocol::{CoreEvent, RpcError};
 use tokio::sync::broadcast::error::RecvError;
@@ -348,12 +361,9 @@ fn push_canonical(parents: &mut Vec<SpaceParentEvent>, event: &SpaceParentEvent)
     }
 }
 
-impl Core {
-    pub(crate) fn watch_image_packs(
-        self: &Arc<Self>,
-        client: &matrix_sdk::Client,
-        generation: u64,
-    ) {
+impl SignedIn {
+    pub(crate) fn watch_image_packs(&self, generation: u64) {
+        let client = self.client();
         let handle = client.add_event_handler({
             let core = self.clone();
             move |raw: Raw<AnySyncStateEvent>, room: matrix_sdk::Room| {
@@ -373,7 +383,7 @@ impl Core {
                             .ok()
                             .flatten()
                             .unwrap_or_default();
-                        core.pack_cache.lock().await.note_state(
+                        core.state().pack_cache.lock().note_state(
                             room.room_id(),
                             kind,
                             &state_key,
@@ -381,7 +391,7 @@ impl Core {
                         );
                     }
                     if matches!(kind.as_deref(), Some(ROOM_EMOTES | ROOM_IMAGE_PACK)) {
-                        core.emit_if_current(
+                        core.core().emit_if_current(
                             generation,
                             CoreEvent::ImagePacksChanged {
                                 room_id: room.room_id().to_owned(),
@@ -406,9 +416,9 @@ impl Core {
                         USER_EMOTES | EMOTE_ROOMS | IMAGE_PACK_ROOMS
                     ) {
                         let content = raw.get_field("content").ok().flatten();
-                        core.pack_cache
+                        core.state()
+                            .pack_cache
                             .lock()
-                            .await
                             .note_account_data(&event_type, content);
                     }
                 }
@@ -423,14 +433,17 @@ impl Core {
                 loop {
                     match updates.recv().await {
                         Ok(updates) => {
-                            let mut cache = core.pack_cache.lock().await;
+                            let session_state = core.state();
+                            let mut cache = session_state.pack_cache.lock();
                             for (room_id, update) in &updates.joined {
                                 if update.timeline.limited {
                                     cache.forget_room(room_id);
                                 }
                             }
                         }
-                        Err(RecvError::Lagged(_)) => core.pack_cache.lock().await.forget_rooms(),
+                        Err(RecvError::Lagged(_)) => {
+                            core.state().pack_cache.lock().forget_rooms();
+                        }
                         Err(RecvError::Closed) => break,
                     }
                 }
@@ -441,12 +454,13 @@ impl Core {
 
     async fn pack_account_data(
         &self,
-        client: &matrix_sdk::Client,
         event_type: &str,
         network: bool,
     ) -> Result<(AccountDataContent, bool), matrix_sdk::Error> {
+        let client = self.client();
+        let session_state = self.state();
         let changes = {
-            let cache = self.pack_cache.lock().await;
+            let cache = session_state.pack_cache.lock();
             if let Some(cached) = cache.account_data.get(event_type) {
                 return Ok((cached.clone(), true));
             }
@@ -456,7 +470,7 @@ impl Core {
         if network {
             match client.account().fetch_account_data(wanted.clone()).await {
                 Ok(found) => {
-                    self.pack_cache.lock().await.remember_account_data(
+                    session_state.pack_cache.lock().remember_account_data(
                         changes,
                         event_type,
                         found.clone(),
@@ -469,6 +483,7 @@ impl Core {
             }
         }
         let stored = self
+            .core()
             .with_open_stores(async || client.account().account_data_raw(wanted).await)
             .await?;
         Ok((stored, false))
@@ -476,12 +491,11 @@ impl Core {
 
     pub(crate) async fn subscribed_pack_rooms(
         &self,
-        client: &matrix_sdk::Client,
         network: bool,
     ) -> Result<(AccountDataContent, bool), matrix_sdk::Error> {
         let (stable, unstable) = future::join(
-            self.pack_account_data(client, IMAGE_PACK_ROOMS, network),
-            self.pack_account_data(client, EMOTE_ROOMS, network),
+            self.pack_account_data(IMAGE_PACK_ROOMS, network),
+            self.pack_account_data(EMOTE_ROOMS, network),
         )
         .await;
         let (stable, stable_complete) = stable?;
@@ -497,19 +511,20 @@ impl Core {
         room_id: OwnedRoomId,
         cached_only: bool,
     ) -> Result<ListOk, RpcError> {
-        let client = self.client().await?;
+        let client = self.client();
         let network = !cached_only;
-        let room = self.room(&room_id).await?;
+        let room = self.room(&room_id)?;
 
         let (own, own_room, subscribed) = future::join3(
-            self.pack_account_data(&client, USER_EMOTES, network),
-            self.room_packs(&client, &room, ImagePackOriginView::Room, None, network),
-            self.subscribed_pack_rooms(&client, network),
+            self.pack_account_data(USER_EMOTES, network),
+            self.room_packs(&room, ImagePackOriginView::Room, None, network),
+            self.subscribed_pack_rooms(network),
         )
         .await;
-        let (own, own_complete) = own.or_failed(self, "image_packs_account")?;
-        let own_room = own_room.or_failed(self, "image_packs_room")?;
-        let (subscribed, subscribed_complete) = subscribed.or_failed(self, "image_packs_global")?;
+        let (own, own_complete) = own.or_failed(self.core(), "image_packs_account")?;
+        let own_room = own_room.or_failed(self.core(), "image_packs_room")?;
+        let (subscribed, subscribed_complete) =
+            subscribed.or_failed(self.core(), "image_packs_global")?;
         let mut complete = network && own_complete && own_room.complete && subscribed_complete;
 
         let mut packs = Vec::new();
@@ -539,13 +554,11 @@ impl Core {
             })
             .unwrap_or_default();
 
-        let client = &client;
         let (global, (space, space_complete)) = future::join(
             stream::iter(subscribed_rooms)
                 .map(|(subscribed_room, wanted)| async move {
                     let found = self
                         .room_packs(
-                            client,
                             &subscribed_room,
                             ImagePackOriginView::Global,
                             Some(&wanted),
@@ -556,7 +569,7 @@ impl Core {
                 })
                 .buffered(STATE_FETCH_CONCURRENCY)
                 .collect::<Vec<_>>(),
-            self.space_packs(client, &room_id, own_room.canonical_parents, network),
+            self.space_packs(&room_id, own_room.canonical_parents, network),
         )
         .await;
 
@@ -583,17 +596,17 @@ impl Core {
 
     async fn space_packs(
         &self,
-        client: &matrix_sdk::Client,
         room_id: &RoomId,
         parents: Vec<OwnedRoomId>,
         network: bool,
     ) -> (Vec<ImagePackView>, bool) {
+        let client = self.client();
         let mut packs = Vec::new();
         let mut complete = true;
         let mut seen: BTreeSet<OwnedRoomId> = BTreeSet::from([room_id.to_owned()]);
-        let listing = crate::view::listing_spaces(Some(self), client, room_id).await;
+        let listing = crate::view::listing_spaces(Some(self.core()), client, room_id).await;
         let mut frontier = if listing.is_empty() { parents } else { listing };
-        frontier.extend(Self::synced_dm_spaces_of(client, room_id).await);
+        frontier.extend(Core::synced_dm_spaces_of(client, room_id).await);
 
         for _ in 0..MAX_SPACE_CHAIN {
             let spaces: Vec<matrix_sdk::Room> = frontier
@@ -610,10 +623,11 @@ impl Core {
             let found: Vec<_> = stream::iter(spaces)
                 .map(|space| async move {
                     let found = self
-                        .room_packs(client, &space, ImagePackOriginView::Space, None, network)
+                        .room_packs(&space, ImagePackOriginView::Space, None, network)
                         .await;
                     let listed_in =
-                        crate::view::listing_spaces(Some(self), client, space.room_id()).await;
+                        crate::view::listing_spaces(Some(self.core()), client, space.room_id())
+                            .await;
                     (space.room_id().to_owned(), found, listed_in)
                 })
                 .buffered(STATE_FETCH_CONCURRENCY)
@@ -643,13 +657,13 @@ impl Core {
     }
 
     pub(crate) async fn all_image_packs(&self) -> Result<Vec<ImagePackView>, RpcError> {
-        let client = self.client().await?;
+        let client = self.client();
         let mut packs = Vec::new();
 
         let (own, _) = self
-            .pack_account_data(&client, USER_EMOTES, true)
+            .pack_account_data(USER_EMOTES, true)
             .await
-            .or_failed(self, "all_image_packs_account")?;
+            .or_failed(self.core(), "all_image_packs_account")?;
         if let Some(content) =
             own.and_then(|raw| raw.deserialize_as_unchecked::<PackContent>().ok())
         {
@@ -666,7 +680,7 @@ impl Core {
             .map(|room| async move {
                 (
                     room.room_id().to_owned(),
-                    self.room_packs(client, &room, ImagePackOriginView::Room, None, false)
+                    self.room_packs(&room, ImagePackOriginView::Room, None, false)
                         .await,
                 )
             })
@@ -683,63 +697,14 @@ impl Core {
         Ok(packs)
     }
 
-    pub(crate) async fn copy_room_packs(
-        &self,
-        client: &matrix_sdk::Client,
-        from: &RoomId,
-        to: &RoomId,
-    ) {
-        let events = match client
-            .send(get_state_events::v3::Request::new(from.to_owned()))
-            .await
-        {
-            Ok(response) => response.room_state,
-            Err(error) => {
-                tracing::warn!(room = %from, %error, "image packs not copied to the upgraded room");
-                return;
-            }
-        };
-        for event in events {
-            let Ok(value) = event.deserialize_as_unchecked::<serde_json::Value>() else {
-                continue;
-            };
-            let event_type = value
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or_default();
-            let Some(content) = value.get("content").filter(|content| {
-                [ROOM_EMOTES, ROOM_IMAGE_PACK].contains(&event_type)
-                    && content.as_object().is_some_and(|map| !map.is_empty())
-            }) else {
-                continue;
-            };
-            let state_key = value
-                .get("state_key")
-                .and_then(|k| k.as_str())
-                .unwrap_or_default();
-            let Ok(body) = Raw::new(content).map(Raw::cast_unchecked) else {
-                continue;
-            };
-            let request = ruma::api::client::state::send_state_event::v3::Request::new_raw(
-                to.to_owned(),
-                StateEventType::from(event_type),
-                state_key.to_owned(),
-                body,
-            );
-            if let Err(error) = client.send(request).await {
-                tracing::warn!(room = %to, event_type, %error, "image pack not copied to the upgraded room");
-            }
-        }
-    }
-
     async fn room_pack_state(
         &self,
-        client: &matrix_sdk::Client,
         room: &matrix_sdk::Room,
         network_fallback: bool,
     ) -> Result<(RoomPackState, bool), matrix_sdk::Error> {
+        let session_state = self.state();
         let changes = {
-            let mut cache = self.pack_cache.lock().await;
+            let mut cache = session_state.pack_cache.lock();
             if let Some(cached) = cache.room(room.room_id()) {
                 return Ok((cached, true));
             }
@@ -748,6 +713,7 @@ impl Core {
         let mut stored = RoomPackState::default();
         for event_type in [ROOM_EMOTES, ROOM_IMAGE_PACK] {
             for event in &self
+                .core()
                 .with_open_stores(async || {
                     room.get_state_events(StateEventType::from(event_type))
                         .await
@@ -765,6 +731,7 @@ impl Core {
             }
         }
         for event in &self
+            .core()
             .with_open_stores(async || room.get_state_events(StateEventType::SpaceParent).await)
             .await?
         {
@@ -778,10 +745,10 @@ impl Core {
         }
 
         if network_fallback {
-            match self.room_state_snapshot(client, room.room_id()).await {
+            match self.room_state_snapshot(room.room_id()).await {
                 Ok(snapshot) => {
                     let state = RoomPackState::from_server(&snapshot);
-                    self.pack_cache.lock().await.remember_room(
+                    session_state.pack_cache.lock().remember_room(
                         changes,
                         room.room_id().to_owned(),
                         state.clone(),
@@ -803,18 +770,21 @@ impl Core {
     /// and that list has no extension point, so the store holds these events
     async fn room_packs(
         &self,
-        client: &matrix_sdk::Client,
         room: &matrix_sdk::Room,
         origin: ImagePackOriginView,
         wanted: Option<&[String]>,
         network_fallback: bool,
     ) -> Result<RoomPacks, matrix_sdk::Error> {
-        let (state, complete) = self.room_pack_state(client, room, network_fallback).await?;
+        let client = self.client();
+        let (state, complete) = self.room_pack_state(room, network_fallback).await?;
 
         let mut packs = Vec::new();
-        let own_server = client
-            .user_id()
-            .map(|user_id| user_id.server_name().to_string());
+        let route = if state.packs.is_empty() {
+            None
+        } else {
+            crate::routing::Route::unranked(room).await
+        };
+        let via = route.map(|route| route.to_strings()).unwrap_or_default();
         for (state_key, event) in state.packs {
             if wanted.is_some_and(|keys| !keys.contains(&state_key)) {
                 continue;
@@ -832,11 +802,9 @@ impl Core {
             );
             view.stable_event = stable_event;
             view.legacy_event = legacy_event;
-            if let Some(server) = &own_server {
-                for image in &mut view.images {
-                    if let Some(source) = &mut image.source_pack {
-                        source.via.push(server.clone());
-                    }
+            for image in &mut view.images {
+                if let Some(source) = &mut image.source_pack {
+                    source.via.clone_from(&via);
                 }
             }
             if view.name.is_none() {
@@ -850,7 +818,7 @@ impl Core {
         Ok(RoomPacks {
             packs,
             canonical_parents: crate::space_parents::validate(
-                self,
+                self.core(),
                 client,
                 room.room_id(),
                 &state.canonical_parents,
@@ -865,12 +833,52 @@ impl Core {
     }
 }
 
+impl Core {
+    pub(crate) async fn copy_room_packs(
+        &self,
+        client: &matrix_sdk::Client,
+        from: &RoomId,
+        to: &RoomId,
+    ) {
+        let events = match client
+            .send(get_state_events::v3::Request::new(from.to_owned()))
+            .await
+        {
+            Ok(response) => response.room_state,
+            Err(error) => {
+                tracing::warn!(room = %from, %error, "image packs not copied to the upgraded room");
+                return;
+            }
+        };
+        let events = events
+            .iter()
+            .filter_map(|event| event.deserialize_as_unchecked().ok())
+            .collect();
+        crate::rooms::copy_state(
+            client,
+            to,
+            &[ROOM_EMOTES.into(), ROOM_IMAGE_PACK.into()],
+            events,
+        )
+        .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(json: &str) -> PackContent {
         serde_json::from_str(json).expect("pack content")
+    }
+
+    #[test]
+    fn an_invalid_image_does_not_hide_the_pack() {
+        let content = parse(
+            r#"{"images":{"broken":{"url":"mxc://a/b","info":{"w":12.5}},"fine":{"url":"mxc://a/c"},"bare":{}}}"#,
+        );
+
+        assert_eq!(content.images.keys().collect::<Vec<_>>(), ["fine"]);
     }
 
     #[test]
@@ -1223,15 +1231,20 @@ mod server_tests {
                 .await
                 .unwrap(),
         );
-        *core.session.write().await = Some(crate::session::Session {
-            account_id: "a1".to_owned(),
-            client,
-            sync_service: service,
-            homeserver: server.server().uri(),
-            oauth: false,
-        });
+        crate::test_support::set_session(
+            &core,
+            Some(crate::session::Session {
+                account_id: "a1".to_owned(),
+                client,
+                sync_service: service,
+                homeserver: server.server().uri(),
+                oauth: false,
+                state: Arc::default(),
+            }),
+        );
+        let session = core.signed_in().unwrap();
         let crate::api::packs::ListOk { packs, .. } =
-            core.image_packs(room_id.to_owned(), true).await.unwrap();
+            session.image_packs(room_id.to_owned(), true).await.unwrap();
         assert_eq!(
             packs
                 .iter()
@@ -1299,15 +1312,20 @@ mod server_tests {
                 .await
                 .unwrap(),
         );
-        *core.session.write().await = Some(crate::session::Session {
-            account_id: "a1".to_owned(),
-            client,
-            sync_service: service,
-            homeserver: server.server().uri(),
-            oauth: false,
-        });
+        crate::test_support::set_session(
+            &core,
+            Some(crate::session::Session {
+                account_id: "a1".to_owned(),
+                client,
+                sync_service: service,
+                homeserver: server.server().uri(),
+                oauth: false,
+                state: Arc::default(),
+            }),
+        );
+        let session = core.signed_in().unwrap();
         let crate::api::packs::ListOk { packs, .. } =
-            core.image_packs(room_id.to_owned(), true).await.unwrap();
+            session.image_packs(room_id.to_owned(), true).await.unwrap();
         assert_eq!(
             packs
                 .iter()
@@ -1359,15 +1377,20 @@ mod server_tests {
                 .await
                 .unwrap(),
         );
-        *core.session.write().await = Some(crate::session::Session {
-            account_id: "a1".to_owned(),
-            client,
-            sync_service: service,
-            homeserver: server.server().uri(),
-            oauth: false,
-        });
+        crate::test_support::set_session(
+            &core,
+            Some(crate::session::Session {
+                account_id: "a1".to_owned(),
+                client,
+                sync_service: service,
+                homeserver: server.server().uri(),
+                oauth: false,
+                state: Arc::default(),
+            }),
+        );
+        let session = core.signed_in().unwrap();
         let crate::api::packs::ListOk { packs, .. } =
-            core.image_packs(room_id.to_owned(), true).await.unwrap();
+            session.image_packs(room_id.to_owned(), true).await.unwrap();
         let summary = packs
             .iter()
             .map(|pack| {
@@ -1418,6 +1441,8 @@ mod server_tests {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let core = core();
+        crate::test_support::sign_in(&core, &server, client.clone()).await;
+        let session = core.signed_in().unwrap();
         let _get = Mock::given(method("GET"))
             .and(path_regex(ACCOUNT_DATA_PATH))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1427,14 +1452,14 @@ mod server_tests {
             .mount_as_scoped(server.server())
             .await;
 
-        let (stored, _) = core
-            .pack_account_data(&client, USER_EMOTES, false)
+        let (stored, _) = session
+            .pack_account_data(USER_EMOTES, false)
             .await
             .expect("store");
         assert!(stored.is_none());
 
-        let (found, complete) = core
-            .pack_account_data(&client, USER_EMOTES, true)
+        let (found, complete) = session
+            .pack_account_data(USER_EMOTES, true)
             .await
             .expect("fetch");
 
@@ -1447,6 +1472,8 @@ mod server_tests {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let core = core();
+        crate::test_support::sign_in(&core, &server, client.clone()).await;
+        let session = core.signed_in().unwrap();
         server
             .mock_sync()
             .ok_and_run(&client, |builder| {
@@ -1462,8 +1489,8 @@ mod server_tests {
             .mount_as_scoped(server.server())
             .await;
 
-        let (found, complete) = core
-            .pack_account_data(&client, USER_EMOTES, true)
+        let (found, complete) = session
+            .pack_account_data(USER_EMOTES, true)
             .await
             .expect("fetch");
 
@@ -1476,6 +1503,8 @@ mod server_tests {
         let server = MatrixMockServer::new().await;
         let client = server.client_builder().build().await;
         let core = core();
+        crate::test_support::sign_in(&core, &server, client.clone()).await;
+        let session = core.signed_in().unwrap();
         {
             let _get = Mock::given(method("GET"))
                 .and(path_regex(ACCOUNT_DATA_PATH))
@@ -1484,7 +1513,8 @@ mod server_tests {
                 })))
                 .mount_as_scoped(server.server())
                 .await;
-            core.pack_account_data(&client, USER_EMOTES, true)
+            session
+                .pack_account_data(USER_EMOTES, true)
                 .await
                 .expect("fetch");
         }
@@ -1495,8 +1525,8 @@ mod server_tests {
             .mount_as_scoped(server.server())
             .await;
 
-        let (found, complete) = core
-            .pack_account_data(&client, USER_EMOTES, true)
+        let (found, complete) = session
+            .pack_account_data(USER_EMOTES, true)
             .await
             .expect("cached");
 
@@ -1512,6 +1542,8 @@ mod server_tests {
             .sync_joined_room(&client, room_id!("!packs:example.org"))
             .await;
         let core = core();
+        crate::test_support::sign_in(&core, &server, client.clone()).await;
+        let session = core.signed_in().unwrap();
         {
             let _state = Mock::given(method("GET"))
                 .and(path_regex(ROOM_STATE_PATH))
@@ -1526,28 +1558,28 @@ mod server_tests {
                 }])))
                 .mount_as_scoped(server.server())
                 .await;
-            let fresh = core
-                .room_packs(&client, &room, ImagePackOriginView::Room, None, true)
+            let fresh = session
+                .room_packs(&room, ImagePackOriginView::Room, None, true)
                 .await
                 .expect("fetch");
             assert!(fresh.complete);
         }
 
-        let cached = core
-            .room_packs(&client, &room, ImagePackOriginView::Room, None, false)
+        let cached = session
+            .room_packs(&room, ImagePackOriginView::Room, None, false)
             .await
             .expect("cached");
         assert_eq!(cached.packs.len(), 1);
 
-        *core.recent_state.lock() = crate::probed_state::RecentState::default();
+        *session.state().recent_state.lock() = crate::probed_state::RecentState::default();
         let _state = Mock::given(method("GET"))
             .and(path_regex(ROOM_STATE_PATH))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
             .mount_as_scoped(server.server())
             .await;
-        let again = core
-            .room_packs(&client, &room, ImagePackOriginView::Room, None, true)
+        let again = session
+            .room_packs(&room, ImagePackOriginView::Room, None, true)
             .await
             .expect("cached");
 
@@ -1563,7 +1595,9 @@ mod server_tests {
         let room_id = room_id!("!space:example.org");
         server.sync_joined_room(&client, room_id).await;
         let (core, mut events) = Core::new("image-packs", Box::new(MemorySessionStore::default()));
-        core.watch_image_packs(&client, 1);
+        crate::test_support::sign_in(&core, &server, client.clone()).await;
+        let session = core.signed_in().unwrap();
+        session.watch_image_packs(1);
 
         server
             .sync_room(

@@ -24,8 +24,10 @@
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import '#lib/ui/primitives/menu.css';
   import { scrollHint } from '#lib/ui/scroll-hint.js';
+  import { isComposingKey } from '#lib/ui/shortcuts/binding.js';
 
   import { UserDirectoryLookup } from '../members/user-directory-lookup.svelte.js';
+  import '#lib/ui/primitives/dialog-body.css';
 
   const core = useCoreClient();
   const roomList = useRoomList();
@@ -150,7 +152,7 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
-    if (event.key !== 'Enter') return;
+    if (event.key !== 'Enter' || isComposingKey(event)) return;
     event.preventDefault();
     if (room) void enterRoom();
     else if (people[0]) void message(people[0].user_id);
@@ -163,7 +165,7 @@
   closeLabel={i18n.t('common.close')}
 >
   {#snippet children(desktop)}
-    <div class={['find-or-join', { sheet: !desktop }]}>
+    <div class={['dialog-body', 'find-or-join', { sheet: !desktop }]}>
       <h2>{i18n.t('nav.findOrJoin')}</h2>
 
       <TextInput
@@ -260,7 +262,6 @@
 
 <style>
   .find-or-join {
-    display: grid;
     gap: var(--space-400);
     width: min(26rem, calc(100vw - 2rem));
   }
