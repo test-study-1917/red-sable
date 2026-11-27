@@ -81,9 +81,10 @@ export const MOBILE_TAB_PATHS = new Set(['/navigate', '/inbox', '/profile', '/al
 const COMPOSER_REGION = '[data-focus-region="composer"]';
 const HEADING_ATTEMPTS = 10;
 
-export function trackRouteFocus(): void {
+export function trackRouteFocus(): (href: string) => Promise<void> {
   let origin: Element | null = null;
   let composerObserver: MutationObserver | undefined;
+  let composerNavigation: { href: string } | undefined;
   beforeNavigate(() => {
     composerObserver?.disconnect();
     origin = document.activeElement;
@@ -91,29 +92,32 @@ export function trackRouteFocus(): void {
   afterNavigate((navigation) => {
     const from = origin;
     origin = null;
-    if (from?.isConnected && from.closest(TREE_REGIONS)) {
-      if (navigation.to && ROOM_PATH.test(navigation.to.url.pathname) && matchesAppLayout()) {
-        const focusComposer = () => {
-          if (
-            (document.activeElement !== document.body && document.activeElement !== from) ||
-            focusRegion('composer')
-          ) {
-            composerObserver?.disconnect();
-            return true;
-          }
-          return false;
-        };
-        if (!focusComposer()) {
-          composerObserver = new MutationObserver(focusComposer);
-          composerObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['contenteditable'],
-          });
+    const fromTree = from?.isConnected && from.closest(TREE_REGIONS);
+    const to = navigation.to?.url;
+    const shortcut = navigation.type === 'goto' && to?.href === composerNavigation?.href;
+    if (to && ROOM_PATH.test(to.pathname) && (fromTree || shortcut) && matchesAppLayout()) {
+      const focusComposer = () => {
+        if (
+          (document.activeElement !== document.body && document.activeElement !== from) ||
+          focusRegion('composer')
+        ) {
+          composerObserver?.disconnect();
+          return true;
         }
-        return;
+        return false;
+      };
+      if (!focusComposer()) {
+        composerObserver = new MutationObserver(focusComposer);
+        composerObserver.observe(document.body, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['contenteditable'],
+        });
       }
+      return;
+    }
+    if (fromTree) {
       if (document.activeElement === document.body && from instanceof HTMLElement) from.focus();
       return;
     }
@@ -124,7 +128,7 @@ export function trackRouteFocus(): void {
     ) {
       return;
     }
-    if (!navigation.to || !ROOM_PATH.test(navigation.to.url.pathname)) return;
+    if (!to || !ROOM_PATH.test(to.pathname)) return;
     let attempts = HEADING_ATTEMPTS;
     const focusHeading = () => {
       if (document.activeElement !== document.body) return;
@@ -134,6 +138,17 @@ export function trackRouteFocus(): void {
     };
     focusHeading();
   });
+
+  return async (href) => {
+    const request = { href: new URL(href, page.url.href).href };
+    composerNavigation = request;
+    try {
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved href
+      await goto(href);
+    } finally {
+      if (composerNavigation === request) composerNavigation = undefined;
+    }
+  };
 }
 
 export function isRoomSwitch(href: string): boolean {
@@ -146,11 +161,44 @@ export function isRoomSwitch(href: string): boolean {
   );
 }
 
-export function goToPage(href: string): void {
-  const target = new URL(href, page.url.href).pathname;
-  const mobile = !matchesAppLayout();
-  if (target === page.url.pathname && mobile) {
+function withoutThread(url: URL): string {
+  const clean = new URL(url.href);
+  clean.searchParams.delete('thread');
+  return `${clean.pathname}${clean.search}${clean.hash}`;
+}
+
+function revealMobileRoom(href: string, hasThread: boolean): void {
+  if (!hasThread) {
     setMobileDrawerOpen(false);
+    return;
+  }
+  // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved href
+  void goto(href, {
+    replace: false,
+    reset: false,
+    state: { ...page.state, mobileDrawer: 'closed', mobileDrawerBack: true },
+    persistState: true,
+  });
+}
+
+export function goToPage(href: string): void {
+  const url = new URL(href, page.url.href);
+  const target = url.pathname;
+  const mobile = !matchesAppLayout();
+  const hasThread = url.searchParams.has('thread');
+  if (target === page.url.pathname && mobile) {
+    if (page.url.searchParams.has('thread')) {
+      // eslint-disable-next-line svelte/no-navigation-without-resolve -- withoutThread() preserves the resolved route
+      void goto(withoutThread(url), {
+        replace: true,
+        state: { ...page.state },
+        persistState: true,
+      }).then(() => {
+        if (page.url.pathname === target) revealMobileRoom(href, hasThread);
+      });
+    } else {
+      revealMobileRoom(href, hasThread);
+    }
     return;
   }
   if (mobile) {
@@ -176,12 +224,12 @@ export function goToPage(href: string): void {
   if (roomSwitch || (mobile && ROOM_PATH.test(target) && fromList)) {
     // The list entry must hold the open room, or Back reloads the previous one under the drawer.
     // eslint-disable-next-line svelte/no-navigation-without-resolve -- callers pass a resolved href
-    void goto(href, {
+    void goto(hasThread ? withoutThread(url) : href, {
       replace: roomSwitch,
       state: { mobileDrawer: 'open' },
       persistState: true,
     }).then(() => {
-      if (page.url.pathname === target) setMobileDrawerOpen(false);
+      if (page.url.pathname === target) revealMobileRoom(href, hasThread);
     });
     return;
   }

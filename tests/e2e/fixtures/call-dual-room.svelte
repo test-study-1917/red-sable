@@ -102,6 +102,7 @@
     notifying: 0,
     notification: { room: null, default: 'all' },
     latest_event: null,
+    media_previews: null,
     state: 'joined',
     room_kind: untrack(() => voice) ? 'voice' : null,
     is_direct: false,

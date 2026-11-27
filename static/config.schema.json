@@ -372,6 +372,13 @@
           "type": "boolean",
           "default": true
         },
+        "saturation": {
+          "title": "Saturation",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1
+        },
         "quickCss": {
           "type": "string",
           "default": ""
@@ -685,6 +692,11 @@
         },
         "showSpaceEvents": {
           "title": "Show today’s events in spaces",
+          "type": "boolean",
+          "default": true
+        },
+        "showActiveThreadsInSidebar": {
+          "title": "Show recent threads in the sidebar",
           "type": "boolean",
           "default": true
         },
@@ -1066,6 +1078,20 @@
             "keep"
           ],
           "default": "location"
+        },
+        "matrixLinkSelector": {
+          "title": "External Matrix links",
+          "enum": [
+            "sable",
+            "matrix",
+            "custom"
+          ],
+          "default": "sable"
+        },
+        "matrixLinkCustom": {
+          "title": "Custom link host",
+          "type": "string",
+          "default": ""
         },
         "personaPicker": {
           "title": "Show profile picker in the composer",
@@ -1897,6 +1923,13 @@
           "type": "boolean",
           "default": true
         },
+        "saturation": {
+          "title": "Saturation",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1
+        },
         "quickCss": {
           "type": "string",
           "default": ""
@@ -2210,6 +2243,11 @@
         },
         "showSpaceEvents": {
           "title": "Show today’s events in spaces",
+          "type": "boolean",
+          "default": true
+        },
+        "showActiveThreadsInSidebar": {
+          "title": "Show recent threads in the sidebar",
           "type": "boolean",
           "default": true
         },
@@ -2591,6 +2629,20 @@
             "keep"
           ],
           "default": "location"
+        },
+        "matrixLinkSelector": {
+          "title": "External Matrix links",
+          "enum": [
+            "sable",
+            "matrix",
+            "custom"
+          ],
+          "default": "sable"
+        },
+        "matrixLinkCustom": {
+          "title": "Custom link host",
+          "type": "string",
+          "default": ""
         },
         "personaPicker": {
           "title": "Show profile picker in the composer",

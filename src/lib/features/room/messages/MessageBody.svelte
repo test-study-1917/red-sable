@@ -108,16 +108,18 @@
   >
     {#if hiddenByPolicy && (item.content.kind === 'image' || item.content.kind === 'gallery')}
       <ImageIcon size={40} aria-hidden="true" />
-      <span class="sable-hidden-image-note">图片尚未预览</span>
+      <span class="sable-hidden-image-note" aria-hidden="true">图片尚未预览</span>
     {/if}
     {spoiler ? `${spoiler} — ` : ''}{i18n.t(
       spoiler === null ? 'timeline.hiddenMedia' : 'timeline.spoilerMedia'
     )}
   </Button>
-  {#if item.content.kind === 'video' && showCaption && item.content.html}
+  {#if (item.content.kind === 'video' || item.content.kind === 'image') && showCaption && item.content.html}
     <FormattedBody html={item.content.html} {senderTimezone} {onMatrixLink} />
-  {:else if item.content.kind === 'video' && showCaption && item.content.caption}
+  {:else if (item.content.kind === 'video' || item.content.kind === 'image') && showCaption && item.content.caption}
     <p class="body" dir="auto">{item.content.caption}</p>
+  {:else if item.content.kind === 'gallery' && showCaption && item.content.body}
+    <FormattedBody html={item.content.html} {senderTimezone} {onMatrixLink} />
   {/if}
 {:else if item.content.kind === 'redacted'}
   {@const reason = item.content.reason ?? redactionReason}

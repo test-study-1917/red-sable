@@ -1,7 +1,7 @@
 import type { Locator } from '@playwright/test';
 import en from '../../src/locales/en.json' with { type: 'json' };
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { timelineItem } from './fixtures/timeline-items';
+import { threadSummary, timelineItem } from './fixtures/timeline-items';
 
 test.use({ storageState: SIGNED_OUT });
 
@@ -30,11 +30,11 @@ for (const surface of ['room', 'forum'] as const) {
       });
       const root = {
         ...timelineItem('root', 'Original discussion'),
-        thread_summary: {
+        thread_summary: threadSummary({
           num_replies: 2,
           latest_body: 'A reply',
           latest_sender: '@bob:example.test',
-        },
+        }),
       };
       await core.emitTimelineDiff(await core.subscription(), [{ op: 'reset', values: [root] }]);
       const opener =

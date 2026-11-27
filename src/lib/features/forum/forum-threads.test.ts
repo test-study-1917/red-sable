@@ -49,8 +49,12 @@ test('collects an item with a thread summary as a root', () => {
     thread_summary: {
       num_replies: 2,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'latest',
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
 
@@ -70,8 +74,12 @@ test('hides a redacted post even when its thread summary remains', () => {
     thread_summary: {
       num_replies: 2,
       latest_event_id: '$reply',
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'latest',
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
   const reply = item({ id: 'reply', thread_root: '$root' });
@@ -165,8 +173,12 @@ test('takes last activity from the newest visible reply, not the root', () => {
     thread_summary: {
       num_replies: 2,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'root summary',
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
   const reply = item({
@@ -190,8 +202,12 @@ test('sorts threads by most recent activity first', () => {
     thread_summary: {
       num_replies: 0,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: null,
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
   const newer = item({
@@ -200,8 +216,12 @@ test('sorts threads by most recent activity first', () => {
     thread_summary: {
       num_replies: 0,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: null,
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
 
@@ -218,8 +238,12 @@ test('a thread is unread when the latest activity has no receipt from the curren
     thread_summary: {
       num_replies: 0,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: null,
       latest_fallback: null,
+      latest_emotes: [],
     },
     read_by: [],
     read_timestamps: {},
@@ -236,8 +260,12 @@ test('a thread is read once the current user has a receipt on the latest activit
     thread_summary: {
       num_replies: 0,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: null,
       latest_fallback: null,
+      latest_emotes: [],
     },
     read_by: ['@alice:example.org'],
   });
@@ -253,8 +281,12 @@ test('a thread you authored yourself is never unread', () => {
     thread_summary: {
       num_replies: 0,
       latest_event_id: null,
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: null,
       latest_fallback: null,
+      latest_emotes: [],
     },
     read_by: [],
     read_timestamps: {},
@@ -307,8 +339,12 @@ test('uses hydrated latest replies and thread receipts when the main timeline hi
     thread_summary: {
       num_replies: 2,
       latest_event_id: '$reply',
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'New reply',
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
   const newer = item({ id: 'newer', timestamp: 20 });
@@ -480,8 +516,12 @@ test('a deleted latest reply falls back to the previous reply', () => {
     thread_summary: {
       num_replies: 2,
       latest_event_id: '$deleted',
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'Deleted reply text',
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
   const earlier = item({ id: 'earlier', thread_root: '$root', timestamp: 5 });
@@ -503,8 +543,12 @@ test.each(['timeline', 'hydrated'])('a deleted latest reply from %s is not previ
     thread_summary: {
       num_replies: 1,
       latest_event_id: '$reply',
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'Deleted reply text',
       latest_fallback: null,
+      latest_emotes: [],
     },
   });
   const reply = item({

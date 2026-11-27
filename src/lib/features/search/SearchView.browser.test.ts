@@ -10,6 +10,7 @@ import type {
 } from '#src/generated/protocol';
 
 import { roomView } from '#lib/test-support/room-views.js';
+import { reactiveToggle } from '#lib/test-support/toggle.svelte.js';
 
 const core = vi.hoisted((): Record<string, unknown> => ({}));
 
@@ -27,7 +28,9 @@ vi.mock('../room/messages/event-items.svelte.js', async (importOriginal) => ({
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/rooms/room-list.svelte.js')>()),
   useRoomList: () => ({
-    rooms,
+    get rooms() {
+      return allRooms.on ? rooms : rooms.slice(0, 1);
+    },
     byId: (roomId: string) => rooms.find((room) => room.room_id === roomId),
     labelFor: (roomId: string) => rooms.find((room) => room.room_id === roomId)?.name ?? roomId,
   }),
@@ -39,14 +42,16 @@ function room(overrides: Partial<RoomListItemView>): RoomListItemView {
   return roomView({ room_id: '!id:example.org', encrypted: false, ...overrides });
 }
 
+const allRooms = reactiveToggle();
 const rooms = [
   room({ room_id: '!general:example.org', name: 'General' }),
   room({ room_id: '!random:example.org', name: 'Random' }),
 ];
 
 async function mount() {
+  allRooms.on = true;
   let onEvent: ((event: CoreEvent) => void) | undefined;
-  const messages = vi.fn().mockResolvedValue({ hits: [], older: null });
+  const messages = vi.fn().mockResolvedValue({ hits: [] });
   Object.assign(core, {
     session: { user_id: '@me:example.org' },
     searchCoverageUnavailable: false,
@@ -87,6 +92,7 @@ function hit(eventId: string): SearchHitView {
     sender: '@alice:example.org',
     origin_server_ts: 1700000000000,
     score: 1,
+    matched: [],
     context_before: [],
     context_after: [],
   };
@@ -308,10 +314,9 @@ test('a pagination error keeps results visible and retries the failed page', asy
   messages
     .mockResolvedValueOnce({
       hits: Array.from({ length: 30 }, (_, index) => hit(`$first${index}`)),
-      older: null,
     })
     .mockRejectedValueOnce(new Error('offline'))
-    .mockResolvedValue({ hits: [hit('$next')], older: null });
+    .mockResolvedValue({ hits: [hit('$next')] });
   await userEvent.fill(field.element(), 'deploy');
   const rows = screen.getByRole('group', { name: /^search\.openResultFrom/ });
   await expect.element(rows).toHaveLength(30);
@@ -325,9 +330,7 @@ test('a pagination error keeps results visible and retries the failed page', asy
 
 test('indexing updates refresh an unchanged search', async () => {
   const { screen, field, messages, emitCoverage } = await mount();
-  messages
-    .mockResolvedValueOnce({ hits: [], older: null })
-    .mockResolvedValue({ hits: [hit('$indexed')], older: null });
+  messages.mockResolvedValueOnce({ hits: [] }).mockResolvedValue({ hits: [hit('$indexed')] });
   await userEvent.fill(field.element(), 'deploy');
   await expect.element(screen.getByRole('status')).toHaveTextContent('search.empty');
   emitCoverage({ documents: 1, rooms_pending: 0, rooms_failed: 0, state: 'complete' });
@@ -336,6 +339,15 @@ test('indexing updates refresh an unchanged search', async () => {
     .toHaveLength(1);
   await expect.element(field).toHaveValue('deploy');
   expect(messages).toHaveBeenCalledTimes(2);
+});
+
+test('a result marks the words the core matched it on', async () => {
+  const { screen, field, messages } = await mount();
+  messages.mockResolvedValue({
+    hits: [{ ...hit('$category'), body: 'the category list', matched: ['category'] }],
+  });
+  await userEvent.fill(field.element(), 'cat');
+  await expect.element(screen.getByRole('mark')).toHaveTextContent('category');
 });
 
 test('accepting a suggestion closes the list instead of reopening it', async () => {
@@ -483,4 +495,21 @@ test('a starter filter begins a filter and offers its values', async () => {
 
   await expect.element(field).toHaveFocus();
   await expect.element(screen.getByRole('listbox')).toBeVisible();
+});
+
+test('Enter accepts a shown suggestion after the arrowed one drops out of the list', async () => {
+  const { field, chips } = await mount();
+
+  await userEvent.fill(field.element(), 'in:');
+  await userEvent.keyboard('{ArrowUp}');
+  await expect
+    .element(field)
+    .toHaveAttribute('aria-activedescendant', expect.stringMatching(/-1$/));
+  allRooms.on = false;
+  await expect
+    .element(field)
+    .toHaveAttribute('aria-activedescendant', expect.stringMatching(/-0$/));
+
+  await userEvent.keyboard('{Enter}');
+  await expect.element(chips).toHaveTextContent('in: General');
 });

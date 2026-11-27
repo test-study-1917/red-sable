@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { execFile, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { lock } from 'proper-lockfile';
 import { cargoPackageVersion, cargoRustFlags } from '../lib/cargo.mjs';
@@ -18,6 +19,8 @@ const cargoArgs = [
   'sable-wasm',
   '--package',
   'sable-model-wasm',
+  '--package',
+  'sable-search-worker',
   '--target',
   'wasm32-unknown-unknown',
   '--profile',
@@ -102,7 +105,8 @@ async function bindgen(input, name, { optimize, features = [] }) {
     const buildId = sha256(readFileSync(wasm))
       .slice(0, 32)
       .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
-    await run('sentry', [
+    await run(process.execPath, [
+      fileURLToPath(new URL('./bin.cjs', import.meta.resolve('sentry'))),
       'wasm-split',
       wasm,
       '-d',
@@ -152,6 +156,10 @@ try {
   writeFileSync(`${output}/sable_wasm_version.js`, `export default '${sha256(generated)}';\n`);
 
   await bindgen('sable_model_wasm.wasm', 'sable_model', {
+    optimize: ['-Oz'],
+  });
+
+  await bindgen('sable_search_worker.wasm', 'sable_search_worker', {
     optimize: ['-Oz'],
   });
 } finally {

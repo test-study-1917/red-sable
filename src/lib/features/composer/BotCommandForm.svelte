@@ -6,6 +6,7 @@
 
   import { i18n } from '#lib/i18n.js';
   import { memberName } from '#lib/rooms/member-listing.js';
+  import { matrixLinkHost } from '#lib/rooms/matrix-link.js';
   import Avatar from '#lib/ui/primitives/Avatar.svelte';
   import Button from '#lib/ui/primitives/Button.svelte';
   import IconButton from '#lib/ui/primitives/IconButton.svelte';
@@ -13,6 +14,7 @@
   import Switch from '#lib/ui/primitives/Switch.svelte';
   import TextArea from '#lib/ui/primitives/TextArea.svelte';
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
+  import { isComposingKey } from '#lib/ui/shortcuts/binding.js';
 
   import {
     acceptsType,
@@ -168,7 +170,7 @@
     for (const parameter of command.parameters) {
       if (parameter.schema.schema_type === 'array') addEntry(parameter.key);
     }
-    const result = buildInvocation(command, values, prefix);
+    const result = buildInvocation(command, values, prefix, matrixLinkHost());
     if (result.kind === 'invalid') {
       errors = result.errors;
       const [first] = Object.keys(result.errors);
@@ -280,7 +282,12 @@
                   }
                 }
                 onkeydown={(event: KeyboardEvent) => {
-                  if (event.key !== 'Enter' || (pending[parameter.key] ?? '').trim() === '') return;
+                  if (
+                    event.key !== 'Enter' ||
+                    isComposingKey(event) ||
+                    (pending[parameter.key] ?? '').trim() === ''
+                  )
+                    return;
                   event.preventDefault();
                   addEntry(parameter.key);
                 }}

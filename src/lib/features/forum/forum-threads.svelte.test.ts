@@ -28,6 +28,7 @@ function fixture(items: TimelineItemView[], listed: TimelineItemView[]) {
     main: { unread: 0, notifying: 0, highlight: 0, receipt_event_id: null },
     server_notifications: 0,
     server_highlights: 0,
+    unthreaded_receipt_timestamp: null,
     threads: [],
   });
   core.rpc.timeline.listThreads.mockResolvedValue({ roots: listed, next_batch: null });
@@ -75,8 +76,12 @@ test('an older redacted thread stays hidden through discovery refresh and reopen
     thread_summary: {
       num_replies: 2,
       latest_event_id: '$reply',
+      latest_timestamp: null,
+      latest_sender: null,
+      current_user_participated: null,
       latest_body: 'Old reply',
       latest_fallback: null,
+      latest_emotes: [],
     },
   };
   const other = timelineItem('other');
@@ -144,4 +149,60 @@ test('leaving the forum stops retrying a failed page', async () => {
   await page;
 
   expect(core.rpc.timeline.paginate).toHaveBeenCalledTimes(1);
+});
+
+test('a listed post outside the timeline shows its votes and updates after the user votes', async () => {
+  const live = timelineItem('live');
+  const older = { ...timelineItem('older'), thread_summary: null };
+  const { core, forum } = fixture([live], [older]);
+  core.rpc.messages.eventReactions.mockResolvedValue([
+    { key: '👍', senders: ['@ana:example.org'] },
+  ]);
+  await forum.start('!forum:example.org');
+
+  forum.loadListedReactions();
+  forum.loadListedReactions();
+  await vi.waitFor(() => {
+    expect(forum.threads.find((thread) => thread.eventId === '$older')?.votes).toBe(1);
+  });
+  expect(core.rpc.messages.eventReactions).toHaveBeenCalledExactlyOnceWith({
+    room_id: '!forum:example.org',
+    event_id: '$older',
+  });
+
+  core.rpc.messages.eventReactions.mockResolvedValue([
+    { key: '👍', senders: ['@ana:example.org', '@me:example.org'] },
+  ]);
+  await forum.refreshReactions('$older');
+  expect(forum.threads.find((thread) => thread.eventId === '$older')?.votes).toBe(2);
+
+  await forum.refreshReactions('$live');
+  expect(core.rpc.messages.eventReactions).toHaveBeenCalledTimes(2);
+});
+
+test('votes of listed posts still load after switching forums mid-request', async () => {
+  const listed = ['older', 'b', 'c', 'd'].map((id) => ({
+    ...timelineItem(id),
+    thread_summary: null,
+  }));
+  const { core, forum } = fixture([timelineItem('live')], listed);
+  const pending = Promise.withResolvers<{ key: string; senders: string[] }[]>();
+  core.rpc.messages.eventReactions.mockReturnValue(pending.promise);
+  await forum.start('!first:example.org');
+  forum.loadListedReactions();
+
+  await forum.start('!second:example.org');
+  pending.resolve([{ key: '👍', senders: ['@ana:example.org', '@bo:example.org'] }]);
+  core.rpc.messages.eventReactions.mockResolvedValue([
+    { key: '👍', senders: ['@ana:example.org'] },
+  ]);
+  forum.loadListedReactions();
+
+  await vi.waitFor(() => {
+    expect(forum.threads.find((thread) => thread.eventId === '$older')?.votes).toBe(1);
+  });
+  expect(core.rpc.messages.eventReactions).toHaveBeenCalledWith({
+    room_id: '!second:example.org',
+    event_id: '$older',
+  });
 });

@@ -1,6 +1,6 @@
 import en from '../../src/locales/en.json' with { type: 'json' };
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { timelineItem } from './fixtures/timeline-items';
+import { threadSummary, timelineItem } from './fixtures/timeline-items';
 
 test.use({ storageState: SIGNED_OUT, viewport: { width: 1400, height: 900 } });
 
@@ -58,11 +58,11 @@ test('a thread side panel keeps its width beside the timeline', async ({
       values: [
         {
           ...timelineItem('thread-root', 'Root message'),
-          thread_summary: {
+          thread_summary: threadSummary({
             num_replies: 3,
             latest_body: 'a reply',
             latest_sender: '@bob:example.test',
-          },
+          }),
         },
       ],
     },

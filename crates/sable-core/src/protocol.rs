@@ -150,6 +150,8 @@ pub enum RpcCode {
     DocumentLocked,
     /// A key backup this device cannot unlock is already on the server.
     BackupExists,
+    /// A key backup this device can read is turned off for the whole account (MSC4287).
+    BackupPaused,
     /// Secret storage no longer matches the account's identity.
     KeyStorageOutOfSync,
     /// Static: safe to hide UI.
@@ -733,11 +735,15 @@ pub struct SearchMetricsView {
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub documents_loaded: usize,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
-    pub memory_bytes: usize,
+    pub memory_bytes: u64,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
-    pub memory_budget: usize,
+    pub memory_budget: u64,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub disk_bytes: u64,
+    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
+    pub disk_index_bytes: u64,
+    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
+    pub disk_bookkeeping_bytes: u64,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub disk_budget: u64,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
@@ -752,8 +758,6 @@ pub struct SearchMetricsView {
     pub rooms_failed: usize,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub rooms_blind: usize,
-    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
-    pub rooms_unreadable: usize,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub events_crawled: usize,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
@@ -964,6 +968,8 @@ pub struct SearchHitView {
     pub origin_server_ts: u64,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub score: f64,
+    /// Words of `body` to highlight.
+    pub matched: Vec<String>,
     pub context_before: Vec<SearchContextView>,
     pub context_after: Vec<SearchContextView>,
 }
@@ -1025,6 +1031,8 @@ pub struct RoomListItemView {
     pub space_children: Vec<SpaceChildEdge>,
     /// The network a bridge relays this room from, per its `m.bridge` state.
     pub bridge: Option<BridgeView>,
+    /// The room's own MSC4278 level; `null` when the account's applies.
+    pub media_previews: Option<MediaPreviewsView>,
     pub unread: u32,
     pub notifying: u32,
     pub highlight: u32,
@@ -2147,6 +2155,15 @@ pub struct EditVersionView {
     pub html: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct ThreadReplyView {
+    pub event_id: String,
+    pub sender: String,
+    #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
+    pub timestamp: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type))]
 pub struct ThreadSummaryView {
@@ -2156,9 +2173,19 @@ pub struct ThreadSummaryView {
     /// fallback like a reply preview. Absent for a local echo or an unloaded
     /// event.
     pub latest_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typegen", specta(optional, type = Option<specta_typescript::Number>))]
+    pub latest_timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typegen", specta(optional))]
+    pub latest_sender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typegen", specta(optional))]
+    pub current_user_participated: Option<bool>,
     pub latest_body: Option<String>,
     /// What the latest reply was when it has no body to show.
     pub latest_fallback: Option<ReplyFallbackView>,
+    pub latest_emotes: Vec<PreviewEmote>,
 }
 
 /// Without this a failed send renders as an ordinary message.
@@ -2397,6 +2424,12 @@ pub enum TimelineItemContentView {
         /// back to a raw user id.
         display_name: Option<String>,
         reason: Option<String>,
+        /// MSC4293: a ban or leave that asks for the member's events to be removed, which
+        /// counts when someone else sent it. Only the core reads it, to decide which rows it
+        /// shows as deleted.
+        #[serde(skip)]
+        #[cfg_attr(feature = "typegen", specta(skip))]
+        removes_events: bool,
     },
     /// A display name or avatar change on an already-joined member. Separate
     /// from `Membership` because clients hide these by default.
@@ -2850,6 +2883,7 @@ pub struct NotificationView {
     pub sender_name: Option<String>,
     pub sender_avatar_url: Option<String>,
     pub body: String,
+    pub emotes: Vec<PreviewEmote>,
     pub mention: bool,
     pub noisy: Option<bool>,
 }
@@ -2902,6 +2936,7 @@ pub struct LatestEventView {
     /// Plain text: a list row must not run untrusted HTML. For a non-text
     /// `kind` this is the caption or poll question, empty when there is none.
     pub body: String,
+    pub emotes: Vec<PreviewEmote>,
     #[cfg_attr(feature = "typegen", specta(type = Option<specta_typescript::Number>))]
     pub timestamp: Option<u64>,
     pub sending: bool,
@@ -3391,6 +3426,7 @@ pub struct InboxItemView {
     pub sender: String,
     pub sender_name: Option<String>,
     pub body: Option<String>,
+    pub emotes: Vec<PreviewEmote>,
     pub highlight: bool,
     pub is_direct: bool,
     pub encrypted: bool,
@@ -3417,4 +3453,20 @@ pub struct BookmarkView {
     pub event_ts: u64,
     #[cfg_attr(feature = "typegen", specta(type = specta_typescript::Number))]
     pub bookmarked_ts: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct ThreadRefView {
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub room_id: OwnedRoomId,
+    #[cfg_attr(feature = "typegen", specta(type = String))]
+    pub event_id: OwnedEventId,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "typegen", derive(specta::Type))]
+pub struct ThreadSidebarView {
+    pub pins: Vec<ThreadRefView>,
+    pub dismissed: Vec<ThreadRefView>,
 }

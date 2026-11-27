@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 vi.mock('../worker/core.worker.ts?sharedworker&url', () => ({ default: 'core.worker.js' }));
+vi.mock('./search-db-host', () => ({
+  createSearchDatabaseHost: () => ({ attach: vi.fn() }),
+}));
 vi.mock('#src/generated/wasm/sable_wasm_version.js', () => ({ default: 'test-wasm-version' }));
 
 const { captureException, addBreadcrumb, startSpan, startInactiveSpan, endCoreSpan } = vi.hoisted(
@@ -577,6 +580,31 @@ test('a Rust panic associates wasm addresses with its worker image in Sentry', a
   });
 });
 
+test('a Rust panic is grouped on where it was raised, not the values it names', async () => {
+  const { Scope } = await import('@sentry/sveltekit');
+  const fingerprints: unknown[] = [];
+  for (const index of [7, 29]) {
+    const transport = await load();
+    void transport.call('members.list', { room_id: '!r:example.org' }).catch(() => {});
+    FakeSharedWorker.last?.port.receive({
+      panic: {
+        message: `panicked at crates/sable-core/src/rooms.rs:412:9:\nindex out of bounds: the len is 3 but the index is ${String(index)}`,
+      },
+    });
+    const [, context] = captureException.mock.lastCall ?? [];
+    const scope = (context as (scope: InstanceType<typeof Scope>) => InstanceType<typeof Scope>)(
+      new Scope()
+    );
+    fingerprints.push(scope.getScopeData().fingerprint);
+    transport.close();
+  }
+
+  expect(fingerprints).toEqual([
+    ['wasm-core-crash', 'crates/sable-core/src/rooms.rs:412:9'],
+    ['wasm-core-crash', 'crates/sable-core/src/rooms.rs:412:9'],
+  ]);
+});
+
 test('a panicked worker is replaced under a new name', async () => {
   const transport = await load();
   void transport.call('members.list', { room_id: '!r:example.org' }).catch(() => {});
@@ -670,6 +698,39 @@ test('reports an undecryptable message once per megolm session, grouped together
     ([, context]) => (context as { fingerprint: string[] }).fingerprint
   );
   expect(first).toEqual(second);
+  transport.close();
+  await restored;
+});
+
+test('reports undecryptable messages as one issue, searchable by their fields', async () => {
+  const transport = await load();
+  const restored = transport.call('session.restore', {}).catch(() => undefined);
+  captureException.mockClear();
+  FakeSharedWorker.last?.port.receive({
+    logs: [
+      '\u001eWARN sable_core::utd: unable to decrypt a message reported=true cause=Unknown age="before_this_device" same_homeserver=true backup=Enabled megolm_session="1a2b3c4d5e6f" sender_device="0a1b2c3d4e5f"',
+      '\u001eWARN sable_core::utd: unable to decrypt a message reported=true cause=SentBeforeWeJoined same_homeserver=false backup=Unknown megolm_session="6f5e4d3c2b1a"',
+    ],
+  });
+  expect(captureException).toHaveBeenCalledTimes(2);
+  const [[error, first], [, second]] = captureException.mock.calls as [
+    Error,
+    { fingerprint: string[]; tags: Record<string, string>; contexts: Record<string, object> },
+  ][];
+  expect(error.message).toBe('sable_core::utd: unable to decrypt a message');
+  expect(first.fingerprint).toEqual(second.fingerprint);
+  expect(first.tags).toEqual({
+    source: 'wasm-core',
+    cause: 'Unknown',
+    age: 'before_this_device',
+    same_homeserver: 'true',
+    backup: 'Enabled',
+  });
+  expect(second.tags).toMatchObject({ cause: 'SentBeforeWeJoined', same_homeserver: 'false' });
+  expect(first.contexts['Rust Tracing Fields']).toMatchObject({
+    megolm_session: '1a2b3c4d5e6f',
+    sender_device: '0a1b2c3d4e5f',
+  });
   transport.close();
   await restored;
 });

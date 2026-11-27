@@ -2,7 +2,8 @@
 
 import { afterEach, expect, test, vi } from 'vitest';
 
-import type { TimelineItemView } from '#src/generated/protocol';
+import type { TimelineItemView, UrlPreviewView } from '#src/generated/protocol';
+import { previewWhitelistEntry } from '#lib/features/room/media/link-preview.js';
 
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import type { PersonaStore } from '#lib/personas/personas.svelte.js';
@@ -43,7 +44,8 @@ function setup(
   store: Partial<PersonaStore> = {},
   beforeSend?: () => Promise<void>,
   threadRoot: string | null = null,
-  canRedactOwn?: () => boolean
+  canRedactOwn?: () => boolean,
+  findItem?: (eventId: string) => TimelineItemView | undefined
 ) {
   const sendMessage = vi.fn((..._args: unknown[]) => Promise.resolve());
   const editMessage = vi.fn((..._args: unknown[]) => Promise.resolve());
@@ -60,8 +62,10 @@ function setup(
   const schedule = vi.fn(() => Promise.resolve('delay'));
   const sendGesture = vi.fn(() => Promise.resolve());
   const toggleReaction = vi.fn(() => Promise.resolve());
-  const urlPreview = vi.fn(() => Promise.resolve(null));
+  const urlPreview = vi.fn((): Promise<UrlPreviewView | null> => Promise.resolve(null));
+  const preparePreviewImages = vi.fn(() => Promise.resolve(null));
   const setTyping = vi.fn((..._args: unknown[]) => Promise.resolve());
+  const prepareToEncrypt = vi.fn((..._args: unknown[]) => Promise.resolve());
   const core = {
     session: { user_id: userId },
     media: {
@@ -80,7 +84,9 @@ function setup(
         sendGesture,
         react: toggleReaction,
         urlPreview,
+        preparePreviewImages,
         setTyping,
+        prepareToEncrypt,
       },
       account: {},
     },
@@ -116,7 +122,9 @@ function setup(
     sendGesture,
     toggleReaction,
     urlPreview,
+    preparePreviewImages,
     setTyping,
+    prepareToEncrypt,
     timeline,
     conversation: new Conversation({
       core,
@@ -126,6 +134,7 @@ function setup(
       beforeSend,
       threadRoot,
       canRedactOwn,
+      findItem,
     }),
   };
 }
@@ -180,6 +189,24 @@ test('typing is announced to a room id', async () => {
   const fixture = setup([], '@kris:example.org');
   await fixture.conversation.setTyping(ROOM, true);
   expect(fixture.setTyping).toHaveBeenCalledWith({ room_id: ROOM, typing: true });
+});
+
+test('typing prepares the room key once a minute per room', async () => {
+  vi.useFakeTimers();
+  try {
+    const fixture = setup([], '@kris:example.org');
+    await fixture.conversation.setTyping(ROOM, true);
+    await fixture.conversation.setTyping(ROOM, true);
+    await fixture.conversation.setTyping(ROOM, false);
+    expect(fixture.prepareToEncrypt).toHaveBeenCalledTimes(1);
+    expect(fixture.prepareToEncrypt).toHaveBeenCalledWith({ room_id: ROOM });
+
+    vi.advanceTimersByTime(60_000);
+    await fixture.conversation.setTyping(ROOM, true);
+    expect(fixture.prepareToEncrypt).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('quick reactions do nothing in an empty room', async () => {
@@ -775,6 +802,46 @@ test('keeps an edited message kind and persona when returning to live drops its 
   );
 });
 
+test('editing a message shown from outside the timeline keeps its title, kind and persona', async () => {
+  const post = withRowFields({
+    ...item('$post', '@kris:example.org'),
+    content: {
+      kind: 'message',
+      body: 'waves',
+      html: 'waves',
+      msgtype: 'emote',
+      edited: false,
+      jumbo: null,
+    },
+    forum_title: 'Release notes',
+    per_message_profile: { display_name: 'Ghost', avatar_url: null },
+  } as TimelineItemView);
+  const { conversation, editMessage } = setup(
+    [],
+    '@kris:example.org',
+    {},
+    undefined,
+    null,
+    undefined,
+    (eventId) => (eventId === '$post' ? post : undefined)
+  );
+
+  conversation.edit('$post', 'waves');
+  expect(conversation.forumTitle).toBe('Release notes');
+  await conversation.sendMessage(ROOM, 'waves back');
+
+  expect(editMessage).toHaveBeenCalledWith(
+    ROOM,
+    '$post',
+    'waves back',
+    expect.objectContaining({
+      kind: 'emote',
+      persona: post.per_message_profile,
+      forum_title: 'Release notes',
+    })
+  );
+});
+
 test('an edit still targets its event after the item leaves the visible timeline', async () => {
   const { conversation, editMessage } = setup([], '@kris:example.org');
   conversation.edit('$original', 'before');
@@ -1065,7 +1132,7 @@ test('a reply the SDK has not filled asks the core for its details once', async 
     session: { user_id: '@kris:example.org' },
     rpc: { timeline: { fetchEventDetails } },
   } as unknown as CoreClient;
-  const timeline = { items: [reply, filled] } as unknown as RoomTimeline;
+  const timeline = { items: [reply, filled], subscriptionId: 7 } as unknown as RoomTimeline;
   const conversation = new Conversation({
     core,
     personas: {} as PersonaStore,
@@ -1082,6 +1149,7 @@ test('a reply the SDK has not filled asks the core for its details once', async 
     room_id: ROOM,
     event_id: '$reply:example.org',
     thread_root: null,
+    subscription: 7,
   });
 });
 
@@ -1150,6 +1218,17 @@ test('editing steps forward to the next own message and leaves after the last', 
 });
 
 const LINKS = '<p><a href="https://a.example/">a</a> <a href="https://b.example/">b</a></p>';
+
+test('a link preview shown in the composer has its images prepared for the send', async () => {
+  setPreference('encryptedUrlPreviews', true);
+  const fixture = setup([], '@kris:example.org');
+  const preview = previewWhitelistEntry('https://a.example/');
+  fixture.urlPreview.mockResolvedValueOnce(preview);
+
+  await fixture.conversation.loadLinkPreview('https://a.example/');
+
+  expect(fixture.preparePreviewImages).toHaveBeenCalledWith({ room_id: ROOM, previews: [preview] });
+});
 
 test('a dismissed link is not previewed and the dismissal is spent by the send', async () => {
   setPreference('encryptedUrlPreviews', true);

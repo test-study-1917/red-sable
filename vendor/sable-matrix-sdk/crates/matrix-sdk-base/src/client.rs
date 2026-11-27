@@ -974,7 +974,6 @@ impl BaseClient {
             return Ok(());
         };
 
-        let mut chunk = Vec::with_capacity(response.chunk.len());
         let mut context = Context::default();
 
         #[cfg(feature = "e2e-encryption")]
@@ -1018,7 +1017,10 @@ impl BaseClient {
                 ambiguity_map.entry(display_name).or_default().insert(member.state_key().clone());
             }
 
-            let sync_member: SyncRoomMemberEvent = member.clone().into();
+            let event_type = member.event_type();
+            let state_key = member.state_key().to_string();
+
+            let sync_member: SyncRoomMemberEvent = member.into();
             processors::profiles::upsert_or_delete(&mut context, room_id, &sync_member);
 
             context
@@ -1026,10 +1028,9 @@ impl BaseClient {
                 .state
                 .entry(room_id.to_owned())
                 .or_default()
-                .entry(member.event_type())
+                .entry(event_type)
                 .or_default()
-                .insert(member.state_key().to_string(), raw_event.clone().cast());
-            chunk.push(member);
+                .insert(state_key, raw_event.clone().cast());
         }
 
         #[cfg(feature = "e2e-encryption")]
@@ -1399,11 +1400,8 @@ impl BaseClient {
     /// Call this before [`BaseClient::close_stores`], so that no lock lease
     /// renewal or lock acquisition reaches a closed store.
     pub async fn suspend_locks(&self) {
-        futures_util::future::join(
-            self.event_cache_store.suspend(),
-            self.media_store.suspend(),
-        )
-        .await;
+        futures_util::future::join(self.event_cache_store.suspend(), self.media_store.suspend())
+            .await;
     }
 
     /// Undo [`BaseClient::suspend_locks`], after [`BaseClient::reopen_stores`].

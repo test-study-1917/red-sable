@@ -12,6 +12,7 @@
   import { i18n } from '#lib/i18n.js';
   import { preferences } from '#lib/settings/preferences.svelte.js';
   import MediaImage from '#lib/ui/MediaImage.svelte';
+  import Button from '#lib/ui/primitives/Button.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
 
   import { LongPress, touchContextMenu } from '#lib/ui/long-press.svelte.js';
@@ -46,7 +47,7 @@
       key: string,
       sourcePack?: import('#src/generated/protocol').ImageSourcePackView | null
     ) => void;
-    onViewReactions?: (index: number) => void;
+    onViewReactions?: (key: string) => void;
   }
 
   let {
@@ -61,7 +62,7 @@
     onViewReactions,
   }: Props = $props();
 
-  let pressIndex = 0;
+  let pressKey = '';
   let tapAnimation: Animation | undefined;
   const core = useCoreClient();
   const packs = new RoomPacks(core, () => (customKeys.length > 0 ? roomId : undefined));
@@ -78,13 +79,13 @@
   const failedImages = new SvelteSet<string>();
   const press = new LongPress({
     stopPropagation: true,
-    onPress: () => onViewReactions?.(pressIndex),
+    onPress: () => onViewReactions?.(pressKey),
   });
 
-  function openDetails(event: MouseEvent, index: number): void {
+  function openDetails(event: MouseEvent, key: string): void {
     event.preventDefault();
     event.stopPropagation();
-    if (!touchContextMenu(event)) onViewReactions?.(index);
+    if (!touchContextMenu(event)) onViewReactions?.(key);
   }
 
   onDestroy(() => {
@@ -112,11 +113,12 @@
   });
 
   const roomMedia = hasRoomMediaPreviews() ? useRoomMediaPreviews() : null;
-  let mediaHidden = $derived(roomMedia?.hidden ?? false);
+  let revealedImages = $state(false);
+  let mediaHidden = $derived((roomMedia?.hidden ?? false) && !revealedImages);
 </script>
 
 <div class="reactions" aria-label={i18n.t('timeline.reactions')}>
-  {#each reactions as reaction, index (reaction.key)}
+  {#each reactions as reaction (reaction.key)}
     {@const mine = currentUserId !== null && reaction.senders.includes(currentUserId)}
     {@const label = reactionEmoteLabel(
       reaction.key,
@@ -151,9 +153,9 @@
           }
           onToggleReaction(eventId, reaction.key);
         }}
-        oncontextmenu={(event) => openDetails(event, index)}
+        oncontextmenu={(event) => openDetails(event, reaction.key)}
         onpointerdown={(event) => {
-          pressIndex = index;
+          pressKey = reaction.key;
           press.start(event);
         }}
         onpointermove={press.move}
@@ -220,6 +222,16 @@
         : undefined}
     />
   {/each}
+  {#if mediaHidden && customKeys !== ''}
+    <Button
+      size="small"
+      onclick={() => {
+        revealedImages = true;
+      }}
+    >
+      {i18n.t('timeline.showImages')}
+    </Button>
+  {/if}
   {#if actionable && onReact}
     {@const react = onReact}
     <button

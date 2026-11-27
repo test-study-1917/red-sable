@@ -3,6 +3,7 @@ import type { SearchCoverageView, SearchHitView, SearchOrder } from '#src/genera
 import type { CoreClient } from '#lib/core/client.svelte.js';
 import { searchMessages } from '#lib/core/api/search.svelte.js';
 
+import { queryWords } from './query-words';
 import {
   parseSearchQuery,
   resolveSearchQuery,
@@ -41,7 +42,6 @@ export class MessageSearch {
   pageFailed = $state(false);
   refreshAvailable = $state(false);
   exhausted = $state(true);
-  older = $state(false);
   pages = $state(0);
 
   #core: CoreClient;
@@ -52,7 +52,6 @@ export class MessageSearch {
   #background = false;
   #generation = 0;
   #served = 0;
-  #olderCursor: string | null = null;
   readonly resolved: ResolvedQuery;
 
   constructor(core: CoreClient, directory: () => SearchDirectory) {
@@ -63,6 +62,10 @@ export class MessageSearch {
 
   get parsed(): ParsedQuery {
     return parseSearchQuery(this.query);
+  }
+
+  get words(): string[] {
+    return queryWords(this.parsed.text);
   }
 
   get unresolved(): SearchToken[] {
@@ -122,11 +125,7 @@ export class MessageSearch {
 
     this.#paginated = true;
     this.searching = true;
-    if (this.older && this.#olderCursor !== null) {
-      await this.#runOlder(this.#generation, this.#olderCursor);
-    } else {
-      await this.#run(this.#generation, this.#served);
-    }
+    await this.#run(this.#generation, this.#served);
   }
 
   async retryPage(): Promise<void> {
@@ -207,6 +206,7 @@ export class MessageSearch {
 
     try {
       const page = await searchMessages(this.#core.rpc, text, {
+        words: this.words,
         filter: this.resolved.filter,
         order: this.order,
         limit: PAGE_SIZE,
@@ -218,13 +218,11 @@ export class MessageSearch {
 
       if (offset === 0) {
         this.hits = uniqueHits(page.hits);
-        this.#olderCursor = page.older;
       } else {
         this.#append(page.hits);
       }
       this.#served = offset + page.hits.length;
-      this.older = page.hits.length < PAGE_SIZE && this.#olderCursor !== null;
-      this.exhausted = page.hits.length < PAGE_SIZE && !this.older;
+      this.exhausted = page.hits.length < PAGE_SIZE;
       this.failed = false;
       this.pageFailed = false;
       this.pages += 1;
@@ -249,32 +247,6 @@ export class MessageSearch {
         this.searching = false;
         if (offset === 0) this.refining = false;
       }
-    }
-  }
-
-  async #runOlder(generation: number, cursor: string): Promise<void> {
-    try {
-      const page = await searchMessages(this.#core.rpc, this.parsed.text, {
-        filter: this.resolved.filter,
-        order: this.order,
-        limit: PAGE_SIZE,
-        context: CONTEXT_LINES,
-        older: cursor,
-      });
-      if (generation !== this.#generation) return;
-      this.#append(page.hits);
-      this.#olderCursor = page.older;
-      this.older = page.older !== null;
-      this.exhausted = page.older === null;
-      this.failed = false;
-      this.pageFailed = false;
-      this.pages += 1;
-    } catch (error) {
-      console.warn('[sable search] loading older results failed', error);
-      if (generation !== this.#generation) return;
-      this.pageFailed = true;
-    } finally {
-      if (generation === this.#generation) this.searching = false;
     }
   }
 

@@ -89,7 +89,9 @@ import {
   treeLink,
   treeRoom,
 } from '#lib/test-support/room-sections.js';
+import { restoredRoomPath } from '#lib/rooms/last-room.js';
 import RoomNavHarness from './RoomNavHarness.test.svelte';
+import { visibleRoomSection } from './visible-rooms.svelte.js';
 
 const realObserver = globalThis.IntersectionObserver;
 
@@ -176,6 +178,7 @@ test.each([
     order: null,
     origin_server_ts: 1,
     suggested: false,
+    private: false,
   };
   const target = makeRoom({
     room_id: '!plain:example.org',
@@ -196,6 +199,7 @@ test.each([
               order: null,
               origin_server_ts: 1,
               suggested: false,
+              private: false,
             },
           ],
         }),
@@ -278,6 +282,7 @@ test('a subspace context menu opens its lobby', async () => {
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),
@@ -292,6 +297,7 @@ test('a subspace context menu opens its lobby', async () => {
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),
@@ -328,6 +334,7 @@ test.each([
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),
@@ -358,6 +365,7 @@ test('nests subspaces with thread lines and links past the depth limit to the lo
     order: null,
     origin_server_ts: 1,
     suggested: false,
+    private: false,
   });
   roomsFixture.rooms = [
     makeRoom({
@@ -495,6 +503,45 @@ test('home links a room to its own section when enabled', async () => {
   expect(row('Plain')).toHaveAttribute('href', '/home/!plain%3Aexample.org');
 });
 
+test('room switching keys land where the shown rows link, even off a room page', async () => {
+  const child = makeRoom({ room_id: '!child:example.org', name: 'Child' });
+  const dm = makeRoom({ room_id: '!dm:example.org', name: 'Chat', is_direct: true });
+  const edge = (roomId: string) => ({
+    room_id: roomId,
+    via: [],
+    order: null,
+    origin_server_ts: 1,
+    suggested: false,
+    private: false,
+  });
+  const space = makeRoom({
+    room_id: '!space:example.org',
+    name: 'Space',
+    room_kind: 'space',
+    space_children: [edge(child.room_id), { ...edge(dm.room_id), private: true }],
+  });
+  roomsFixture.rooms = [space, child, dm];
+  const rooms = [child.room_id, dm.room_id];
+  listSections(sectionView('home', { rooms }), sectionView(space.room_id, { rooms }));
+  const jumpPath = (roomId: string) =>
+    restoredRoomPath(roomsFixture.rooms, roomId, visibleRoomSection(), true, () => rooms);
+
+  setPreference('showHome', true);
+  visit('/inbox');
+  const home = await mountNav();
+  expect(row('Child')).toHaveAttribute('href', '/home/!child%3Aexample.org');
+  expect(row('Chat')).toHaveAttribute('href', '/home/!dm%3Aexample.org');
+  expect(jumpPath(child.room_id)).toBe(row('Child').getAttribute('href'));
+  expect(jumpPath(dm.room_id)).toBe(row('Chat').getAttribute('href'));
+  home.unmount();
+
+  visit('/space/!space%3Aexample.org', { spaceId: space.room_id });
+  await mountNav();
+  expect(row('Chat')).toHaveAttribute('href', '/space/!space%3Aexample.org/!dm%3Aexample.org');
+  expect(jumpPath(child.room_id)).toBe(row('Child').getAttribute('href'));
+  expect(jumpPath(dm.room_id)).toBe(row('Chat').getAttribute('href'));
+});
+
 test('explore links rooms to their sections when Home is disabled', async () => {
   visit('/explore');
   setPreference('showHome', false);
@@ -513,6 +560,7 @@ test('explore links rooms to their sections when Home is disabled', async () => 
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),
@@ -558,6 +606,7 @@ test('expanded room disclosures do not use the active-route surface', async () =
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),
@@ -572,6 +621,7 @@ test('expanded room disclosures do not use the active-route surface', async () =
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),
@@ -1297,6 +1347,7 @@ function latest(
     sender_label: null,
     kind: 'text',
     body,
+    emotes: [],
     timestamp,
     sending: false,
     event_id: `$${timestamp}`,
@@ -1357,6 +1408,59 @@ test.each([
 
   expect(roomTopics()).toEqual([expected]);
 });
+
+test('a custom emote in a message preview shows as its image', async () => {
+  visit('/home');
+  setPreference('showHome', true);
+  setPreference('messagePreviews', 'all');
+  roomsFixture.rooms = [
+    makeRoom({
+      room_id: '!r:example.org',
+      name: 'Room',
+      latest_event: latest('hi :blob:', 1, {
+        emotes: [{ alt: ':blob:', source: 'mxc://example.org/blob' }],
+      }),
+    }),
+  ];
+  await mountNav();
+  await tick();
+
+  expect(roomTopics().map((topic) => topic?.trim())).toEqual(['hi']);
+  expect(document.querySelector('.room-row .room-topic .preview-emote')).toBeInTheDocument();
+});
+
+test.each([
+  ['off', null, 'invite'],
+  ['private', null, 'public'],
+  ['on', 'off', 'invite'],
+] as const)(
+  "a custom emote in a message preview stays text when media previews are %s and the room's own %s in a %s room",
+  async (level, roomLevel, joinRule) => {
+    visit('/home');
+    setPreference('showHome', true);
+    setPreference('messagePreviews', 'all');
+    setPreference('mediaAutoLoad', level);
+    onTestFinished(() => {
+      setPreference('mediaAutoLoad', 'on');
+    });
+    roomsFixture.rooms = [
+      makeRoom({
+        room_id: '!r:example.org',
+        name: 'Room',
+        join_rule: joinRule,
+        media_previews: roomLevel,
+        latest_event: latest('hi :blob:', 1, {
+          emotes: [{ alt: ':blob:', source: 'mxc://example.org/blob' }],
+        }),
+      }),
+    ];
+    await mountNav();
+    await tick();
+
+    expect(roomTopics()).toEqual(['hi :blob:']);
+    expect(document.querySelector('.room-row .room-topic .preview-emote')).toBeNull();
+  }
+);
 
 test('the preview sender is set apart from the message', async () => {
   visit('/home');
@@ -1658,6 +1762,7 @@ test('a space can hide bridge badges on its rooms for every member', async () =>
           order: null,
           origin_server_ts: 1,
           suggested: false,
+          private: false,
         },
       ],
     }),

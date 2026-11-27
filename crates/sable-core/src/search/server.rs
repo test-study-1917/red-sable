@@ -1,3 +1,4 @@
+use crate::SignedIn;
 use crate::api::search::SearchOrder;
 use std::collections::{HashMap, HashSet};
 
@@ -17,10 +18,9 @@ use matrix_sdk::ruma::{
     EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId, UInt,
 };
 
-use super::IndexFilter;
-use super::tokenize::{tokenize, tokenize_query};
-use super::{ContextLine, Hit, edited_or_own_event_id, indexable_body, replacement_of};
-use crate::Core;
+use super::{
+    ContextLine, Hit, IndexFilter, edited_or_own_event_id, expands, indexable_body, replacement_of,
+};
 use crate::messages::latest_valid_replacement;
 
 const MAX_ROUND_TRIPS: usize = 8;
@@ -90,10 +90,6 @@ impl ServerSearch {
     fn holds(&self, signature: &Signature) -> bool {
         self.signature.as_ref() == Some(signature)
     }
-
-    pub(crate) fn reset(&mut self) {
-        *self = Self::default();
-    }
 }
 
 pub(super) async fn target(
@@ -114,102 +110,6 @@ pub(super) async fn target(
     let room = client.get_room(room_id)?;
     let state = room.latest_encryption_state().await.ok()?;
     matches!(state, EncryptionState::NotEncrypted).then(|| room_id.clone())
-}
-
-impl Core {
-    pub(super) async fn search_server(
-        &self,
-        client: &matrix_sdk::Client,
-        query: ServerQuery<'_>,
-    ) -> matrix_sdk::Result<Vec<Hit>> {
-        let signature = query.signature();
-        let mut cursor = {
-            let mut shared = self.server_search.lock().await;
-            if query.offset == 0 || !shared.holds(&signature) {
-                shared.restart(signature.clone());
-            }
-            shared.progress()
-        };
-
-        let wanted = query.offset.saturating_add(query.limit);
-        let mut ignored: HashMap<OwnedUserId, bool> = HashMap::new();
-        let mut seen: HashSet<OwnedEventId> =
-            cursor.hits.iter().map(|hit| hit.event_id.clone()).collect();
-        let room = client.get_room(query.room_id);
-
-        for _ in 0..MAX_ROUND_TRIPS {
-            if cursor.hits.len() >= wanted || cursor.exhausted {
-                break;
-            }
-
-            let outstanding = (wanted - cursor.hits.len()) as u64;
-            let request = request_for(
-                &query,
-                outstanding.min(MAX_PER_REQUEST),
-                cursor.next_batch.as_deref(),
-            );
-
-            let events = client.send(request).await?.search_categories.room_events;
-            cursor.next_batch = events.next_batch;
-            cursor.exhausted = cursor.next_batch.is_none();
-
-            for result in &events.results {
-                let Some(Candidate { mut hit, edit }) =
-                    hit_from(result, query.room_id, query.query)
-                else {
-                    continue;
-                };
-                if seen.contains(&hit.event_id) {
-                    continue;
-                }
-                if let Some(edit) = edit {
-                    let Some(room) = &room else {
-                        continue;
-                    };
-                    let Some(timestamp) =
-                        original_timestamp_if_latest(room, &hit.event_id, &edit).await
-                    else {
-                        continue;
-                    };
-                    hit.origin_server_ts = timestamp;
-                    hit.before.clear();
-                    hit.after.clear();
-                }
-
-                let muted = if let Some(muted) = ignored.get(&hit.sender) {
-                    *muted
-                } else {
-                    let muted = client.is_user_ignored(&hit.sender).await;
-                    ignored.insert(hit.sender.clone(), muted);
-                    muted
-                };
-
-                if !muted {
-                    for line in hit.before.iter().chain(&hit.after) {
-                        if !ignored.contains_key(&line.sender) {
-                            let muted = client.is_user_ignored(&line.sender).await;
-                            ignored.insert(line.sender.clone(), muted);
-                        }
-                    }
-                    let shown = |line: &ContextLine| ignored.get(&line.sender) != Some(&true);
-                    hit.before.retain(shown);
-                    hit.after.retain(shown);
-                    seen.insert(hit.event_id.clone());
-                    cursor.hits.push(hit);
-                }
-            }
-        }
-
-        let page = cursor
-            .hits
-            .iter()
-            .skip(query.offset)
-            .take(query.limit)
-            .cloned()
-            .collect();
-        self.server_search.lock().await.adopt(&signature, cursor);
-        Ok(page)
-    }
 }
 
 const fn expressible(filter: &IndexFilter) -> bool {
@@ -291,13 +191,6 @@ fn latest_body(message: &OriginalSyncRoomMessageEvent) -> Option<String> {
     Some(indexable_body(edit.new_content.msgtype.body()))
 }
 
-fn matches_query(query: &str, body: &str) -> bool {
-    let terms = tokenize(body);
-    tokenize_query(query)
-        .iter()
-        .all(|wanted| terms.iter().any(|term| term.starts_with(wanted.as_ref())))
-}
-
 /// A search result that matched on an edit stands for the message it replaces, but only
 /// once that edit is the replaced message's latest valid one.
 struct Candidate {
@@ -305,7 +198,13 @@ struct Candidate {
     edit: Option<OwnedEventId>,
 }
 
-fn hit_from(result: &SearchResult, room_id: &OwnedRoomId, query: &str) -> Option<Candidate> {
+fn hit_from(
+    result: &SearchResult,
+    room_id: &OwnedRoomId,
+    query: &str,
+    words: &[String],
+    expand: bool,
+) -> Option<Candidate> {
     let original = room_message(result.result.as_ref()?)?;
     let (edit, edited) = match replacement_of(&original) {
         Some(replacement) => (
@@ -316,7 +215,7 @@ fn hit_from(result: &SearchResult, room_id: &OwnedRoomId, query: &str) -> Option
     };
     if edited
         .as_ref()
-        .is_some_and(|body| !matches_query(query, body))
+        .is_some_and(|body| !sable_search::matching::matches_every_word(query, words, body, expand))
     {
         return None;
     }
@@ -372,6 +271,106 @@ async fn original_timestamp_if_latest(
     Some(timestamp.get().into())
 }
 
+impl SignedIn {
+    pub(super) async fn search_server(
+        &self,
+        query: ServerQuery<'_>,
+    ) -> matrix_sdk::Result<Vec<Hit>> {
+        let client = self.client();
+        let signature = query.signature();
+        let mut cursor = {
+            let mut shared = self.state().server_search.lock();
+            if query.offset == 0 || !shared.holds(&signature) {
+                shared.restart(signature.clone());
+            }
+            shared.progress()
+        };
+
+        let wanted = query.offset.saturating_add(query.limit);
+        let mut ignored: HashMap<OwnedUserId, bool> = HashMap::new();
+        let mut seen: HashSet<OwnedEventId> =
+            cursor.hits.iter().map(|hit| hit.event_id.clone()).collect();
+        let room = client.get_room(query.room_id);
+
+        for _ in 0..MAX_ROUND_TRIPS {
+            if cursor.hits.len() >= wanted || cursor.exhausted {
+                break;
+            }
+
+            let outstanding = (wanted - cursor.hits.len()) as u64;
+            let request = request_for(
+                &query,
+                outstanding.min(MAX_PER_REQUEST),
+                cursor.next_batch.as_deref(),
+            );
+
+            let events = client.send(request).await?.search_categories.room_events;
+            cursor.next_batch = events.next_batch;
+            cursor.exhausted = cursor.next_batch.is_none();
+
+            for result in &events.results {
+                let Some(Candidate { mut hit, edit }) = hit_from(
+                    result,
+                    query.room_id,
+                    query.query,
+                    &query.filter.words,
+                    expands(query.order),
+                ) else {
+                    continue;
+                };
+                if seen.contains(&hit.event_id) {
+                    continue;
+                }
+                if let Some(edit) = edit {
+                    let Some(room) = &room else {
+                        continue;
+                    };
+                    let Some(timestamp) =
+                        original_timestamp_if_latest(room, &hit.event_id, &edit).await
+                    else {
+                        continue;
+                    };
+                    hit.origin_server_ts = timestamp;
+                    hit.before.clear();
+                    hit.after.clear();
+                }
+
+                let muted = if let Some(muted) = ignored.get(&hit.sender) {
+                    *muted
+                } else {
+                    let muted = client.is_user_ignored(&hit.sender).await;
+                    ignored.insert(hit.sender.clone(), muted);
+                    muted
+                };
+
+                if !muted {
+                    for line in hit.before.iter().chain(&hit.after) {
+                        if !ignored.contains_key(&line.sender) {
+                            let muted = client.is_user_ignored(&line.sender).await;
+                            ignored.insert(line.sender.clone(), muted);
+                        }
+                    }
+                    let shown = |line: &ContextLine| ignored.get(&line.sender) != Some(&true);
+                    hit.before.retain(shown);
+                    hit.after.retain(shown);
+                    seen.insert(hit.event_id.clone());
+                    cursor.hits.push(hit);
+                }
+            }
+        }
+
+        let page = cursor
+            .hits
+            .iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .cloned()
+            .collect();
+        self.state().server_search.lock().adopt(&signature, cursor);
+        Ok(page)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use matrix_sdk::ruma::{OwnedRoomId, room_id, user_id};
@@ -388,7 +387,7 @@ mod tests {
     }
 
     fn hit_from(result: &SearchResult, query: &str) -> Option<crate::search::Hit> {
-        candidate_from(result, &plain_room(), query).map(|candidate| candidate.hit)
+        candidate_from(result, &plain_room(), query, &[], true).map(|candidate| candidate.hit)
     }
 
     #[test]
@@ -461,6 +460,36 @@ mod tests {
         let hit = hit_from(&result, "mea").expect("a hit");
         assert_eq!(hit.event_id, "$original");
         assert_eq!(hit.body, "omg mea is doing great work");
+    }
+
+    #[test]
+    fn test_an_edited_original_matches_with_the_local_typo_rule() {
+        let result = edited_original("please deligate this");
+
+        assert!(hit_from(&result, "delegate").is_some());
+    }
+
+    #[test]
+    fn test_an_edited_original_matches_a_prefix_only_where_the_local_index_would() {
+        let result = edited_original("omg mea is doing deployment work");
+
+        assert!(candidate_from(&result, &plain_room(), "dep", &[], true).is_some());
+        assert!(candidate_from(&result, &plain_room(), "dep", &[], false).is_none());
+    }
+
+    #[test]
+    fn test_an_edited_original_must_still_hold_every_query_word() {
+        let result = edited_original("deploy monday");
+
+        assert!(hit_from(&result, "deploy friday").is_none());
+        assert!(hit_from(&result, "deploy monday").is_some());
+    }
+
+    #[test]
+    fn test_an_edited_original_matches_a_query_without_words() {
+        let result = edited_original("omg mea is doing great work");
+
+        assert!(hit_from(&result, "!!!").is_some());
     }
 
     #[test]
@@ -615,17 +644,21 @@ mod tests {
             .await;
 
         let (core, _events) = Core::new("search", Box::new(MemorySessionStore::default()));
-        *core.session.write().await = Some(Session {
-            account_id: "search".to_owned(),
-            homeserver: server.server().uri(),
-            oauth: false,
-            sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
-            client: client.clone(),
-        });
+        crate::test_support::set_session(
+            &core,
+            Some(Session {
+                account_id: "search".to_owned(),
+                homeserver: server.server().uri(),
+                oauth: false,
+                state: Arc::default(),
+                sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
+                client: client.clone(),
+            }),
+        );
+        let session = core.signed_in().unwrap();
         let filter = scoped();
-        core.search_server(
-            &client,
-            super::ServerQuery {
+        session
+            .search_server(super::ServerQuery {
                 room_id: &room,
                 query: "deploy",
                 filter: &filter,
@@ -633,10 +666,9 @@ mod tests {
                 limit: 10,
                 offset: 0,
                 context: 0,
-            },
-        )
-        .await
-        .unwrap()
+            })
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

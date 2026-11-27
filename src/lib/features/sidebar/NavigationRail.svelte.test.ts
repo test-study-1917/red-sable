@@ -53,6 +53,7 @@ import { LONG_PRESS_MS } from '#lib/ui/long-press.svelte.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 import { setBridgedSpace } from '#lib/rooms/bridged-spaces.svelte.js';
 import { withCounts } from '#lib/rooms/summary-fixtures.js';
+import { roomUnread } from '#lib/rooms/unread.js';
 import { savedSpacePaths, spaceNavigationHref } from './space-paths.js';
 import { findOrJoinState } from '#lib/ui/find-or-join-state.svelte.js';
 import { reads as mediaImageReads } from './media-image-reads.test-support.js';
@@ -69,10 +70,10 @@ afterEach(() => {
   setPreference('showSearch', true);
 });
 
-function renderRail(
-  options: ComponentProps<typeof NavigationRail> | { props: ComponentProps<typeof NavigationRail> }
-) {
-  return render(NavigationRail, options, { wrapper: TooltipProvider });
+type RailProps = Omit<ComponentProps<typeof NavigationRail>, 'unreadFor'>;
+
+function renderRail(props: RailProps) {
+  return render(NavigationRail, { unreadFor: roomUnread, ...props }, { wrapper: TooltipProvider });
 }
 const user = userEvent.setup();
 const tab = (name: string) => screen.getByRole('treeitem', { name });
@@ -114,6 +115,7 @@ function space(roomId = '!space:example.org', name = 'Space'): RoomListItemView 
     supports_knock_restricted: true,
     space_children: [],
     bridge: null,
+    media_previews: null,
     unread: 0,
     notifying: 0,
     highlight: 0,
@@ -124,11 +126,9 @@ function space(roomId = '!space:example.org', name = 'Space'): RoomListItemView 
 
 test('badges unread direct chats', async () => {
   renderRail({
-    props: {
-      spaces: [],
-      directUnread: { unread: 3, highlight: 3 },
-      mobile: true,
-    },
+    spaces: [],
+    directUnread: { unread: 3, highlight: 3 },
+    mobile: true,
   });
   await tick();
 
@@ -140,11 +140,9 @@ test('badges unread direct chats', async () => {
 
 test('badges the unspaced section', async () => {
   renderRail({
-    props: {
-      spaces: [],
-      unspacedUnread: { unread: 4, highlight: 2 },
-      mobile: true,
-    },
+    spaces: [],
+    unspacedUnread: { unread: 4, highlight: 2 },
+    mobile: true,
   });
   await tick();
 
@@ -169,12 +167,10 @@ test('home is absent until the preference asks for it', async () => {
 test('home carries no badge, the unspaced section does', async () => {
   setPreference('showHome', true);
   renderRail({
-    props: {
-      spaces: [],
-      homeUnread: { unread: 9, highlight: 5 },
-      unspacedUnread: { unread: 4, highlight: 2 },
-      mobile: true,
-    },
+    spaces: [],
+    homeUnread: { unread: 9, highlight: 5 },
+    unspacedUnread: { unread: 4, highlight: 2 },
+    mobile: true,
   });
   await tick();
 
@@ -226,6 +222,7 @@ test('shows unread direct rooms as individual avatars', async () => {
     supports_knock_restricted: true,
     space_children: [],
     bridge: null,
+    media_previews: null,
     unread: 2,
     notifying: 2,
     highlight: 0,
@@ -246,14 +243,12 @@ test('shows unread direct rooms as individual avatars', async () => {
 
 test('badges a space with its mentions and dots one with only unread messages', async () => {
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      spaceUnread: new Map([
-        ['!a:example.org', { unread: 7, highlight: 3 }],
-        ['!b:example.org', { unread: 4, highlight: 0 }],
-      ]),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    spaceUnread: new Map([
+      ['!a:example.org', { unread: 7, highlight: 3 }],
+      ['!b:example.org', { unread: 4, highlight: 0 }],
+    ]),
+    mobile: true,
   });
   await tick();
 
@@ -268,12 +263,10 @@ test('badges a space with its mentions and dots one with only unread messages', 
 
 test('a space where someone is in voice says so, and one with your call keeps its own mark', async () => {
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      voiceSpaces: new Set(['!a:example.org', '!b:example.org']),
-      callSpaces: new Set(['!b:example.org']),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    voiceSpaces: new Set(['!a:example.org', '!b:example.org']),
+    callSpaces: new Set(['!b:example.org']),
+    mobile: true,
   });
   await tick();
 
@@ -286,11 +279,9 @@ test('a space where someone is in voice says so, and one with your call keeps it
 test('a space badge follows unread changes without re-running its avatar', async () => {
   const alpha = { ...space('!a:example.org', 'Alpha'), avatar_url: 'mxc://example.org/alpha' };
   const { rerender } = renderRail({
-    props: {
-      spaces: [alpha],
-      spaceUnread: new Map([['!a:example.org', { unread: 1, highlight: 0 }]]),
-      mobile: true,
-    },
+    spaces: [alpha],
+    spaceUnread: new Map([['!a:example.org', { unread: 1, highlight: 0 }]]),
+    mobile: true,
   });
   await tick();
   const reads = mediaImageReads.count;
@@ -347,12 +338,10 @@ test('separates the spaces from the tabs above them, only when there are any', a
 test('marks a whole section read from the tab that badges it', async () => {
   const marked: string[] = [];
   renderRail({
-    props: {
-      spaces: [],
-      directUnread: { unread: 2, highlight: 0 },
-      onMarkSectionRead: (section: string) => marked.push(section),
-      mobile: true,
-    },
+    spaces: [],
+    directUnread: { unread: 2, highlight: 0 },
+    onMarkSectionRead: (section: string) => marked.push(section),
+    mobile: true,
   });
   await tick();
 
@@ -365,12 +354,10 @@ test('marks a whole section read from the tab that badges it', async () => {
 test('marks the rooms outside spaces read from their tab', async () => {
   const marked: string[] = [];
   renderRail({
-    props: {
-      spaces: [],
-      unspacedUnread: { unread: 2, highlight: 0 },
-      onMarkSectionRead: (section: string) => marked.push(section),
-      mobile: true,
-    },
+    spaces: [],
+    unspacedUnread: { unread: 2, highlight: 0 },
+    onMarkSectionRead: (section: string) => marked.push(section),
+    mobile: true,
   });
   await tick();
 
@@ -554,11 +541,9 @@ test('records only room routes on mobile', async () => {
 
 test('orders spaces by the stored layout and appends unplaced ones', async () => {
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      layout: [{ kind: 'space', room_id: '!b:example.org' }],
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    layout: [{ kind: 'space', room_id: '!b:example.org' }],
+    mobile: true,
   });
   await tick();
 
@@ -568,22 +553,20 @@ test('orders spaces by the stored layout and appends unplaced ones', async () =>
 test('shows a collapsed folder as one tab, with the names of the spaces inside', async () => {
   const toggled: string[] = [];
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      layout: [
-        {
-          kind: 'folder',
-          id: 'f',
-          name: null,
-          icon: null,
-          content: ['!a:example.org', '!b:example.org'],
-        },
-      ],
-      spaceUnread: new Map([['!b:example.org', { unread: 3, highlight: 0 }]]),
-      openFolders: new Set<string>(),
-      onToggleFolder: (folderId: string) => toggled.push(folderId),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    layout: [
+      {
+        kind: 'folder',
+        id: 'f',
+        name: null,
+        icon: null,
+        content: ['!a:example.org', '!b:example.org'],
+      },
+    ],
+    spaceUnread: new Map([['!b:example.org', { unread: 3, highlight: 0 }]]),
+    openFolders: new Set<string>(),
+    onToggleFolder: (folderId: string) => toggled.push(folderId),
+    mobile: true,
   });
   await tick();
 
@@ -601,21 +584,19 @@ test('shows a collapsed folder as one tab, with the names of the spaces inside',
 test('shows the spaces of an open folder, and a way to shut it', async () => {
   const toggled: string[] = [];
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      layout: [
-        {
-          kind: 'folder',
-          id: 'f',
-          name: 'Work',
-          icon: null,
-          content: ['!a:example.org', '!b:example.org'],
-        },
-      ],
-      openFolders: new Set(['f']),
-      onToggleFolder: (folderId: string) => toggled.push(folderId),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    layout: [
+      {
+        kind: 'folder',
+        id: 'f',
+        name: 'Work',
+        icon: null,
+        content: ['!a:example.org', '!b:example.org'],
+      },
+    ],
+    openFolders: new Set(['f']),
+    onToggleFolder: (folderId: string) => toggled.push(folderId),
+    mobile: true,
   });
   await tick();
 
@@ -632,20 +613,18 @@ test('shows the spaces of an open folder, and a way to shut it', async () => {
 test('marks every space in a folder as read even when no badge is shown', async () => {
   const marked: string[] = [];
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      layout: [
-        {
-          kind: 'folder',
-          id: 'f',
-          name: null,
-          icon: null,
-          content: ['!a:example.org', '!b:example.org'],
-        },
-      ],
-      onMarkFolderRead: (folder: SidebarFolder) => marked.push(...folder.content),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    layout: [
+      {
+        kind: 'folder',
+        id: 'f',
+        name: null,
+        icon: null,
+        content: ['!a:example.org', '!b:example.org'],
+      },
+    ],
+    onMarkFolderRead: (folder: SidebarFolder) => marked.push(...folder.content),
+    mobile: true,
   });
   await tick();
 
@@ -657,20 +636,18 @@ test('marks every space in a folder as read even when no badge is shown', async 
 
 test('a space that left the room list drops out of its folder', async () => {
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha')],
-      layout: [
-        {
-          kind: 'folder',
-          id: 'f',
-          name: null,
-          icon: null,
-          content: ['!a:example.org', '!gone:example.org'],
-        },
-      ],
-      openFolders: new Set(['f']),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha')],
+    layout: [
+      {
+        kind: 'folder',
+        id: 'f',
+        name: null,
+        icon: null,
+        content: ['!a:example.org', '!gone:example.org'],
+      },
+    ],
+    openFolders: new Set(['f']),
+    mobile: true,
   });
   await tick();
 
@@ -680,13 +657,11 @@ test('a space that left the room list drops out of its folder', async () => {
 test('offers a way out of a folder holding a single space', async () => {
   const removed: [string, string][] = [];
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha')],
-      layout: [{ kind: 'folder', id: 'f', name: null, icon: null, content: ['!a:example.org'] }],
-      openFolders: new Set(['f']),
-      onRemoveFromFolder: (roomId: string, folderId: string) => removed.push([roomId, folderId]),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha')],
+    layout: [{ kind: 'folder', id: 'f', name: null, icon: null, content: ['!a:example.org'] }],
+    openFolders: new Set(['f']),
+    onRemoveFromFolder: (roomId: string, folderId: string) => removed.push([roomId, folderId]),
+    mobile: true,
   });
   await tick();
 
@@ -705,14 +680,12 @@ test('the mobile rail does not arm dragging', async () => {
 
 test('a folder whose spaces are all unresolved renders nothing', async () => {
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha')],
-      layout: [
-        { kind: 'folder', id: 'f', name: null, icon: null, content: ['!gone:example.org'] },
-        { kind: 'space', room_id: '!a:example.org' },
-      ],
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha')],
+    layout: [
+      { kind: 'folder', id: 'f', name: null, icon: null, content: ['!gone:example.org'] },
+      { kind: 'space', room_id: '!a:example.org' },
+    ],
+    mobile: true,
   });
   await tick();
 
@@ -735,11 +708,9 @@ test.each([
 ])('%s offers unpinning from its options menu only when pinned', async (_, pinned) => {
   const onUnpin = vi.fn();
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha')],
-      pinnedSpaceIds: new Set(pinned ? ['!a:example.org'] : []),
-      onUnpin,
-    },
+    spaces: [space('!a:example.org', 'Alpha')],
+    pinnedSpaceIds: new Set(pinned ? ['!a:example.org'] : []),
+    onUnpin,
   });
   await tick();
 
@@ -916,11 +887,9 @@ test('offers find or join from the add button', async () => {
 
 test('the rail is a navigation landmark holding one tree with a single tab stop', async () => {
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      layout: [],
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    layout: [],
+    mobile: true,
   });
   await tick();
 
@@ -935,21 +904,19 @@ test('the rail is a navigation landmark holding one tree with a single tab stop'
 test('arrows walk the rail and an open folder nests its spaces one level down', async () => {
   const toggled: string[] = [];
   renderRail({
-    props: {
-      spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
-      layout: [
-        {
-          kind: 'folder',
-          id: 'f',
-          name: 'Work',
-          icon: null,
-          content: ['!a:example.org', '!b:example.org'],
-        },
-      ],
-      openFolders: new Set(['f']),
-      onToggleFolder: (folderId: string) => toggled.push(folderId),
-      mobile: true,
-    },
+    spaces: [space('!a:example.org', 'Alpha'), space('!b:example.org', 'Beta')],
+    layout: [
+      {
+        kind: 'folder',
+        id: 'f',
+        name: 'Work',
+        icon: null,
+        content: ['!a:example.org', '!b:example.org'],
+      },
+    ],
+    openFolders: new Set(['f']),
+    onToggleFolder: (folderId: string) => toggled.push(folderId),
+    mobile: true,
   });
   await tick();
 
@@ -975,6 +942,7 @@ test('a space marked as bridged carries the network of its rooms', async () => {
         order: null,
         origin_server_ts: 0,
         suggested: false,
+        private: false,
       },
     ],
   };
@@ -987,7 +955,7 @@ test('a space marked as bridged carries the network of its rooms', async () => {
   onTestFinished(() => {
     setBridgedSpace('!a:example.org', false);
   });
-  renderRail({ props: { spaces: [bridged, space('!b:example.org', 'Beta')] } });
+  renderRail({ spaces: [bridged, space('!b:example.org', 'Beta')] });
   await tick();
 
   expect(within(tab('Alpha')).getByRole('img', { name: 'nav.bridgedFrom:Discord' })).toBeVisible();

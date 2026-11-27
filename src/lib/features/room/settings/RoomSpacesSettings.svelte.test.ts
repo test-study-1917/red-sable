@@ -7,6 +7,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import type { RoomListItemView, RoomPowerLevelsView } from '#src/generated/protocol';
 
 const goto = vi.hoisted(() => vi.fn());
+const listed = vi.hoisted(() => ({ rooms: [] as RoomListItemView[] }));
 
 vi.mock('$app/navigation', () => ({ goto }));
 vi.mock('#lib/core/context.js');
@@ -14,13 +15,16 @@ vi.mock('#lib/i18n.js', () => import('#lib/test-support/i18n.js'));
 vi.mock('#lib/rooms/room-list.svelte.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/rooms/room-list.svelte.js')>()),
   useRoomList: () => ({
-    rooms: [],
+    get rooms() {
+      return listed.rooms;
+    },
     byId: (id: string) => (id === '!joined:home.example' ? { room_id: id } : undefined),
     labelFor: (id: string) => id,
   }),
 }));
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
+import { spaceChild } from '#lib/test-support/room-views.js';
 
 import RoomSpacesSettings from './RoomSpacesSettings.svelte';
 
@@ -60,6 +64,7 @@ const levels: RoomPowerLevelsView = {
 
 afterEach(() => {
   vi.clearAllMocks();
+  listed.rooms = [];
 });
 
 test('a joined parent space opens', async () => {
@@ -116,4 +121,21 @@ test('without the power to change parents there is no way to pick the canonical 
   await screen.findByText('room.spaceCanonical');
 
   expect(screen.queryByRole('button', { name: 'room.spaceMakeCanonical' })).toBeNull();
+});
+
+test('a space that delisted the room is not offered as a parent, a private filing is', async () => {
+  const space = (roomId: string, child: { via: string[]; private: boolean }) =>
+    ({
+      room_id: roomId,
+      room_kind: 'space',
+      space_children: [spaceChild({ ...child, room_id: room.room_id })],
+    }) as unknown as RoomListItemView;
+  listed.rooms = [
+    space('!delisted:home.example', { via: [], private: false }),
+    space('!private:home.example', { via: [], private: true }),
+  ];
+  render(RoomSpacesSettings, { room, levels, ownPowerLevel: 0 });
+
+  expect(await screen.findByText('!private:home.example')).toBeInTheDocument();
+  expect(screen.queryByText('!delisted:home.example')).toBeNull();
 });

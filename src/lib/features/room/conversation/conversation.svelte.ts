@@ -49,7 +49,10 @@ import {
 } from '#lib/gif/providers.js';
 import { replyPreviewBody, type ReplyVersion } from '#lib/features/room/messages/reply-preview.js';
 import { isMediaCaptionContent } from '#lib/features/room/messages/media-caption.js';
-import { previewableLinks, previewWhitelistEntry } from '#lib/features/room/media/link-preview.js';
+import {
+  outgoingPreviewableLinks,
+  previewWhitelistEntry,
+} from '#lib/features/room/media/link-preview.js';
 import {
   previewSources,
   resolveUrlPreview,
@@ -62,9 +65,11 @@ import type { RoomTimeline } from '#lib/rooms/timeline.svelte.js';
 import { stateEventText } from '#lib/features/room/timeline/state-event-text.js';
 import { isMessageRow } from '#lib/features/room/timeline/timeline-format.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
+import { TimeoutError, withTimeout } from '#lib/timeout.js';
 import { toasts } from '#lib/ui/toasts.svelte.js';
 
 const NO_MENTIONS: OutgoingMentions = { user_ids: [], room: false };
+const SEND_PREVIEW_WAIT_MS = 1_500;
 
 export type ConversationSendResult = { kind: 'gifSearch'; query: string };
 
@@ -80,6 +85,8 @@ export type ConversationDeps = {
   afterSend?: (roomId: string) => void;
   threadRoot?: string | null;
   canRedactOwn?: () => boolean;
+  /** Messages shown from outside the timeline, such as forum posts older than what it has loaded. */
+  findItem?: (eventId: string) => TimelineItemView | undefined;
 };
 
 function failed(action: string): (error: unknown) => void {
@@ -87,6 +94,8 @@ function failed(action: string): (error: unknown) => void {
     console.warn(`[sable room] ${action} failed`, error);
   };
 }
+
+const ENCRYPTION_PREPARATION_INTERVAL_MS = 60_000;
 
 export class Conversation {
   #context = $state<ComposerContext | null>(null);
@@ -104,6 +113,7 @@ export class Conversation {
   readonly #publicRoom: () => boolean;
   readonly #threadRoot: string | null;
   readonly #canRedactOwn: () => boolean;
+  readonly #findItem: (eventId: string) => TimelineItemView | undefined;
   readonly #beforeSend: () => Promise<void>;
   readonly #afterSend: (roomId: string) => void;
   /* eslint-disable-next-line svelte/prefer-svelte-reactivity */
@@ -121,6 +131,7 @@ export class Conversation {
     afterSend = () => {},
     threadRoot = null,
     canRedactOwn = () => true,
+    findItem = () => undefined,
   }: ConversationDeps) {
     this.#core = core;
     this.#personas = personas;
@@ -131,6 +142,7 @@ export class Conversation {
     this.#publicRoom = publicRoom ?? (() => false);
     this.#threadRoot = threadRoot;
     this.#canRedactOwn = canRedactOwn;
+    this.#findItem = findItem;
     this.#beforeSend = beforeSend;
     this.#afterSend = afterSend;
     this.restored = readReply(this.#replyKey(), this.#accountId()) ?? null;
@@ -164,22 +176,40 @@ export class Conversation {
     return this.#threadRoot;
   }
 
+  readonly loadLinkPreview = async (url: string): Promise<UrlPreviewView | null> => {
+    const preview = await resolveUrlPreview(
+      this.#core.rpc.messages,
+      url,
+      previewSources(this.#encrypted()),
+      usesTunnel(this.#encrypted(), this.#publicRoom())
+    );
+    if (preview !== null) {
+      void this.#core.rpc.messages
+        .preparePreviewImages({ room_id: this.#roomId(), previews: [preview] })
+        .catch((error: unknown) => {
+          console.debug('[sable composer] preview images not prepared', error);
+        });
+    }
+    return preview;
+  };
+
   async #bundledLinkPreviews(
     html: string | null,
     body: string,
     dismissed: readonly string[]
   ): Promise<{ previews: UrlPreviewView[]; suppressed: boolean }> {
-    const sources = previewSources(this.#encrypted());
-    const tunnel = usesTunnel(this.#encrypted(), this.#publicRoom());
-    if (!html) return { previews: [], suppressed: false };
-    const links = previewableLinks(html, body).filter((url) => body.includes(url));
+    const links = outgoingPreviewableLinks(html, body).filter((url) => body.includes(url));
     const wanted = links.filter((url) => !dismissed.includes(url));
     const previews = await Promise.all(
-      wanted.map(
-        async (url) =>
-          (await resolveUrlPreview(this.#core.rpc.messages, url, sources, tunnel)) ??
-          previewWhitelistEntry(url)
-      )
+      wanted.map(async (url) => {
+        const preview = await withTimeout(this.loadLinkPreview(url), SEND_PREVIEW_WAIT_MS).catch(
+          (error: unknown) => {
+            if (error instanceof TimeoutError) return null;
+            throw error;
+          }
+        );
+        return preview ?? previewWhitelistEntry(url);
+      })
     );
     return {
       previews,
@@ -203,12 +233,7 @@ export class Conversation {
     if (body === '' && !(pending?.kind === 'edit' && pending.mediaCaption)) return;
 
     if (pending?.kind === 'edit') {
-      const edited = this.#timeline.items.find(
-        (entry) =>
-          entry.id === pending.timelineItemId ||
-          entry.event_id === pending.eventId ||
-          entry.transaction_id === pending.eventId
-      );
+      const edited = this.#editTarget(pending.eventId, pending.timelineItemId);
       const unchanged =
         body === pending.body &&
         (formatted === null || formatted === pending.html) &&
@@ -561,9 +586,24 @@ export class Conversation {
   };
 
   readonly setTyping = async (targetRoomId: string, typing: boolean): Promise<void> => {
-    if (!preferences.sendTypingNotifications || !targetRoomId.startsWith('!')) return;
+    if (!targetRoomId.startsWith('!')) return;
+    if (typing) this.#prepareToEncrypt(targetRoomId);
+    if (!preferences.sendTypingNotifications) return;
     await this.#core.rpc.messages.setTyping({ room_id: targetRoomId, typing });
   };
+
+  /* eslint-disable-next-line svelte/prefer-svelte-reactivity */
+  readonly #preparedAt = new Map<string, number>();
+
+  #prepareToEncrypt(roomId: string): void {
+    const now = Date.now();
+    if (now - (this.#preparedAt.get(roomId) ?? -Infinity) < ENCRYPTION_PREPARATION_INTERVAL_MS)
+      return;
+    this.#preparedAt.set(roomId, now);
+    this.#core.rpc.messages.prepareToEncrypt({ room_id: roomId }).catch((error: unknown) => {
+      console.debug('[sable composer] preparing encryption failed', error);
+    });
+  }
 
   readonly retrySend = (transactionId: string): void => {
     void this.#core.rpc.messages
@@ -590,8 +630,15 @@ export class Conversation {
     key: string,
     sourcePack: ImageSourcePackView | null = null
   ): void => {
-    void this.#toggleReaction(eventId, key, sourcePack).catch(failed('reaction'));
+    void this.react(eventId, key, sourcePack).catch(failed('reaction'));
   };
+
+  /** Like `toggleReaction`, for a caller that reports the failure or acts once it is sent. */
+  readonly react = (
+    eventId: string,
+    key: string,
+    sourcePack: ImageSourcePackView | null = null
+  ): Promise<void> => this.#toggleReaction(eventId, key, sourcePack);
 
   readonly quickReact = async (
     targetRoomId: string,
@@ -715,9 +762,7 @@ export class Conversation {
     html: string | null = null,
     mediaCaption = false
   ): void => {
-    const item = this.#timeline.items.find(
-      (entry) => entry.event_id === eventId || entry.transaction_id === eventId
-    );
+    const item = this.#editTarget(eventId);
     this.forumTitle = item?.forum_title ?? '';
     this.context = {
       kind: 'edit',
@@ -729,6 +774,17 @@ export class Conversation {
       persona: item?.per_message_profile ?? null,
     };
   };
+
+  #editTarget(eventId: string, timelineItemId?: string): TimelineItemView | undefined {
+    return (
+      this.#timeline.items.find(
+        (entry) =>
+          entry.id === timelineItemId ||
+          entry.event_id === eventId ||
+          entry.transaction_id === eventId
+      ) ?? this.#findItem(eventId)
+    );
+  }
 
   #editTimelineItem(item: TimelineItemView, itemId: string): boolean {
     if (item.content.kind === 'message') {
@@ -849,11 +905,19 @@ export class Conversation {
       if (!reply || reply.body !== null || reply.fallback !== null) continue;
 
       const eventId = item.event_id;
-      if (eventId === null || this.#requestedDetails.has(eventId)) continue;
+      if (eventId === null) continue;
+      // Each timeline fills in its own rows, so a message shown again elsewhere asks again.
+      const request = `${this.#timeline.subscriptionId ?? ''}:${eventId}`;
+      if (this.#requestedDetails.has(request)) continue;
 
-      this.#requestedDetails.add(eventId);
+      this.#requestedDetails.add(request);
       void this.#core.rpc.timeline
-        .fetchEventDetails({ room_id: roomId, event_id: eventId, thread_root: this.#threadRoot })
+        .fetchEventDetails({
+          room_id: roomId,
+          event_id: eventId,
+          thread_root: this.#threadRoot,
+          subscription: this.#timeline.subscriptionId,
+        })
         .catch((error: unknown) => {
           console.debug('[sable room] reply details unavailable', error);
         });

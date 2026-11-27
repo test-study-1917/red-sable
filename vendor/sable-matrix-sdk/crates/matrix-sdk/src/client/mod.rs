@@ -109,7 +109,6 @@ use self::{
 };
 #[cfg(feature = "unstable-msc4536")]
 use crate::client::global_profiles::GlobalProfileFetcher;
-
 use crate::{
     Account, AuthApi, AuthSession, Error, HttpError, Media, Pusher, RefreshTokenError, Result,
     Room, SessionTokens, TransmissionProgress,
@@ -260,6 +259,12 @@ pub(crate) struct ClientLocks {
     /// Look at the [`Account::mark_as_dm()`] method for a more detailed
     /// explanation.
     pub(crate) mark_as_dm_lock: Mutex<()>,
+
+    /// Lock ensuring that only a single image pack may be enabled or disabled
+    /// globally at once. Look at the
+    /// [`Account::set_image_pack_enabled_globally()`] method for a more
+    /// detailed explanation.
+    pub(crate) image_pack_rooms_lock: Mutex<()>,
 
     /// Lock ensuring that only a single secret store is getting opened at the
     /// same time.
@@ -700,9 +705,12 @@ impl Client {
         &self.inner.base_client
     }
 
-    /// The underlying HTTP client.
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.inner.http_client.inner
+    /// The [`HttpClient`] used by this client, with its [`RequestConfig`]
+    /// retry and concurrency limits.
+    ///
+    /// Use [`HttpClient::raw()`] to get the underlying [`reqwest::Client`].
+    pub fn http_client(&self) -> &HttpClient {
+        &self.inner.http_client
     }
 
     pub(crate) fn locks(&self) -> &ClientLocks {
@@ -1793,14 +1801,16 @@ impl Client {
         RoomPreview::from_remote_room(self, room_id, room_or_alias_id, via).await
     }
 
-    /// Get a room's stripped state events, either from a remote server or from the client's
-    /// local state store.
+    /// Get a room's stripped state events, either from a remote server or from
+    /// the client's local state store.
     ///
-    /// Only event types listed in [`ruma::events::ALLOWED_STRIPPED_STATE_EVENTS`] should be supplied
-    /// to this function. The SDK does not check the provided event types against this list, to allow
-    /// future expansion and vendor-specific server configuration, but if you provide events that aren't
-    /// whitelisted you risk sporadic errors when the SDK has to contact the homeserver instead of using its
-    /// event cache.
+    /// Only event types listed in
+    /// [`ruma::events::ALLOWED_STRIPPED_STATE_EVENTS`] should be supplied
+    /// to this function. The SDK does not check the provided event types
+    /// against this list, to allow future expansion and vendor-specific
+    /// server configuration, but if you provide events that aren't
+    /// whitelisted you risk sporadic errors when the SDK has to contact the
+    /// homeserver instead of using its event cache.
     #[cfg(feature = "unstable-msc4560")]
     pub async fn get_room_stripped_state(
         &self,
@@ -1820,8 +1830,9 @@ impl Client {
             && matches!(room.state(), RoomState::Joined | RoomState::Banned)
         {
             // We can build the state locally without asking the homeserver.
-            // This isn't possible for left rooms because we aren't in them, and we only have
-            // limited state for knocked and invited rooms.
+            // This isn't possible for left rooms because we aren't in them, and
+            // we only have limited state for knocked and invited
+            // rooms.
 
             let mut state = vec![];
 
@@ -1846,10 +1857,12 @@ impl Client {
             });
         }
 
-        let response = self.send(assign!(
-            get_stripped_state::msc4560::Request::new(room_id.clone().into(), via),
-            { state: event_types, num_joined_members }
-        )).await?;
+        let response = self
+            .send(assign!(
+                get_stripped_state::msc4560::Request::new(room_id.clone().into(), via),
+                { state: event_types, num_joined_members }
+            ))
+            .await?;
 
         Ok(RoomStrippedState {
             room_id,
@@ -3292,7 +3305,6 @@ impl Client {
 
     /// Obtain a token to authenticate with a LiveKit SFU, by calling the
     /// homeserver's `/rtc/livekit/get_token` endpoint
-    /// ([MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195)).
     ///
     /// # Arguments
     ///
@@ -3323,7 +3335,7 @@ impl Client {
 
     /// Hand the delayed leave event of a MatrixRTC session over to the
     /// homeserver, by calling its `/rtc/livekit/delegate_delayed_leave`
-    /// endpoint ([MSC4195](https://github.com/matrix-org/matrix-spec-proposals/pull/4195)).
+    /// endpoint.
     ///
     /// The homeserver then takes care of keeping the delayed event alive
     /// while the user is connected to the LiveKit SFU, and lets it be sent
@@ -3338,6 +3350,9 @@ impl Client {
     /// * `member_id` - The `member.id` property of the `m.rtc.member` event.
     /// * `delay_id` - The ID of the delayed `m.rtc.member` leave event to
     ///   delegate.
+    ///
+    /// The stable endpoint is used if the homeserver advertises the
+    /// `org.matrix.msc4195.stable` feature, the unstable one otherwise.
     ///
     /// Homeservers that don't implement the endpoint respond with an
     /// `M_UNRECOGNIZED` error, which is returned as-is.
@@ -3431,8 +3446,8 @@ impl Client {
         delay_id: String,
         action: update_delayed_event::UpdateAction,
         request_config: Option<RequestConfig>,
-    ) -> Result<update_delayed_event::msc4140_v2::Response> {
-        let request = update_delayed_event::msc4140_v2::Request::new(delay_id, action);
+    ) -> Result<update_delayed_event::v1::Response> {
+        let request = update_delayed_event::v1::Request::new(delay_id, action);
 
         // Ruma declares this endpoint as not requiring authentication, but the
         // homeserver only lets the owner of the delayed event update it, so the
@@ -3472,7 +3487,8 @@ impl Client {
     /// Fetch the server's message retention policy configuration.
     ///
     /// Returns the server-level retention policy limits and any per-room
-    /// overrides defined by the server.
+    /// overrides defined by the server, or `None` if the homeserver doesn't
+    /// implement the endpoint.
     ///
     /// This always makes a request to the homeserver. On success, the
     /// response is stored in the client's cache and persisted in the state
@@ -3485,8 +3501,13 @@ impl Client {
     /// for more info.
     pub async fn fetch_retention_configuration(
         &self,
-    ) -> HttpResult<get_retention_configuration::msc1763::Response> {
-        let response = self.send(get_retention_configuration::msc1763::Request::default()).await?;
+    ) -> HttpResult<Option<get_retention_configuration::msc1763::Response>> {
+        let response =
+            match self.send(get_retention_configuration::msc1763::Request::default()).await {
+                Ok(response) => response,
+                Err(error) if error.is_endpoint_not_implemented() => return Ok(None),
+                Err(error) => return Err(error),
+            };
         let value = TtlValue::new(response.clone());
 
         if let Err(error) = self
@@ -3502,7 +3523,7 @@ impl Client {
 
         self.inner.caches.retention_configuration.set(Some(value));
 
-        Ok(response)
+        Ok(Some(response))
     }
 
     /// Get the server's message retention policy configuration, from the cache
@@ -3513,32 +3534,31 @@ impl Client {
     /// that request fails (e.g. because there is no connectivity) and a stale
     /// value is cached, the stale value is returned instead. The only
     /// exception is when the homeserver doesn't implement the endpoint, in
-    /// which case the error is always returned.
+    /// which case `None` is always returned.
     ///
     /// See
     /// [MSC1763](https://github.com/matrix-org/matrix-spec-proposals/pull/1763)
     /// for more info.
     pub async fn retention_configuration(
         &self,
-    ) -> HttpResult<get_retention_configuration::msc1763::Response> {
+    ) -> HttpResult<Option<get_retention_configuration::msc1763::Response>> {
         let cached = self.inner.caches.retention_configuration.get();
 
         if let Some(cached) = &cached
             && !cached.has_expired_after(RETENTION_CONFIGURATION_TTL)
         {
-            return Ok(cached.data().clone());
+            return Ok(Some(cached.data().clone()));
         }
 
         match self.fetch_retention_configuration().await {
             Ok(response) => Ok(response),
-            Err(error) if error.is_endpoint_not_implemented() => Err(error),
             Err(error) => match cached {
                 Some(cached) => {
                     warn!(
                         "failed to refresh the retention configuration, using the stale cached \
                          value: {error}"
                     );
-                    Ok(cached.into_data())
+                    Ok(Some(cached.into_data()))
                 }
                 None => Err(error),
             },
@@ -4469,13 +4489,16 @@ impl Client {
         info!("Client::resume — re-acquiring database resources");
 
         // Reopen stores (creates new connection pools).
-        self.base_client().reopen_stores().await?;
-
-        self.base_client().resume_locks().await;
-        #[cfg(feature = "e2e-encryption")]
-        if let Some(lock) = self.locks().cross_process_crypto_store_lock.get() {
-            lock.resume().await;
+        if let Err(err) = self.base_client().reopen_stores().await {
+            // Don't leave the lock acquisitions waiting for a resume that
+            // failed: they will reach the stores, and fail. Calling
+            // `resume` again reopens the stores and takes the locks
+            // back.
+            self.resume_locks().await;
+            return Err(err.into());
         }
+
+        self.resume_locks().await;
 
         self.inner.paused.send_replace(false);
 
@@ -4484,6 +4507,16 @@ impl Client {
 
         info!("Client::resume — complete");
         Ok(())
+    }
+
+    /// Let the cross-process locks be acquired again, see
+    /// [`Client::pause()`].
+    async fn resume_locks(&self) {
+        self.base_client().resume_locks().await;
+        #[cfg(feature = "e2e-encryption")]
+        if let Some(lock) = self.locks().cross_process_crypto_store_lock.get() {
+            lock.resume().await;
+        }
     }
 
     /// Wait until the client is not paused, see [`Client::pause()`].
@@ -5160,6 +5193,68 @@ pub(crate) mod tests {
         let unstable_features = client.unstable_features().await.unwrap();
         assert!(unstable_features.contains(&FeatureFlag::from("org.matrix.e2e_cross_signing")));
         assert!(!unstable_features.contains(&FeatureFlag::from("you.shall.pass")));
+    }
+
+    #[async_test]
+    async fn test_rtc_livekit_endpoints_path_selection() {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        for (stable, prefix) in
+            [(false, "/_matrix/client/unstable/io.element.msc4195"), (true, "/_matrix/client/v1")]
+        {
+            let server = MatrixMockServer::new().await;
+            let client = server.client_builder().no_server_versions().build().await;
+
+            server
+                .mock_versions()
+                .with_feature("org.matrix.msc4195.stable", stable)
+                .ok()
+                .mock_once()
+                .mount()
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path(format!("{prefix}/rtc/livekit/get_token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": "the-jwt" })))
+                .expect(1)
+                .mount(server.server())
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path(format!("{prefix}/rtc/livekit/delegate_delayed_leave")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .expect(1)
+                .mount(server.server())
+                .await;
+
+            let room_id = ruma::owned_room_id!("!1:example.org");
+
+            let response = client
+                .rtc_livekit_get_token(
+                    "wss://livekit.example.org".to_owned(),
+                    room_id.clone(),
+                    "m.call".to_owned(),
+                    "member-id".to_owned(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.jwt, "the-jwt");
+
+            client
+                .rtc_livekit_delegate_delayed_leave(
+                    "wss://livekit.example.org".to_owned(),
+                    room_id,
+                    "m.call".to_owned(),
+                    "member-id".to_owned(),
+                    "delay-id".to_owned(),
+                )
+                .await
+                .unwrap();
+        }
     }
 
     #[async_test]
@@ -6928,7 +7023,7 @@ pub(crate) mod tests {
 
         let response = client.fetch_retention_configuration().await;
         assert!(response.is_ok());
-        let response = response.unwrap();
+        let response = response.unwrap().unwrap();
         assert!(response.policies.is_empty());
         assert!(response.limits.max_lifetime.is_none());
         assert!(response.limits.min_lifetime.is_none());
@@ -7007,7 +7102,7 @@ pub(crate) mod tests {
             .expect("the retention configuration should have been loaded from the store");
         assert_eq!(cached.data().policies.len(), 1);
 
-        let config = client.retention_configuration().await.unwrap();
+        let config = client.retention_configuration().await.unwrap().unwrap();
         assert_eq!(config.policies.len(), 1);
     }
 
@@ -7053,11 +7148,12 @@ pub(crate) mod tests {
                 .mount_as_scoped()
                 .await;
 
-            let config = client.retention_configuration().await.unwrap();
+            let config = client.retention_configuration().await.unwrap().unwrap();
             assert_eq!(config.policies.len(), 1);
         }
 
-        // The homeserver doesn't implement the endpoint: the error is returned.
+        // The homeserver doesn't implement the endpoint: `None` is returned,
+        // even though a stale value is cached.
         {
             let _guard = server
                 .mock_get_retention_configuration()
@@ -7066,8 +7162,8 @@ pub(crate) mod tests {
                 .mount_as_scoped()
                 .await;
 
-            let error = client.retention_configuration().await.unwrap_err();
-            assert!(error.is_endpoint_not_implemented());
+            let config = client.retention_configuration().await.unwrap();
+            assert!(config.is_none());
         }
     }
 

@@ -23,6 +23,9 @@
   import InboxFeedRow from './InboxFeedRow.svelte';
   import NotificationReason from './NotificationReason.svelte';
   import MessagePreview from '#lib/features/room/messages/MessagePreview.svelte';
+  import PreviewSegments from '#lib/features/room/messages/PreviewSegments.svelte';
+  import { previewSegments } from '#lib/features/room/messages/reply-preview.js';
+  import { mediaPreviewSettings } from '#lib/settings/media-previews.svelte.js';
   import MentionProfile from '#lib/features/room/members/MentionProfile.svelte';
   import { MemberProfile } from '#lib/features/room/members/member-profile.svelte.js';
   import type { MatrixLink } from '#lib/rooms/matrix-link.js';
@@ -345,8 +348,18 @@
                   <p class="preview">
                     <!-- eslint-disable-next-line no-restricted-properties -- no profile here -->
                     <strong>{item.sender_name ?? senderName(item.sender)}</strong>
-                    {item.body ??
-                      i18n.t(item.encrypted ? 'inbox.encryptedMessage' : 'inbox.noPreview')}
+                    {#if item.body !== null}
+                      <PreviewSegments
+                        segments={previewSegments(
+                          item.body,
+                          mediaPreviewSettings.shownIn(roomList.byId(group.roomId))
+                            ? item.emotes
+                            : []
+                        )}
+                      />
+                    {:else}
+                      {i18n.t(item.encrypted ? 'inbox.encryptedMessage' : 'inbox.noPreview')}
+                    {/if}
                   </p>
                 {/snippet}
               </MessagePreview>

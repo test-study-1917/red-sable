@@ -22,7 +22,9 @@ use wiremock::{
 
 use crate::{
     Core, notifications,
-    protocol::{CoreEvent, NotificationView},
+    protocol::{
+        CoreEvent, NotificationView, OverrideColorView, OverrideTextView, ProfileOverrideView,
+    },
     session::Session,
     store::MemorySessionStore,
 };
@@ -43,15 +45,19 @@ async fn watching(
     client: &Client,
 ) -> (Arc<Core>, UnboundedReceiver<CoreEvent>) {
     let (core, events) = Core::new("notifications", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "notifications".to_owned(),
-        client: client.clone(),
-        sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
-    core.watch_notifications(client, core.lifecycle.current())
-        .await;
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "notifications".to_owned(),
+            client: client.clone(),
+            sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let session = core.signed_in().unwrap();
+    session.watch_notifications(core.lifecycle.current()).await;
     (core, events)
 }
 async fn next_notification(events: &mut UnboundedReceiver<CoreEvent>) -> NotificationView {
@@ -71,6 +77,7 @@ async fn stripped_invite_notifies_without_an_invented_event_id() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     for room_id in [
         room_id!("!invite:example.org"),
         room_id!("!invite-again:example.org"),
@@ -98,11 +105,10 @@ async fn stripped_invite_notifies_without_an_invented_event_id() {
         assert_eq!(view.sender_name.as_deref(), Some("Alice"));
         assert_eq!(view.body, "invited you");
         assert!(view.is_direct);
-        core.session_tasks.lock().clear();
-        core.watch_notifications(&client, core.lifecycle.current())
-            .await;
+        session.state().session_tasks.lock().clear();
+        session.watch_notifications(core.lifecycle.current()).await;
     }
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -124,6 +130,7 @@ async fn a_replayed_invite_alerts_once() {
         })
         .await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     let fresh = room_id!("!fresh:example.org");
     for _ in 0..2 {
         server
@@ -143,7 +150,7 @@ async fn a_replayed_invite_alerts_once() {
         .await;
     assert_eq!(next_notification(&mut events).await.room_id, fresh);
     assert_eq!(next_notification(&mut events).await.room_id, after);
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -162,6 +169,7 @@ async fn a_replayed_message_alerts_once() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     let mut rules = Ruleset::server_default(client.user_id().unwrap());
     rules
         .insert(
@@ -231,7 +239,7 @@ async fn a_replayed_message_alerts_once() {
         Some("$two".to_owned()),
         "the replayed event must not alert a second time"
     );
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -250,6 +258,7 @@ async fn a_message_delivered_late_by_a_resumed_sync_does_not_alert() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     let rules = Ruleset::server_default(client.user_id().unwrap());
     let long_ago = MilliSecondsSinceUnixEpoch::from_system_time(
         std::time::SystemTime::now() - Duration::from_secs(600),
@@ -305,7 +314,7 @@ async fn a_message_delivered_late_by_a_resumed_sync_does_not_alert() {
         Some("$live".to_owned()),
         "a message from before the gap is a catch-up, not an arrival"
     );
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -367,6 +376,7 @@ async fn an_existing_bridge_status_rule_is_respected() {
         })
         .await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
 
     for (event_id, event_type, content, unread) in [
         (
@@ -427,7 +437,7 @@ async fn an_existing_bridge_status_rule_is_respected() {
         notification.event_id.as_deref(),
         Some(event_id!("$message"))
     );
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -446,6 +456,7 @@ async fn a_message_alerts_when_the_server_reports_no_counts() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     let mut rules = Ruleset::server_default(client.user_id().unwrap());
     rules
         .insert(
@@ -495,7 +506,70 @@ async fn a_message_alerts_when_the_server_reports_no_counts() {
             .map(|event_id| event_id.to_string()),
         Some("$fresh".to_owned())
     );
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
+}
+
+#[tokio::test]
+async fn a_message_notification_lists_its_custom_emotes() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!emotes:example.org");
+    server.mock_room_state_encryption().plain().mount().await;
+    let factory = EventFactory::new().room(room_id).sender(User::Alice);
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_state_event(factory.member(client.user_id().unwrap()))
+                .add_state_event(factory.power_levels()),
+        )
+        .await;
+    let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
+    let message = json!({
+        "type": "m.room.message", "event_id": "$emote", "room_id": room_id,
+        "sender": User::Alice, "origin_server_ts": MilliSecondsSinceUnixEpoch::now(),
+        "content": {
+            "msgtype": "m.text", "body": "hi :blob:",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\">"
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path_regex(r"/context/.*emote$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "event": message, "events_before": [], "events_after": [],
+            "state": [], "start": "s", "end": "e"
+        })))
+        .mount(server.server())
+        .await;
+    server
+        .mock_sync()
+        .ok_and_run(&client, |builder| {
+            builder.add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .set_unread_notifications_count(
+                        json!({"notification_count": 1, "highlight_count": 0}),
+                    )
+                    .add_timeline_event(
+                        ruma::serde::Raw::new(&message)
+                            .unwrap()
+                            .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
+                    ),
+            );
+        })
+        .await;
+
+    let view = next_notification(&mut events).await;
+    assert_eq!(view.body, "hi :blob:");
+    assert_eq!(
+        view.emotes,
+        [crate::protocol::PreviewEmote {
+            alt: ":blob:".to_owned(),
+            source: "mxc://example.org/blob".to_owned(),
+        }]
+    );
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -519,6 +593,7 @@ async fn sticker_notifications_do_not_block_sync_or_reappear_after_reading() {
             )
             .await;
         let (core, mut events) = watching(&server, &client).await;
+        let session = core.signed_in().unwrap();
         let mut rules = Ruleset::server_default(client.user_id().unwrap());
         rules
             .insert(
@@ -607,7 +682,7 @@ async fn sticker_notifications_do_not_block_sync_or_reappear_after_reading() {
             );
             assert_eq!(view.body, "sent a sticker");
         }
-        core.session_tasks.lock().clear();
+        session.state().session_tasks.lock().clear();
     }
 }
 
@@ -639,10 +714,7 @@ async fn an_encrypted_room_defaults_to_the_rule_its_decrypted_messages_hit() {
     let room = client.get_room(room_id).unwrap();
     assert!(room.encryption_state().is_encrypted());
 
-    let rules = crate::push_rules::PushRules::load(&client)
-        .await
-        .snapshot()
-        .await;
+    let rules = crate::push_rules::PushRules::load(&client).await.snapshot();
     let direct = notifications::uses_direct_push_rules(&rules, &room);
     let result = crate::push_rules::room_settings(&rules, room_id, direct);
 
@@ -675,13 +747,13 @@ async fn a_second_room_mode_change_before_the_sync_echo_still_lands() {
         .await
         .unwrap();
     assert_eq!(
-        room_mode(&rules.snapshot().await, room_id),
+        room_mode(&rules.snapshot(), room_id),
         Some(NotificationModeView::Mute)
     );
 
     rules.apply(plan_room_mode(room_id, None)).await.unwrap();
 
-    assert_eq!(room_mode(&rules.snapshot().await, room_id), None);
+    assert_eq!(room_mode(&rules.snapshot(), room_id), None);
     let deleted_override = server
         .server()
         .received_requests()
@@ -724,6 +796,7 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let (core, _) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     Mock::given(method("GET"))
         .and(path_regex(
             r"/account_data/moe\.sable\.dm_notification_default$",
@@ -765,7 +838,7 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
         .expect(1)
         .mount_as_scoped(server.server())
         .await;
-    assert!(!core.cleanup_notification_rules().await);
+    assert!(!session.cleanup_notification_rules().await);
     drop(failure);
     drop(get);
     // The first deletion already succeeded. A new fetch must see that progress.
@@ -784,7 +857,7 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
         .expect(1)
         .mount(server.server())
         .await;
-    assert!(core.cleanup_notification_rules().await);
+    assert!(session.cleanup_notification_rules().await);
     drop(get);
     remote
         .underride
@@ -795,7 +868,8 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
         .mount(server.server())
         .await;
     let completed = std::sync::atomic::AtomicBool::new(false);
-    core.retry_rule_cleanup(core.lifecycle.current(), &completed)
+    session
+        .retry_rule_cleanup(core.lifecycle.current(), &completed)
         .await;
     assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
     assert!(
@@ -807,7 +881,7 @@ async fn notification_cleanup_reads_the_server_and_retries_a_partial_failure() {
             .iter()
             .all(|request| request.method.as_str() != "PUT")
     );
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -815,6 +889,7 @@ async fn notification_cleanup_empties_the_old_dm_default() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let (core, _) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     let remote = Ruleset::server_default(client.user_id().unwrap());
     Mock::given(method("GET"))
         .and(path_regex(r"/pushrules/$"))
@@ -839,7 +914,7 @@ async fn notification_cleanup_empties_the_old_dm_default() {
         .expect(1)
         .mount(server.server())
         .await;
-    assert!(core.cleanup_notification_rules().await);
+    assert!(session.cleanup_notification_rules().await);
     drop(stored);
     Mock::given(method("GET"))
         .and(path_regex(
@@ -848,8 +923,8 @@ async fn notification_cleanup_empties_the_old_dm_default() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(server.server())
         .await;
-    assert!(core.cleanup_notification_rules().await);
-    core.session_tasks.lock().clear();
+    assert!(session.cleanup_notification_rules().await);
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -857,6 +932,7 @@ async fn notification_cleanup_does_not_succeed_when_rules_cannot_be_fetched() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().build().await;
     let (core, _) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     Mock::given(method("GET"))
         .and(path_regex(r"/pushrules/$"))
         .respond_with(
@@ -866,9 +942,10 @@ async fn notification_cleanup_does_not_succeed_when_rules_cannot_be_fetched() {
         .expect(1)
         .mount(server.server())
         .await;
-    assert!(!core.cleanup_notification_rules().await);
+    assert!(!session.cleanup_notification_rules().await);
     let completed = std::sync::atomic::AtomicBool::new(false);
-    core.retry_rule_cleanup(core.lifecycle.current() + 1, &completed)
+    session
+        .retry_rule_cleanup(core.lifecycle.current() + 1, &completed)
         .await;
     assert!(!completed.load(std::sync::atomic::Ordering::SeqCst));
     assert!(
@@ -880,7 +957,7 @@ async fn notification_cleanup_does_not_succeed_when_rules_cannot_be_fetched() {
             .iter()
             .all(|request| request.method.as_str() != "DELETE")
     );
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -1153,6 +1230,7 @@ async fn resetting_a_bridged_dm_to_default_does_not_create_a_room_push_rule() {
             .await;
     }
     let (core, _events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     core.run(SetRoomNotificationModeParams {
         room_id: room_id.to_owned(),
         mode: None,
@@ -1198,7 +1276,7 @@ async fn resetting_a_bridged_dm_to_default_does_not_create_a_room_push_rule() {
             .unwrap();
         assert_eq!(settings.room, Some(NotificationModeView::All));
     }
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -1235,6 +1313,7 @@ async fn setting_many_rooms_sets_each_of_them() {
             .await;
     }
     let (core, _events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     core.run(SetRoomsNotificationModeParams {
         room_ids: vec![loud.to_owned(), quiet.to_owned()],
         mode: Some(NotificationModeView::Mute),
@@ -1251,7 +1330,7 @@ async fn setting_many_rooms_sets_each_of_them() {
             .unwrap();
         assert_eq!(settings.room, Some(NotificationModeView::Mute));
     }
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -1299,6 +1378,7 @@ async fn a_knock_alerts_like_a_join() {
         )
         .await;
     let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
     let mut rules = Ruleset::server_default(client.user_id().unwrap());
     rules
         .set_actions(
@@ -1354,5 +1434,82 @@ async fn a_knock_alerts_like_a_join() {
             Some(event_id)
         );
     }
-    core.session_tasks.lock().clear();
+    session.state().session_tasks.lock().clear();
+}
+
+#[tokio::test]
+async fn a_message_notification_shows_its_per_message_profile_over_a_nickname() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!persona:example.org");
+    server.mock_room_state_encryption().plain().mount().await;
+    let factory = EventFactory::new().room(room_id).sender(User::Alice);
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_state_event(factory.member(client.user_id().unwrap()))
+                .add_state_event(factory.power_levels()),
+        )
+        .await;
+    let (core, mut events) = watching(&server, &client).await;
+    let session = core.signed_in().unwrap();
+    core.nicknames
+        .send_replace(crate::nicknames::Nicknames::from_overrides(
+            vec![ProfileOverrideView {
+                user_id: User::Alice.into(),
+                display_name: OverrideTextView::Set {
+                    value: "Ally".to_owned(),
+                },
+                avatar: OverrideTextView::Set {
+                    value: "mxc://example.org/ally".to_owned(),
+                },
+                color: OverrideColorView::Unset,
+            }],
+            None,
+        ));
+    let message = json!({
+        "type": "m.room.message", "event_id": "$persona", "room_id": room_id,
+        "sender": User::Alice, "origin_server_ts": MilliSecondsSinceUnixEpoch::now(),
+        "content": {
+            "msgtype": "m.text", "body": "Silver: hi",
+            "com.beeper.per_message_profile": {
+                "id": "silver", "displayname": "Silver",
+                "avatar_url": "mxc://example.org/silver", "has_fallback": true
+            }
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path_regex(r"/context/.*persona$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "event": message, "events_before": [], "events_after": [],
+            "state": [], "start": "s", "end": "e"
+        })))
+        .mount(server.server())
+        .await;
+    server
+        .mock_sync()
+        .ok_and_run(&client, |builder| {
+            builder.add_joined_room(
+                JoinedRoomBuilder::new(room_id)
+                    .set_unread_notifications_count(
+                        json!({"notification_count": 1, "highlight_count": 0}),
+                    )
+                    .add_timeline_event(
+                        ruma::serde::Raw::new(&message)
+                            .unwrap()
+                            .cast_unchecked::<ruma::events::AnySyncTimelineEvent>(),
+                    ),
+            );
+        })
+        .await;
+
+    let view = next_notification(&mut events).await;
+    assert_eq!(view.sender_name.as_deref(), Some("Silver"));
+    assert_eq!(
+        view.sender_avatar_url.as_deref(),
+        Some("mxc://example.org/silver")
+    );
+    assert_eq!(view.body, "hi");
+    session.state().session_tasks.lock().clear();
 }

@@ -9,7 +9,10 @@ use std::{
 use base64::Engine as _;
 use matrix_sdk::{
     ruma::{device_id, event_id, owned_device_id, owned_room_id, owned_user_id, room_id},
-    test_utils::mocks::MatrixMockServer,
+    test_utils::{
+        client::{mock_session_meta, mock_session_tokens},
+        mocks::MatrixMockServer,
+    },
 };
 use matrix_sdk_base::RequestedRequiredStates;
 use matrix_sdk_ui::sync_service::SyncService;
@@ -19,7 +22,7 @@ use super::{
     CallMember, CallMode, CallSessionId, Core, Refreshed, State, backend_id, member_service,
     own_is_present, refresh,
 };
-use crate::{protocol::CallBackendView, session::Session, store::MemorySessionStore};
+use crate::{SignedIn, protocol::CallBackendView, session::Session, store::MemorySessionStore};
 
 pub(in crate::calls) fn member(mode: CallMode, created_ts: u64, foci: &[&str]) -> CallMember {
     CallMember {
@@ -154,7 +157,7 @@ async fn check_limited_sync(remote_left: bool) {
         .mount(server.server())
         .await;
 
-    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&server, room.client()).await;
     let session = CallSessionId(1);
     let (wake, _handlers, _keys) =
         super::join_handlers(&core, 1, session, &room, &state, false).await;
@@ -298,7 +301,7 @@ async fn a_queued_end_is_rechecked_even_when_the_local_call_member_is_absent() {
             State::new(own, observed, sticky, &room_id, false, None, false).with_admission_roster();
         state.own_observed = true;
         let state = Arc::new(Mutex::new(state));
-        let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+        let core = crate::test_support::session_for(&server, room.client()).await;
         let session = CallSessionId(1);
         assert_eq!(
             super::current_members(&room, &state, false)
@@ -403,7 +406,7 @@ async fn join_discovery_does_not_seed_admission_from_unsynced_room_members() {
         .expect(1)
         .mount_as_scoped(server.server())
         .await;
-    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&server, room.client()).await;
     let session = CallSessionId(1);
     let (state, _, _) = super::discover_state(
         &core,
@@ -518,7 +521,7 @@ async fn a_sticky_member_removed_while_discovery_fetches_room_members_never_gain
         .expect(1)
         .mount(server.server())
         .await;
-    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&server, room.client()).await;
     let session = CallSessionId(1);
     let discovery = tokio::spawn({
         let core = core.clone();
@@ -672,7 +675,7 @@ async fn joining_an_unsupported_slot_does_not_publish_membership() {
         .mount(server.server())
         .await;
 
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&server, room.client()).await;
     let mut own = member(CallMode::Matrix2, 1, &[]);
     own.user_id = client.user_id().unwrap().to_owned();
     own.device_id = Some(client.device_id().unwrap().to_owned());
@@ -1053,7 +1056,7 @@ async fn refresh_fixture(
     created_ts: u64,
     observed: bool,
 ) -> (
-    Arc<Core>,
+    SignedIn,
     tokio::sync::mpsc::UnboundedReceiver<crate::protocol::CoreEvent>,
     matrix_sdk::Room,
     Mutex<State>,
@@ -1065,39 +1068,25 @@ async fn refresh_fixture(
     let room = client.get_room(&room_id).unwrap();
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     let mut own = member(
         CallMode::Compatibility,
         created_ts,
         &["https://focus.example.org"],
     );
-    own.user_id = core
-        .session
-        .read()
-        .await
-        .as_ref()
-        .unwrap()
-        .client
-        .user_id()
-        .unwrap()
-        .to_owned();
-    own.device_id = Some(
-        core.session
-            .read()
-            .await
-            .as_ref()
-            .unwrap()
-            .client
-            .device_id()
-            .unwrap()
-            .to_owned(),
-    );
+    own.user_id = core.client().user_id().unwrap().to_owned();
+    own.device_id = Some(core.client().device_id().unwrap().to_owned());
     own.identity = format!("{}:{}", own.user_id, own.own_device_id());
     let id = backend_id(&room_id, "https://focus.example.org");
     let mut backends = BTreeMap::new();
@@ -1254,7 +1243,7 @@ async fn schedule_hangup_does_not_write_when_delayed_events_are_unsupported() {
         "",
     );
 
-    assert!(Core::schedule_hangup(&room, &state_key).await.is_none());
+    assert!(SignedIn::schedule_hangup(&room, &state_key).await.is_none());
 
     let requests = server.server().received_requests().await.unwrap();
     assert!(!requests.iter().any(|request| {
@@ -1298,7 +1287,7 @@ async fn a_delayed_leave_the_server_already_sent_is_reported_gone() {
         .await;
 
     assert_eq!(
-        Core::postpone_hangup(&room.client(), "fired").await,
+        SignedIn::postpone_hangup(&room.client(), "fired").await,
         super::super::Postponed::Gone
     );
 }
@@ -1529,13 +1518,18 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
     let client = room.client();
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service: sync_service.clone(),
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service: sync_service.clone(),
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     core.apply_app_activity(true).await;
     let first = core
         .join_call(
@@ -1547,11 +1541,11 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
         .await
         .unwrap();
 
-    core.set_app_active(false);
+    core.core().set_app_active(false);
     core.apply_app_activity(false).await;
     core.leave_call(first.session).await.unwrap();
     assert!(matches!(sync_service.state().get(), SyncState::Idle));
-    assert!(core.activity.sync_suspended());
+    assert!(core.core().activity.sync_suspended());
 
     let second = core
         .join_call(
@@ -1564,12 +1558,12 @@ async fn rejoining_a_call_resumes_sync_after_a_background_leave() {
         .unwrap();
 
     assert!(matches!(sync_service.state().get(), SyncState::Running));
-    assert!(!core.activity.sync_suspended());
-    assert!(!core.activity.app_active());
+    assert!(!core.core().activity.sync_suspended());
+    assert!(!core.core().activity.app_active());
 
-    core.update_network_conditions(false, true).await;
+    core.core().update_network_conditions(false, true).await;
     sync_service.stop().await;
-    core.update_network_conditions(true, true).await;
+    core.core().update_network_conditions(true, true).await;
     assert!(matches!(sync_service.state().get(), SyncState::Running));
 
     core.leave_call(second.session).await.unwrap();
@@ -1580,7 +1574,7 @@ async fn join_on_an_sfu_url_only_homeserver(
     subject: impl Fn(&ruma::UserId, &str) -> String,
 ) -> (
     MatrixMockServer,
-    Arc<Core>,
+    SignedIn,
     String,
     Result<crate::api::calls::JoinOk, crate::protocol::RpcError>,
 ) {
@@ -1623,13 +1617,18 @@ async fn join_on_an_sfu_url_only_homeserver(
         .await;
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     let joined = core
         .join_call(
             room.room_id().to_owned(),
@@ -1702,13 +1701,18 @@ async fn a_prepared_join_publishes_only_after_the_old_membership_is_retracted() 
     let client = room.client();
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service: sync_service.clone(),
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service: sync_service.clone(),
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     let room_id = room.room_id().to_owned();
     let first = core
         .join_call(
@@ -1732,15 +1736,16 @@ async fn a_prepared_join_publishes_only_after_the_old_membership_is_retracted() 
     assert!(futures_util::poll!(&mut publishing).is_pending());
 
     let state = core
-        .call_sessions
+        .state()
+        .calls
         .lock()
         .await
-        .get(&first.session)
+        .get(first.session)
         .unwrap()
         .state
         .clone();
     let claim = core
-        .claim_call_termination(core.lifecycle.current(), first.session, &state, |_| {
+        .claim_call_termination(core.generation(), first.session, &state, |_| {
             Some(super::super::termination::Ended {
                 terminated_by: "@alice:example.org".to_owned(),
                 event_id: "$end".to_owned(),
@@ -1812,13 +1817,18 @@ async fn account_retirement_waits_for_a_membership_put_and_its_abort() {
     let client = room.client();
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     let room_id = room.room_id().to_owned();
     let worker = core.clone();
     let joining = tokio::spawn(async move {
@@ -1829,8 +1839,8 @@ async fn account_retirement_waits_for_a_membership_put_and_its_abort() {
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
         .unwrap();
-    assert!(core.call_sessions.lock().await.is_empty());
-    let mut retiring = std::pin::pin!(core.retire_calls());
+    assert!(core.state().calls.lock().await.is_empty());
+    let mut retiring = std::pin::pin!(core.end_calls(true));
     assert!(futures_util::poll!(&mut retiring).is_pending());
     tokio::time::timeout(Duration::from_secs(5), retiring)
         .await
@@ -1921,13 +1931,18 @@ async fn a_limited_sync_end_queued_during_the_announcement_prevents_a_join_grant
         .await;
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client: client.clone(),
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client: client.clone(),
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     let prepared = super::prepare_join(
         &core,
         room_id.clone(),
@@ -1977,7 +1992,7 @@ async fn a_limited_sync_end_queued_during_the_announcement_prevents_a_join_grant
     .unwrap()
     .unwrap();
     assert!(state.lock().await.termination.new_membership_candidates());
-    assert!(core.call_sessions.lock().await.is_empty());
+    assert!(core.state().calls.lock().await.is_empty());
     release.send(()).unwrap();
     let err = tokio::time::timeout(Duration::from_secs(4), publishing)
         .await
@@ -1987,7 +2002,7 @@ async fn a_limited_sync_end_queued_during_the_announcement_prevents_a_join_grant
     assert!(
         matches!(err.code, crate::protocol::RpcCode::CallTerminatedDuringJoin { event_id, .. } if event_id == "$end-during-join")
     );
-    assert!(core.call_sessions.lock().await.is_empty());
+    assert!(core.state().calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -2009,16 +2024,30 @@ async fn cancelling_a_join_during_handoff_retracts_before_the_next_join() {
     let client = room.client();
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client,
-        sync_service: sync_service.clone(),
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".to_owned(),
+            client,
+            sync_service: sync_service.clone(),
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let core = core.signed_in().unwrap();
     // The join can publish and activate, but cannot return its grant while
     // app activity is held. Cancelling here must still retract the membership.
-    let activity = core.activity.transition().await;
+    let (queued, started) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    core.core()
+        .supervise_later("hold activity during join", move |_, _| {
+            Box::pin(async move {
+                let _ = queued.send(());
+                let _ = held.await;
+            })
+        });
+    started.await.unwrap();
     let worker = core.clone();
     let room_id = room.room_id().to_owned();
     let url = sfu.uri();
@@ -2028,7 +2057,7 @@ async fn cancelling_a_join_during_handoff_retracts_before_the_next_join() {
             .await
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        while core.call_sessions.lock().await.is_empty() {
+        while core.state().calls.lock().await.is_empty() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
@@ -2037,7 +2066,7 @@ async fn cancelling_a_join_during_handoff_retracts_before_the_next_join() {
     assert!(!joining.is_finished());
     joining.abort();
     assert!(joining.await.unwrap_err().is_cancelled());
-    drop(activity);
+    resume.send(()).unwrap();
 
     let joined = tokio::time::timeout(
         Duration::from_secs(5),
@@ -2130,7 +2159,7 @@ async fn a_publisher_refused_on_the_calls_focus_moves_to_its_own_in_every_mode()
             )
             .mount(homeserver.server())
             .await;
-        let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+        let core = crate::test_support::session_for(&homeserver, room.client()).await;
 
         let (moved, provision) =
             super::publish_elsewhere(&core, &room, &own, Some(sfu.uri()), None)
@@ -2149,7 +2178,7 @@ async fn an_unusable_focus_is_not_advertised() {
     for mode in [CallMode::Legacy, CallMode::Compatibility, CallMode::Matrix2] {
         let (homeserver, sfu, room, mut own, _oldest, _state) = legacy_move_fixture(false).await;
         own.mode = mode;
-        let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+        let core = crate::test_support::session_for(&homeserver, room.client()).await;
 
         assert!(
             super::publish_elsewhere(&core, &room, &own, Some(sfu.uri()), None)
@@ -2541,7 +2570,7 @@ async fn a_publisher_refused_on_the_calls_focus_moves_to_its_homeservers_sfu_url
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"jwt": jwt})))
         .mount(homeserver.server())
         .await;
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&homeserver, room.client()).await;
     let state = Mutex::new(State::new(
         own,
         Vec::new(),
@@ -2857,6 +2886,7 @@ async fn a_key_older_than_one_already_emitted_for_the_same_index_is_dropped() {
 
 #[tokio::test]
 async fn a_jwt_service_from_any_source_is_preferred_to_an_sfu_url() {
+    use matrix_sdk::ruma::UserId;
     use serde_json::json;
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, ResponseTemplate};
@@ -2914,11 +2944,20 @@ async fn a_jwt_service_from_any_source_is_preferred_to_an_sfu_url() {
             })))
             .mount(server.server())
             .await;
-        let client = server.client_builder().build().await;
+        let user_id = UserId::parse(format!("@user:{}", server.server().address())).unwrap();
+        let client = server
+            .client_builder()
+            .logged_in_with_token(
+                mock_session_tokens().access_token,
+                user_id,
+                mock_session_meta().device_id,
+            )
+            .build()
+            .await;
         let room_id = owned_room_id!("!call:example.org");
         server.sync_joined_room(&client, &room_id).await;
         let room = client.get_room(&room_id).unwrap();
-        let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
+        let core = crate::test_support::session_for(&server, room.client()).await;
 
         let focus = core
             .resolve_focus(&[], fallback.map(str::to_owned), &room)
@@ -2930,39 +2969,57 @@ async fn a_jwt_service_from_any_source_is_preferred_to_an_sfu_url() {
 
 #[tokio::test]
 async fn call_support_reuses_the_prefetched_well_known() {
+    use matrix_sdk::ruma::UserId;
+
     let server = MatrixMockServer::new().await;
-    let client = server.client_builder().build().await;
+    server.mock_well_known().ok().expect(1).mount().await;
+    let user_id = UserId::parse(format!("@user:{}", server.server().address())).unwrap();
+    let client = server
+        .client_builder()
+        .logged_in_with_token(
+            mock_session_tokens().access_token,
+            user_id,
+            mock_session_meta().device_id,
+        )
+        .build()
+        .await;
     let room_id = owned_room_id!("!call:example.org");
     server.sync_joined_room(&client, &room_id).await;
-    let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    let (core, _events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".to_owned(),
-        client: client.clone(),
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
-    let well_known_requests = || async {
-        server
-            .server()
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|request| request.url.path() == "/.well-known/matrix/client")
-            .count()
-    };
+    let core = crate::test_support::session_for(&server, client.clone()).await;
 
-    let _ = client.well_known_rtc_transports().await;
-    let prefetched = well_known_requests().await;
-    core.call_support(crate::api::calls::SupportParams {
-        room_id,
-        livekit_service_url: None,
-    })
-    .await
-    .unwrap();
+    assert_eq!(client.well_known_rtc_transports().await.unwrap().len(), 1);
+    let support = core
+        .call_support(crate::api::calls::SupportParams {
+            room_id,
+            livekit_service_url: None,
+        })
+        .await
+        .unwrap();
 
-    assert!(prefetched > 0);
-    assert_eq!(well_known_requests().await, prefetched);
+    assert!(support.has_focus);
+}
+
+#[tokio::test]
+async fn a_malformed_rtc_transport_does_not_hide_the_valid_ones() {
+    use serde_json::json;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = MatrixMockServer::new().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/rtc/transports$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rtc_transports": [
+                {"type": "m.livekit"},
+                {"type": "m.livekit", "url": "wss://sfu.example.org"},
+            ],
+        })))
+        .mount(server.server())
+        .await;
+    let client = server.client_builder().build().await;
+
+    assert_eq!(
+        crate::calls::stable_transports(&client).await,
+        ["wss://sfu.example.org"]
+    );
 }

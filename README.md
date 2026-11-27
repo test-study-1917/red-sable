@@ -357,6 +357,8 @@ and its Matrix stores on your server.
 Desktop builds (**Windows**, **macOS**, **Linux**) use [Electron](https://www.electronjs.org); see [`electron/README.md`](electron/README.md). **Android** and **iOS** use [Tauri](https://v2.tauri.app).
 
 ```bash
+mise run electron             # Build the web assets and start the desktop app
+mise run electron:package     # Package the desktop app for this platform
 mise run tauri:setup          # Shared Rust/system dependencies, including Linux packages
 mise run tauri:icons          # Regenerate native icons after changing the logo SVG
 mise run tauri:setup:macos    # macOS: Xcode
@@ -379,6 +381,12 @@ Extract it into your web root to serve the app yourself; see
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Translations
+
+<a href="https://translate.ow-ops.eu/projects/sable-next/"><img alt="Translation status" src="https://translate.ow-ops.eu/widget/sable-next/svg-badge.svg"></a>
+
+Help translate Sable on [Weblate](https://translate.ow-ops.eu/projects/sable-next/). Translations sync back to this repository, so don't edit the locale files directly.
 
 ## License
 

@@ -13,7 +13,13 @@
     preview?: string | null;
   };
 
-  let { open = $bindable(false), preview = null, roomId, ...actions }: Props = $props();
+  let {
+    open = $bindable(false),
+    preview = null,
+    roomId,
+    linkDestination,
+    ...actions
+  }: Props = $props();
   let rows = $derived(messageMenuRows(actions));
 
   function run(action: () => void): void {
@@ -39,6 +45,13 @@
 >
   {#if preview}
     <p class="sheet-source">{preview}</p>
+  {/if}
+  {#if linkDestination}
+    <p class="sheet-source sheet-link-destination">
+      {i18n.t('timeline.linkDestination')}: <bdi dir="ltr">{linkDestination}</bdi>
+    </p>
+  {/if}
+  {#if preview || linkDestination}
     <div class="sheet-line"></div>
   {/if}
   <IconContext values={{ 'aria-hidden': 'true' }}>
@@ -74,6 +87,7 @@
 <style>
   .sheet-source {
     color: var(--surface-var-on-container);
+    flex-shrink: 0;
     font-size: var(--font-size-small);
     margin: 0 0 var(--space-200);
     overflow: hidden;
@@ -85,6 +99,12 @@
   .sheet-line {
     background: var(--surface-container-line);
     block-size: var(--border-width);
+    flex-shrink: 0;
+  }
+
+  .sheet-link-destination {
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   .sheet-list {

@@ -8,7 +8,7 @@ use base64::{
 };
 use futures_util::{StreamExt as _, pin_mut};
 use matrix_sdk::event_handler::EventHandlerDropGuard;
-use matrix_sdk::executor::{JoinHandleExt as _, spawn};
+use matrix_sdk::executor::spawn;
 use matrix_sdk::ruma::api::client::delayed_events::update_delayed_event::UpdateAction;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedServerName, OwnedUserId};
@@ -30,7 +30,8 @@ use crate::protocol::{
     CallBackendView, CallIntent, CallMemberView, CallMode, CallSessionId, CoreEvent, RpcCode,
     RpcError,
 };
-use crate::{CallSession, Core};
+use crate::tasks::JoinHandleExt as _;
+use crate::{CallSession, Core, SignedIn};
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const UNRESOLVED_KEY_REPORT_MS: u64 = 30_000;
@@ -309,7 +310,7 @@ async fn publish_membership(
     }
 }
 
-async fn retract(core: &Core, room: &Room, own: &CallMember, delay: Option<String>) {
+async fn retract(core: &SignedIn, room: &Room, own: &CallMember, delay: Option<String>) {
     core.withdraw_call_invite(room, own, false).await;
     if let Some(delay) = delay
         && core.fire_hangup(&room.client(), delay).await.is_ok()
@@ -366,7 +367,7 @@ async fn send_delayed_leave(
 }
 
 async fn publish(
-    core: &Arc<Core>,
+    core: &SignedIn,
     room: &Room,
     own: &CallMember,
     service: &str,
@@ -376,7 +377,9 @@ async fn publish(
     let state_key = state_key(room, own);
     let delay = if own.mode == CallMode::Matrix2 {
         if !super::ensure_open_slot(room, encrypted, own.wire).await {
-            return Err(core.failed("join_call", "no compatible open RTC slot"));
+            return Err(core
+                .core()
+                .failed("join_call", "no compatible open RTC slot"));
         }
         let support = crate::delayed_events::support(&room.client())
             .await
@@ -393,17 +396,17 @@ async fn publish(
             None
         }
     } else {
-        Core::schedule_hangup(room, &state_key).await
+        SignedIn::schedule_hangup(room, &state_key).await
     };
     let postpone = delay
         .clone()
-        .map(|id| Core::spawn_postpone_loop(room.client(), id));
+        .map(|id| SignedIn::spawn_postpone_loop(room.client(), id));
     let membership_event = match publish_membership(room, own, intent).await {
         Ok(event) => event,
         Err(error) => {
             drop(postpone);
             retract(core, room, own, delay).await;
-            return Err(core.rpc_error("join_call", &error));
+            return Err(core.core().rpc_error("join_call", &error));
         }
     };
     let provision = provision_focus(
@@ -418,12 +421,14 @@ async fn publish(
         Ok(_) => {
             drop(postpone);
             retract(core, room, own, delay).await;
-            return Err(core.failed("join_call", "SFU publisher identity mismatch"));
+            return Err(core
+                .core()
+                .failed("join_call", "SFU publisher identity mismatch"));
         }
         Err(error) => {
             drop(postpone);
             retract(core, room, own, delay).await;
-            return Err(core.provision_error(service, &error));
+            return Err(core.core().provision_error(service, &error));
         }
     };
     Ok(Published {
@@ -435,7 +440,7 @@ async fn publish(
 }
 
 async fn publish_elsewhere(
-    core: &Core,
+    core: &SignedIn,
     room: &Room,
     own: &CallMember,
     configured: Option<String>,
@@ -490,7 +495,7 @@ async fn publish_elsewhere(
 }
 
 async fn publish_where_allowed(
-    core: &Arc<Core>,
+    core: &SignedIn,
     room: &Room,
     state: &Mutex<State>,
     encrypted: bool,
@@ -524,7 +529,7 @@ async fn publish_where_allowed(
 }
 
 pub(super) async fn join_handlers(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -583,7 +588,7 @@ pub(super) async fn join_handlers(
     ));
     if encrypt_media {
         handlers.extend(watch_keys(
-            core,
+            core.core(),
             &client,
             generation,
             session,
@@ -595,7 +600,7 @@ pub(super) async fn join_handlers(
 }
 
 async fn confirm_join(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -638,7 +643,7 @@ fn same_service(left: &str, right: &str) -> bool {
 }
 
 async fn discover_state(
-    core: &Arc<Core>,
+    core: &SignedIn,
     room: &Room,
     session: CallSessionId,
     configured: Option<String>,
@@ -703,7 +708,7 @@ impl JoinHandoff {
 }
 
 pub(super) async fn join(
-    core: &Arc<Core>,
+    core: &SignedIn,
     room_id: OwnedRoomId,
     configured: Option<String>,
     requested: Option<CallMode>,
@@ -716,16 +721,16 @@ pub(super) async fn join(
 }
 
 async fn prepare_join(
-    core: &Arc<Core>,
+    core: &SignedIn,
     room_id: OwnedRoomId,
     configured: Option<String>,
     requested: Option<CallMode>,
     intent: Option<CallIntent>,
 ) -> Result<PreparedJoin, RpcError> {
-    let generation = core.lifecycle.current();
-    let room = core.room(&room_id).await?;
-    let encrypt_media = core.room_is_encrypted(&room).await?;
-    let session = CallSessionId(core.allocate_subscription().0);
+    let generation = core.generation();
+    let room = core.room(&room_id)?;
+    let encrypt_media = core.core().room_is_encrypted(&room).await?;
+    let session = CallSessionId(core.core().allocate_subscription().0);
     let (state, sticky_sync, mode_info) = discover_state(
         core,
         &room,
@@ -749,20 +754,23 @@ async fn prepare_join(
 }
 
 impl PreparedJoin {
-    async fn publish(self, core: &Arc<Core>) -> Result<JoinOk, RpcError> {
+    async fn publish(self, core: &SignedIn) -> Result<JoinOk, RpcError> {
         let generation = self.generation;
         let room_id = self.room.room_id().to_owned();
         // Discovery may complete while an older membership is still active.
-        let membership = core.call_memberships.acquire(generation, &room_id).await;
+        let membership = core
+            .state()
+            .call_memberships
+            .acquire(generation, &room_id)
+            .await;
         let signal = {
-            let mut calls = core.call_sessions.lock().await;
+            let mut calls = core.state().calls.lock().await;
             if !core.call_account_is_current(generation) {
                 return Err(RpcCode::NotLoggedIn.into());
             }
             calls.reserve_signal()
         };
         let (reply, finished) = oneshot::channel();
-        let client = self.room.client();
         let worker = core.clone();
         let slot = signal.task.clone();
         *slot.lock() = Some(spawn(async move {
@@ -784,12 +792,12 @@ impl PreparedJoin {
         }));
         let handoff = finished
             .await
-            .map_err(|error| core.failed("join_call", error))??;
+            .map_err(|error| core.core().failed("join_call", error))??;
         if !core.call_account_is_current(generation) {
             return Err(RpcCode::NotLoggedIn.into());
         }
-        core.apply_app_activity(core.activity.app_active()).await;
-        core.refresh_call_presence(&client, generation).await;
+        core.reapply_app_activity().await;
+        core.refresh_presence().await;
         if !core.call_account_is_current(generation) {
             return Err(RpcCode::NotLoggedIn.into());
         }
@@ -802,7 +810,7 @@ impl PreparedJoin {
     )]
     async fn publish_registered(
         self,
-        core: &Arc<Core>,
+        core: &SignedIn,
         membership: RoomMembership,
         reply: &oneshot::Sender<Result<JoinHandoff, RpcError>>,
     ) -> Result<JoinOk, RpcError> {
@@ -869,13 +877,15 @@ impl PreparedJoin {
             if let Some(ended) = ended {
                 return Err(termination_during_join(session, room_id, ended));
             }
-            return Err(core.failed("join_call", "call membership was not confirmed"));
+            return Err(core
+                .core()
+                .failed("join_call", "call membership was not confirmed"));
         };
         let (mut calls, state_guard) = loop {
             // Use the same lock order as end admission. A candidate received
             // during backend provisioning or the call announcement belongs to
             // the joining call until it has been checked here.
-            let calls = core.call_sessions.lock().await;
+            let calls = core.state().calls.lock().await;
             let state_guard = state.lock().await;
             if !can_publish() {
                 drop(state_guard);
@@ -899,7 +909,7 @@ impl PreparedJoin {
         let shared = state.clone();
         let delay = super::DelayState::shared(delay);
         drop(postpone);
-        let postpone = Some(Core::spawn_managed_postpone_loop(
+        let postpone = Some(SignedIn::spawn_managed_postpone_loop(
             room.client(),
             delay.clone(),
             wake.clone(),
@@ -926,7 +936,7 @@ impl PreparedJoin {
                 state_key,
                 delay_id: delay,
                 postpone,
-                _handlers: handlers,
+                handlers,
                 updates: Some(updates),
                 termination_keys,
                 termination_cancel,
@@ -949,7 +959,7 @@ impl PreparedJoin {
 }
 
 async fn abort_join(
-    core: &Core,
+    core: &SignedIn,
     room: &Room,
     own: &CallMember,
     delay: Option<String>,
@@ -1127,7 +1137,7 @@ fn wanted_backends(
 }
 
 async fn refresh_members(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1167,7 +1177,7 @@ async fn refresh_members(
 }
 
 async fn refresh(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1206,7 +1216,7 @@ async fn refresh(
         });
         let wanted = wanted_backends(room, &verified, &own);
         set_members(
-            core,
+            core.core(),
             generation,
             session,
             &room.room_id().to_owned(),
@@ -1222,7 +1232,7 @@ async fn refresh(
         backend_aliases
             .retain(|id, target| wanted.contains_key(id) && backends.contains_key(target));
         emit_pending(
-            core,
+            core.core(),
             generation,
             session,
             &room.room_id().to_owned(),
@@ -1236,7 +1246,16 @@ async fn refresh(
             .map(|(id, (url, server))| (id, url, server))
             .collect::<Vec<_>>()
     };
-    provision_missing(core, generation, session, room, shared, &own, missing).await;
+    provision_missing(
+        core.core(),
+        generation,
+        session,
+        room,
+        shared,
+        &own,
+        missing,
+    )
+    .await;
     publish_update(core, generation, session, room, shared).await;
     Refreshed::Current
 }
@@ -1317,7 +1336,7 @@ async fn recheck_slot(room: &Room, shared: &Mutex<State>) {
 }
 
 async fn provision_missing(
-    core: &Arc<Core>,
+    core: &Core,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1464,7 +1483,7 @@ pub(super) async fn set_screen_sharing(
 }
 
 async fn emit_roster(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1478,7 +1497,7 @@ async fn emit_roster(
     }
     if state.emitted_members.as_ref() != Some(&views) {
         state.emitted_members = Some(views.clone());
-        core.emit_if_current(
+        core.core().emit_if_current(
             generation,
             CoreEvent::CallMembers {
                 session,
@@ -1489,7 +1508,7 @@ async fn emit_roster(
     let publisher_id = publisher_backend_id(&room.room_id().to_owned(), &state.own);
     report_silent_members(&mut state, crate::now_ms());
     state.revision = state.revision.saturating_add(1);
-    core.emit_if_current(
+    core.core().emit_if_current(
         generation,
         CoreEvent::CallBackends {
             session,
@@ -1534,7 +1553,7 @@ fn log_rolled(rolled: &Rolled, members: usize) {
 }
 
 async fn publish_update(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1565,13 +1584,13 @@ async fn publish_update(
             own: true,
         };
         if first {
-            core.emit_if_current(generation, event);
+            core.core().emit_if_current(generation, event);
         } else {
-            let core = core.clone();
-            core.clone().track_session_task(
+            let event_core = core.core().clone();
+            core.track_session_task(
                 spawn(async move {
                     matrix_sdk::sleep::sleep(USE_KEY_DELAY).await;
-                    core.emit_if_current(generation, event);
+                    event_core.emit_if_current(generation, event);
                 })
                 .abort_on_drop(),
             );
@@ -1580,18 +1599,18 @@ async fn publish_update(
 }
 
 pub(super) fn terminate(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     stage: crate::protocol::CallSignalingStage,
 ) {
-    let core = core.clone();
-    core.clone().track_session_task(
+    let session_owner = core.clone();
+    core.track_session_task(
         spawn(async move {
-            if let Err(error) = core.leave_call(session).await {
+            if let Err(error) = session_owner.leave_call(session).await {
                 tracing::warn!("could not leave the call after a signaling error: {error:?}");
             }
-            core.emit_if_current(
+            session_owner.core().emit_if_current(
                 generation,
                 CoreEvent::CallSignalingError {
                     session,
@@ -1797,11 +1816,12 @@ async fn receive_call_key(
         );
         return;
     };
-    let Some(device) = encryption.sender_device else {
+    let Some(device) = sticky::trusted_sender_device(&encryption) else {
         tracing::warn!(
             reported = true,
             sender = %sender,
-            "ignoring a call media key from an unknown device"
+            verification = ?encryption.verification_state,
+            "ignoring a call media key from an unknown or untrusted device"
         );
         return;
     };
@@ -1890,7 +1910,7 @@ fn watch_keys(
 /// The SDK invokes this only for sync timeline events, not history pagination
 /// or local pending echoes. Unresolved encrypted envelopes stay in this state.
 pub(super) fn watch_termination(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1924,7 +1944,7 @@ pub(super) fn watch_termination(
 }
 
 async fn retry_pending_terminations(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1944,7 +1964,7 @@ async fn retry_pending_terminations(
 
 /// Returns whether a valid control is waiting for roster evidence.
 pub(super) async fn receive_termination(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1966,7 +1986,7 @@ pub(super) async fn receive_termination(
 }
 
 async fn receive_live_termination(
-    core: &Arc<Core>,
+    core: &SignedIn,
     generation: u64,
     session: CallSessionId,
     room: &Room,
@@ -1976,7 +1996,7 @@ async fn receive_live_termination(
         received_at,
     }: LiveEnvelope,
 ) -> bool {
-    if !core.is_current(generation) {
+    if !core.call_account_is_current(generation) {
         return false;
     }
     let age_ms = value.pointer("/unsigned/age").and_then(Value::as_i64);
@@ -2012,7 +2032,7 @@ async fn receive_live_termination(
             }
             _ => {
                 let mut state = state.lock().await;
-                if core.is_current(generation) && state.termination.ended.is_none() {
+                if core.call_account_is_current(generation) && state.termination.ended.is_none() {
                     state
                         .termination
                         .remember_pending(LiveEnvelope { value, received_at });
@@ -2022,7 +2042,9 @@ async fn receive_live_termination(
         }
     }
     if let Some(control) = super::termination::moderation(&value, session, age_ms, received_at) {
-        core.emit_if_current(generation, control);
+        if core.call_account_is_current(generation) {
+            core.core().emit_if_current(generation, control);
+        }
         return false;
     }
     let Some(candidate) = super::termination::Candidate::parse(&value) else {
@@ -2174,7 +2196,7 @@ async fn restore_hangup(room: &Room, own: &CallMember, delay: &Mutex<super::Dela
             .inspect_err(|error| tracing::warn!(?error, "could not restore the delayed call leave"))
             .ok()
     } else {
-        Core::schedule_hangup(room, &state_key(room, own)).await
+        SignedIn::schedule_hangup(room, &state_key(room, own)).await
     };
     if let Some(id) = id {
         delay.id = Some(id);
@@ -2197,7 +2219,7 @@ async fn protect_membership_renewal(
             super::Postponed::Restarted
         };
     };
-    let result = Core::postpone_hangup(client, id).await;
+    let result = SignedIn::postpone_hangup(client, id).await;
     if result == super::Postponed::Gone {
         delay.id = None;
         delay.lost = true;
@@ -2206,7 +2228,7 @@ async fn protect_membership_renewal(
 }
 
 struct UpdateContext {
-    core: Arc<Core>,
+    core: SignedIn,
     generation: u64,
     session: CallSessionId,
     room: Room,
@@ -2250,44 +2272,42 @@ impl UpdateContext {
         };
         // Only the long poll is cancellable. Finish decoding and applying a
         // received batch before polling with its new cursor.
-        match sync
+        let Ok(events) = sync
             .resolve_for_call(&self.room, response, crate::now_ms(), Some(&self.state))
             .await
-        {
-            Ok(events) => {
-                let encrypted = self
-                    .core
-                    .room_is_encrypted(&self.room)
-                    .await
-                    .unwrap_or(true);
-                let mut state = self.state.lock().await;
-                let State {
-                    sticky,
-                    termination,
-                    ..
-                } = &mut *state;
-                let now = crate::now_ms();
-                for event in events {
-                    event.apply(sticky, encrypted, now);
-                }
-                termination.reconcile_sticky(sticky, now);
-            }
-            Err(_) => {
-                self.core.emit_if_current(
-                    self.generation,
-                    CoreEvent::CallSignalingError {
-                        session: self.session,
-                        stage: crate::protocol::CallSignalingStage::Sync,
-                        fatal: false,
-                    },
-                );
-                matrix_sdk::sleep::sleep(UPDATE_INTERVAL).await;
-            }
+        else {
+            self.core.core().emit_if_current(
+                self.generation,
+                CoreEvent::CallSignalingError {
+                    session: self.session,
+                    stage: crate::protocol::CallSignalingStage::Sync,
+                    fatal: false,
+                },
+            );
+            matrix_sdk::sleep::sleep(UPDATE_INTERVAL).await;
+            return;
+        };
+        let encrypted = self
+            .core
+            .core()
+            .room_is_encrypted(&self.room)
+            .await
+            .unwrap_or(true);
+        let mut state = self.state.lock().await;
+        let State {
+            sticky,
+            termination,
+            ..
+        } = &mut *state;
+        let now = crate::now_ms();
+        for event in events {
+            event.apply(sticky, encrypted, now);
         }
+        termination.reconcile_sticky(sticky, now);
     }
 
     async fn encryption_changed(&self) -> bool {
-        match self.core.room_is_encrypted(&self.room).await {
+        match self.core.core().room_is_encrypted(&self.room).await {
             Ok(encrypted) => encrypted != self.state.lock().await.distributor.is_some(),
             Err(_) => false,
         }
@@ -2384,7 +2404,7 @@ impl UpdateContext {
             if !std::mem::take(&mut first_refresh) {
                 self.wait_for_change(&mut sync, &mut watch, interval).await;
             }
-            if self.core.lifecycle.current() != self.generation {
+            if !self.core.call_account_is_current(self.generation) {
                 return;
             }
             if self.encryption_changed().await {

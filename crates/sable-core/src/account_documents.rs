@@ -1,21 +1,23 @@
 use crate::api::account::SetMediaPreviewConfigParams;
 use std::collections::{BTreeMap, BTreeSet};
 
-use matrix_sdk::ruma::OwnedRoomId;
+use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, VecSkipError, serde_as};
 
 use crate::protocol::{
     InviteAvatarsView, MediaPreviewConfigView, MediaPreviewsView, NotificationModeView, RpcError,
+    ThreadRefView, ThreadSidebarView,
 };
-use crate::{Core, ResultExt};
+use crate::{Core, ResultExt, SignedIn};
 
 const MEDIA_PREVIEW_EVENT: &str = "m.media_preview_config";
 const UNSTABLE_MEDIA_PREVIEW_EVENT: &str = "io.element.msc4278.media_preview_config";
 const DISMISSED_INVITES_EVENT: &str = "moe.sable.dismissed_invites";
 pub(crate) const DM_SPACES_EVENT: &str = "moe.sable.dm_spaces";
 const SPACE_NOTIFICATIONS_EVENT: &str = "moe.sable.space_notifications";
+pub(crate) const THREAD_SIDEBAR_EVENT: &str = "moe.sable.next.thread_sidebar";
 
 #[derive(Default, Deserialize)]
 struct MediaPreviewIn {
@@ -56,21 +58,34 @@ pub(crate) fn media_preview_config(content: Option<&Value>) -> MediaPreviewConfi
     }
 }
 
+/// The room's own level, which wins over the account's. `Err` when the store could not be read,
+/// so the caller can keep what it had.
+pub(crate) async fn room_media_previews(
+    room: &matrix_sdk::Room,
+) -> Result<Option<MediaPreviewsView>, ()> {
+    for event in [MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT] {
+        let content = room
+            .account_data(event.into())
+            .await
+            .map_err(|_| ())?
+            .and_then(|raw| raw.get_field::<Value>("content").ok().flatten());
+        if let Some(level) = media_preview_config(content.as_ref()).media_previews {
+            return Ok(Some(level));
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn is_media_preview_event(event_type: &str) -> bool {
+    [MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT].contains(&event_type)
+}
+
 /// Mirrors the app's `previewsShown`.
 #[cfg(not(target_family = "wasm"))]
 pub(crate) async fn shows_media_previews(room: &matrix_sdk::Room) -> bool {
     use matrix_sdk::ruma::events::room::join_rules::JoinRule;
 
-    let mut level = None;
-    for event in [MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT] {
-        let content = room
-            .account_data(event.into())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|raw| raw.get_field::<Value>("content").ok().flatten());
-        level = level.or_else(|| media_preview_config(content.as_ref()).media_previews);
-    }
+    let mut level = room_media_previews(room).await.ok().flatten();
     for event in [MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT] {
         let content = room
             .client()
@@ -266,7 +281,83 @@ struct DismissedInvitesOut {
     room_ids: Vec<OwnedRoomId>,
 }
 
-impl Core {
+#[serde_as]
+#[derive(Default, Deserialize)]
+struct ThreadSidebarIn {
+    #[serde_as(deserialize_as = "DefaultOnError<VecSkipError<_>>")]
+    #[serde(default)]
+    pins: Vec<ThreadRefView>,
+    #[serde_as(deserialize_as = "DefaultOnError<VecSkipError<_>>")]
+    #[serde(default)]
+    dismissed: Vec<ThreadRefView>,
+}
+
+fn dedupe_thread_refs(
+    items: Vec<ThreadRefView>,
+    seen: &mut BTreeSet<(OwnedRoomId, OwnedEventId)>,
+) -> Vec<ThreadRefView> {
+    items
+        .into_iter()
+        .filter(|entry| seen.insert((entry.room_id.clone(), entry.event_id.clone())))
+        .collect()
+}
+
+fn remove_thread_ref(
+    items: &mut Vec<ThreadRefView>,
+    room_id: &OwnedRoomId,
+    event_id: &OwnedEventId,
+) {
+    items.retain(|entry| entry.room_id != *room_id || entry.event_id != *event_id);
+}
+
+fn apply_thread_sidebar_flag(
+    sidebar: &mut ThreadSidebarView,
+    room_id: OwnedRoomId,
+    event_id: OwnedEventId,
+    pin: bool,
+    enabled: bool,
+) {
+    let (primary, other) = if pin {
+        (&mut sidebar.pins, &mut sidebar.dismissed)
+    } else {
+        (&mut sidebar.dismissed, &mut sidebar.pins)
+    };
+    remove_thread_ref(primary, &room_id, &event_id);
+    if enabled {
+        remove_thread_ref(other, &room_id, &event_id);
+        primary.push(ThreadRefView { room_id, event_id });
+    }
+}
+
+pub(crate) fn thread_sidebar(content: Option<&Value>) -> ThreadSidebarView {
+    let parsed = content
+        .and_then(|content| ThreadSidebarIn::deserialize(content).ok())
+        .unwrap_or_default();
+    let mut seen = BTreeSet::new();
+    let pins = dedupe_thread_refs(parsed.pins, &mut seen);
+    let dismissed = dedupe_thread_refs(parsed.dismissed, &mut seen);
+    ThreadSidebarView { pins, dismissed }
+}
+
+fn thread_sidebar_content(
+    stored: Option<Value>,
+    update: impl FnOnce(&mut ThreadSidebarView),
+) -> Value {
+    let mut sidebar = thread_sidebar(stored.as_ref());
+    update(&mut sidebar);
+    let mut content = stored_object(stored);
+    content.insert(
+        "pins".to_owned(),
+        serde_json::to_value(sidebar.pins).unwrap_or_default(),
+    );
+    content.insert(
+        "dismissed".to_owned(),
+        serde_json::to_value(sidebar.dismissed).unwrap_or_default(),
+    );
+    Value::Object(content)
+}
+
+impl SignedIn {
     async fn account_document(&self, event_type: &str) -> Result<Option<Value>, RpcError> {
         Ok(self
             .global_account_data(event_type.into(), "account_document")
@@ -286,11 +377,12 @@ impl Core {
         room_id: &OwnedRoomId,
         event_type: &str,
     ) -> Result<Option<Value>, RpcError> {
-        let room = self.room(room_id).await?;
+        let room = self.room(room_id)?;
         Ok(self
+            .core()
             .with_open_stores(async || room.account_data(event_type.into()).await)
             .await
-            .or_failed(self, "room_account_data")?
+            .or_failed(self.core(), "room_account_data")?
             .and_then(|raw| raw.get_field::<Value>("content").ok().flatten()))
     }
 
@@ -317,7 +409,7 @@ impl Core {
         &self,
         SetMediaPreviewConfigParams { config: update }: SetMediaPreviewConfigParams,
     ) -> Result<MediaPreviewConfigView, RpcError> {
-        let _guard = self.account_data_lock.lock().await;
+        let _guard = self.state().account_data_writes.lock().await;
         let mut content = Value::Null;
         self.update_account_data_locked(
             &[MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT],
@@ -338,7 +430,7 @@ impl Core {
         room_id: &OwnedRoomId,
         previews: Option<MediaPreviewsView>,
     ) -> Result<MediaPreviewConfigView, RpcError> {
-        let _guard = self.account_data_lock.lock().await;
+        let _guard = self.state().account_data_writes.lock().await;
         let stored = match self.room_document(room_id, MEDIA_PREVIEW_EVENT).await? {
             Some(stable) => Some(stable),
             None => {
@@ -347,14 +439,14 @@ impl Core {
             }
         };
         let content = room_media_previews_content(stored, previews);
-        let room = self.room(room_id).await?;
+        let room = self.room(room_id)?;
         for event in [MEDIA_PREVIEW_EVENT, UNSTABLE_MEDIA_PREVIEW_EVENT] {
             let raw = ruma::serde::Raw::new(&content)
-                .or_failed(self, "set_room_media_previews")?
+                .or_failed(self.core(), "set_room_media_previews")?
                 .cast_unchecked();
             room.set_account_data_raw(event.into(), raw)
                 .await
-                .or_failed(self, "set_room_media_previews")?;
+                .or_failed(self.core(), "set_room_media_previews")?;
         }
         Ok(media_preview_config(Some(&content)))
     }
@@ -365,16 +457,6 @@ impl Core {
         Ok(dm_spaces(
             self.account_document(DM_SPACES_EVENT).await?.as_ref(),
         ))
-    }
-
-    pub(crate) async fn synced_dm_spaces_of(
-        client: &matrix_sdk::Client,
-        room_id: &ruma::RoomId,
-    ) -> Vec<OwnedRoomId> {
-        synced_dm_spaces(client)
-            .await
-            .remove(room_id)
-            .unwrap_or_default()
     }
 
     pub(crate) async fn set_dm_spaces(
@@ -437,11 +519,66 @@ impl Core {
                     }
                     serde_json::to_value(DismissedInvitesOut { room_ids })
                         .map(Some)
-                        .or_failed(self, "set_invite_dismissed")
+                        .or_failed(self.core(), "set_invite_dismissed")
                 },
             )
             .await?;
         Ok(dismissed_invites(content.as_ref()))
+    }
+
+    pub(crate) async fn thread_sidebar(&self) -> Result<ThreadSidebarView, RpcError> {
+        Ok(thread_sidebar(
+            self.account_document(THREAD_SIDEBAR_EVENT).await?.as_ref(),
+        ))
+    }
+
+    async fn update_thread_sidebar(
+        &self,
+        operation: &'static str,
+        update: impl FnOnce(&mut ThreadSidebarView),
+    ) -> Result<ThreadSidebarView, RpcError> {
+        let content = self
+            .update_account_data(&[THREAD_SIDEBAR_EVENT], operation, async |stored| {
+                Ok(Some(thread_sidebar_content(stored, update)))
+            })
+            .await?;
+        Ok(thread_sidebar(content.as_ref()))
+    }
+
+    pub(crate) async fn set_thread_pin(
+        &self,
+        room_id: OwnedRoomId,
+        event_id: OwnedEventId,
+        pinned: bool,
+    ) -> Result<ThreadSidebarView, RpcError> {
+        self.update_thread_sidebar("set_thread_pin", |sidebar| {
+            apply_thread_sidebar_flag(sidebar, room_id, event_id, true, pinned);
+        })
+        .await
+    }
+
+    pub(crate) async fn set_thread_dismissed(
+        &self,
+        room_id: OwnedRoomId,
+        event_id: OwnedEventId,
+        dismissed: bool,
+    ) -> Result<ThreadSidebarView, RpcError> {
+        self.update_thread_sidebar("set_thread_dismissed", |sidebar| {
+            apply_thread_sidebar_flag(sidebar, room_id, event_id, false, dismissed);
+        })
+        .await
+    }
+}
+
+impl Core {
+    pub(crate) async fn synced_dm_spaces_of(
+        client: &matrix_sdk::Client,
+        room_id: &ruma::RoomId,
+    ) -> Vec<OwnedRoomId> {
+        synced_dm_spaces(client)
+            .await
+            .remove(room_id)
+            .unwrap_or_default()
     }
 }
 
@@ -450,12 +587,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        dismissed_invites, dm_spaces, dm_spaces_content, media_preview_config,
-        media_preview_content, room_media_previews_content, space_notifications,
-        space_notifications_content,
+        apply_thread_sidebar_flag, dismissed_invites, dm_spaces, dm_spaces_content,
+        media_preview_config, media_preview_content, room_media_previews_content,
+        space_notifications, space_notifications_content, thread_sidebar, thread_sidebar_content,
     };
     use crate::protocol::{
         InviteAvatarsView, MediaPreviewConfigView, MediaPreviewsView, NotificationModeView,
+        ThreadRefView, ThreadSidebarView,
     };
 
     #[test]
@@ -590,6 +728,80 @@ mod tests {
         assert_eq!(
             media_preview_config(Some(&json!("x"))),
             MediaPreviewConfigView::default()
+        );
+    }
+
+    #[test]
+    fn thread_sidebar_skips_invalid_entries_deduplicates_keeps_mutex_and_preserves_unknown_fields()
+    {
+        let room = matrix_sdk::ruma::owned_room_id!("!room:example.org");
+        let first = matrix_sdk::ruma::owned_event_id!("$first:example.org");
+        let second = matrix_sdk::ruma::owned_event_id!("$second:example.org");
+        let third = matrix_sdk::ruma::owned_event_id!("$third:example.org");
+
+        let parsed = thread_sidebar(Some(&json!({
+            "pins": [
+                { "room_id": room, "event_id": first },
+                { "room_id": room, "event_id": first },
+                { "room_id": "invalid", "event_id": "$bad:example.org" },
+                { "room_id": room, "event_id": second }
+            ],
+            "dismissed": [
+                { "room_id": room, "event_id": first },
+                { "room_id": room, "event_id": third },
+                { "room_id": room, "event_id": third },
+                { "room_id": room, "event_id": 42 }
+            ]
+        })));
+        assert_eq!(
+            parsed,
+            ThreadSidebarView {
+                pins: vec![
+                    ThreadRefView {
+                        room_id: room.clone(),
+                        event_id: first.clone(),
+                    },
+                    ThreadRefView {
+                        room_id: room.clone(),
+                        event_id: second,
+                    },
+                ],
+                dismissed: vec![ThreadRefView {
+                    room_id: room.clone(),
+                    event_id: third,
+                }],
+            }
+        );
+
+        let dismissed = thread_sidebar_content(
+            Some(json!({
+                "pins": [{ "room_id": room, "event_id": first }],
+                "dismissed": [],
+                "extra": 1
+            })),
+            |sidebar| {
+                apply_thread_sidebar_flag(sidebar, room.clone(), first.clone(), false, true);
+            },
+        );
+        assert_eq!(
+            dismissed,
+            json!({
+                "pins": [],
+                "dismissed": [{ "room_id": room, "event_id": first }],
+                "extra": 1
+            })
+        );
+
+        let repinned = thread_sidebar_content(Some(dismissed), |sidebar| {
+            apply_thread_sidebar_flag(sidebar, room, first, true, true);
+        });
+        assert_eq!(
+            repinned,
+            json!({
+                "pins": [{ "room_id": "!room:example.org", "event_id": "$first:example.org" }],
+                "dismissed": [],
+                "extra": 1
+            })
         );
     }
 }

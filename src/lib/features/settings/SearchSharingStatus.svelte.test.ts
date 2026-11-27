@@ -8,6 +8,11 @@ import type { CoreEvent, SearchMetricsView, SearchSharingView } from '#src/gener
 
 vi.mock('$app/state', () => import('#lib/test-support/app-state.js'));
 vi.mock('#lib/core/context.js');
+const platform = vi.hoisted(() => ({ nativeMobile: false }));
+vi.mock('#lib/platform/os.js', async (original) => ({
+  ...(await original<typeof import('#lib/platform/os.js')>()),
+  isNativeMobile: () => platform.nativeMobile,
+}));
 
 import { core as baseCore } from '#lib/core/__mocks__/context.js';
 import { preferences } from '#lib/settings/preferences.svelte.js';
@@ -34,6 +39,8 @@ const metrics: SearchMetricsView = {
   memory_bytes: 2_097_152,
   memory_budget: 67_108_864,
   disk_bytes: 1_048_576,
+  disk_index_bytes: 524_288,
+  disk_bookkeeping_bytes: 65_536,
   disk_budget: 536_870_912,
   rooms_joined: 40,
   rooms_indexed: 30,
@@ -41,7 +48,6 @@ const metrics: SearchMetricsView = {
   rooms_exhausted: 12,
   rooms_failed: 1,
   rooms_blind: 2,
-  rooms_unreadable: 0,
   events_crawled: 6000,
   event_budget: 20000,
   batches: 60,
@@ -86,6 +92,7 @@ afterEach(() => {
   preferences.developerTools = false;
   core.session = null;
   preferences.searchSharing = true;
+  platform.nativeMobile = false;
   vi.unstubAllGlobals();
   document.body.innerHTML = '';
 });
@@ -126,6 +133,7 @@ test('the reset button forgets what this device received', async () => {
 });
 
 test('the pause reason replaces the waiting state', async () => {
+  platform.nativeMobile = true;
   searchMetrics.mockResolvedValue(withSharing({ pause: 'metered', outcome: 'no_answer' }));
   render(SearchSharingStatus);
   await settle();
@@ -135,6 +143,15 @@ test('the pause reason replaces the waiting state', async () => {
   expect(document.querySelector<HTMLButtonElement>('#search-sharing-find button')?.disabled).toBe(
     true
   );
+});
+
+test('a metered pause off mobile names no setting this device lacks', async () => {
+  searchMetrics.mockResolvedValue(withSharing({ pause: 'metered' }));
+  render(SearchSharingStatus);
+  await settle();
+
+  expect(status()).toContain('Paused on a cellular or data saver connection.');
+  expect(status()).not.toContain('unmetered network setting');
 });
 
 test('progress names the device being copied from', async () => {

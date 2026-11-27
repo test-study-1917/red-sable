@@ -22,6 +22,7 @@
   import TextInput from '#lib/ui/primitives/TextInput.svelte';
   import Tooltip from '#lib/ui/primitives/Tooltip.svelte';
   import { emojiGroupIcons, type BoardTab } from '#lib/ui/primitives/emote-board.js';
+  import { isComposingKey } from '#lib/ui/shortcuts/binding.js';
   import ClockCounterClockwiseIcon from 'phosphor-svelte/lib/ClockCounterClockwiseIcon';
   import {
     writeBoardSize,
@@ -34,7 +35,7 @@
   import { emojiGroups, searchReactionEmoji, shortcodeFor } from '#lib/emoji/emoji.js';
   import { useRecentReactions } from '#lib/emoji/recents.svelte.js';
   import { emoteRecents } from '#lib/model/model.js';
-  import { readRecentStickers, rememberSticker } from '#lib/emoji/recent-packs.svelte.js';
+  import { useStickerHistory } from '#lib/emoji/sticker-history.svelte.js';
 
   interface Props {
     roomId: string;
@@ -71,6 +72,7 @@
   }: Props = $props();
   const core = useCoreClient();
   const history = useRecentReactions(core);
+  const stickerHistory = useStickerHistory(core);
 
   type PickerRow =
     | { id: string; kind: 'lead' }
@@ -96,7 +98,7 @@
   let packs = $state.raw<ImagePackView[]>([]);
   let loading = $state(true);
   let failed = $state(false);
-  let recent = $derived(tab === 'sticker' ? readRecentStickers() : []);
+  let recent = $derived(tab === 'sticker' ? stickerHistory.current : []);
   let preview = $state.raw<{ image: PackImageView; pack: ImagePackView } | null>(null);
   let activeCell = $state.raw<{ section: string; index: number }>({ section: '', index: 0 });
   let gridWidth = $state(0);
@@ -542,7 +544,7 @@
   }
 
   function searchKeydown(event: KeyboardEvent): void {
-    if (gifTab) return;
+    if (gifTab || isComposingKey(event)) return;
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
       if (event.key === 'Enter') submitQuery(event);
       return;
@@ -551,12 +553,11 @@
       event.preventDefault();
       return;
     }
-    submitQuery(event);
+    if (event.key === 'Enter') submitQuery(event);
   }
 
   /** A reaction key is any string, so an unmatched query is still a valid one. */
   function submitQuery(event: KeyboardEvent): void {
-    if (event.key !== 'Enter') return;
     const cell = showFreeText && chosen.key !== boardKey ? undefined : selectedCell();
     if (cell) {
       event.preventDefault();
@@ -593,7 +594,7 @@
   function pick(image: PackImageView, keepOpen: boolean): void {
     keepPickFocus(keepOpen, image.url);
     if (!reactions) {
-      if (tab === 'sticker') rememberSticker(image.url);
+      if (tab === 'sticker') stickerHistory.remember(image.url);
       else rememberEmoji(image.url);
     }
     onPick(image, tab as ImageUsageView, keepOpen);
@@ -960,6 +961,7 @@
 
   .board.sheet {
     height: min(36rem, calc(100dvh - var(--keyboard-overlap) - 7rem));
+    min-height: 0;
     width: 100%;
   }
 

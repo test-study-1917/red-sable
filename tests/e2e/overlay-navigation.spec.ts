@@ -1,5 +1,5 @@
 import { expect, test, SIGNED_OUT } from './fixtures/test';
-import { timelineItem } from './fixtures/timeline-items';
+import { threadSummary, timelineItem } from './fixtures/timeline-items';
 import { quietFor, NEGATIVE_SETTLE_MS } from './fixtures/settle';
 
 test.use({ storageState: SIGNED_OUT, viewport: { width: 1280, height: 800 } });
@@ -19,11 +19,11 @@ test('leaving the room while a thread is open lands on the other section', async
       values: [
         {
           ...timelineItem('thread-root', 'Root message'),
-          thread_summary: {
+          thread_summary: threadSummary({
             num_replies: 3,
             latest_body: 'a reply',
             latest_sender: '@bob:example.test',
-          },
+          }),
         },
       ],
     },

@@ -37,7 +37,12 @@
   import UnreadBadge from '#lib/ui/primitives/UnreadBadge.svelte';
   import Spinner from '#lib/ui/primitives/Spinner.svelte';
   import { rovingFocus } from '#lib/ui/roving-focus.js';
-  import { isDialogOpen, isEditableTarget, matchesBinding } from '#lib/ui/shortcuts/binding.js';
+  import {
+    isComposingKey,
+    isDialogOpen,
+    isEditableTarget,
+    matchesBinding,
+  } from '#lib/ui/shortcuts/binding.js';
   import { bindingFor } from '#lib/ui/shortcuts/bindings.svelte.js';
   import { isMacPlatform } from '#lib/ui/shortcuts/global-shortcuts.js';
 
@@ -709,8 +714,17 @@
     if (!controller || !revealed || !isEditableTarget(event.target)) return;
     if (nearLatest && !windowState.pinned) void controller.jumpTo(null, 'start');
   }
+  export function composerKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'PageUp' && event.key !== 'PageDown') return;
+    if (event.defaultPrevented || isComposingKey(event) || !isEditableTarget(event.target)) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !viewport) return;
+    event.preventDefault();
+    const page = viewport.clientHeight * KEY_PAGE_FRACTION;
+    viewport.scrollBy({ top: event.key === 'PageUp' ? -page : page });
+  }
   const ARTICLE = 'article.message:not([aria-hidden="true"])';
   const KEY_PAGE_ITEMS = 8;
+  const KEY_PAGE_FRACTION = 0.875;
   const FOCUSABLE = 'button, a[href], input, textarea, select, [tabindex]';
   const feedItems = rovingFocus({
     orientation: 'vertical',
@@ -807,7 +821,7 @@
     });
   }
   function onTimelineKeydown(event: KeyboardEvent): void {
-    if (event.defaultPrevented || event.isComposing || !active || !selection.active) return;
+    if (event.defaultPrevented || isComposingKey(event) || !active || !selection.active) return;
     if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="menu"]')) {
       return;
     }
@@ -835,7 +849,7 @@
   }
   function feedKeydown(event: KeyboardEvent): void {
     const target = event.target;
-    if (!(target instanceof HTMLElement) || event.defaultPrevented) return;
+    if (!(target instanceof HTMLElement) || event.defaultPrevented || isComposingKey(event)) return;
     const article = target.closest<HTMLElement>(ARTICLE);
     if (!article) return;
     const plain = !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
@@ -1182,7 +1196,7 @@
     void controller?.jumpTo(null, 'start', !shouldReduceMotion());
   }
   function onJumpShortcut(event: KeyboardEvent): void {
-    if (event.defaultPrevented || event.isComposing || !active) return;
+    if (event.defaultPrevented || isComposingKey(event) || !active) return;
     if (isEditableTarget(event.target) || isDialogOpen()) return;
     const mac = isMacPlatform();
     const pressed = (id: string): boolean => {
@@ -1332,37 +1346,39 @@
       onExit={exitSelection}
     />
   {:else if revealed && unread.active && !unread.loading && (!unreadInView || unreadError !== null)}
-    <div class="unread-bar">
-      <Button
-        class="jump-to-unread"
-        variant="ghost"
-        loading={jumpingUnread}
-        disabled={markingRead}
-        aria-label={i18n.t('timeline.jumpToUnread')}
-        onclick={() => void jumpToUnread()}
-      >
-        <ArrowUpIcon />
-        <span
-          >{unreadCount > 0
-            ? i18n.t('timeline.unreadCount', { count: unreadCount })
-            : i18n.t('timeline.newMessagesUnknown')}</span
+    <div class="unread-float">
+      <div class="unread-bar">
+        <Button
+          class="jump-to-unread"
+          variant="ghost"
+          loading={jumpingUnread}
+          disabled={markingRead}
+          aria-label={i18n.t('timeline.jumpToUnread')}
+          onclick={() => void jumpToUnread()}
         >
-        <span class="unread-action">{i18n.t('timeline.jumpToUnread')}</span>
-      </Button>
-      {#if onMarkRead}
-        <Button variant="ghost" loading={markingRead} onclick={() => void markAllRead()}>
-          <span>{i18n.t('common.markAsRead')}</span>
-          <CheckIcon />
+          <ArrowUpIcon />
+          <span
+            >{unreadCount > 0
+              ? i18n.t('timeline.unreadCount', { count: unreadCount })
+              : i18n.t('timeline.newMessagesUnknown')}</span
+          >
+          <span class="unread-action">{i18n.t('timeline.jumpToUnread')}</span>
         </Button>
+        {#if onMarkRead}
+          <Button variant="ghost" loading={markingRead} onclick={() => void markAllRead()}>
+            <span>{i18n.t('common.markAsRead')}</span>
+            <CheckIcon />
+          </Button>
+        {/if}
+      </div>
+      {#if unreadError !== null}
+        <Alert variant="critical" role="alert"
+          >{i18n.t(
+            unreadError === 'jump' ? 'timeline.unreadJumpFailed' : 'timeline.markReadFailed'
+          )}</Alert
+        >
       {/if}
     </div>
-    {#if unreadError !== null}
-      <Alert variant="critical" role="alert"
-        >{i18n.t(
-          unreadError === 'jump' ? 'timeline.unreadJumpFailed' : 'timeline.markReadFailed'
-        )}</Alert
-      >
-    {/if}
   {/if}
 
   <div class="timeline-stage">
@@ -1730,6 +1746,13 @@
 
   .layout-bubble .item {
     padding-bottom: 0;
+  }
+
+  .unread-float {
+    inset-block-start: 0;
+    inset-inline: 0 var(--timeline-scrollbar-size);
+    position: absolute;
+    z-index: 2;
   }
 
   .unread-bar {

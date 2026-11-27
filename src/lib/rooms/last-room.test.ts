@@ -21,7 +21,14 @@ function room(roomId: string, overrides: Partial<RoomListItemView> = {}): RoomLi
 const space = room('!space:example.org', {
   room_kind: 'space',
   space_children: [
-    { room_id: '!room:example.org', via: [], order: null, suggested: false, origin_server_ts: 0 },
+    {
+      room_id: '!room:example.org',
+      via: [],
+      order: null,
+      suggested: false,
+      origin_server_ts: 0,
+      private: false,
+    },
   ],
 });
 const other = room('!other:example.org', { room_kind: 'space' });
@@ -40,6 +47,30 @@ test('restores the Home tab a room was opened from', () => {
   );
 });
 
+test('keeps a direct message in the Home tab it was opened from', () => {
+  const dm = room('!dm:example.org', { is_direct: true });
+  expect(restoredRoomPath([...rooms, dm], dm.room_id, HOME_SECTION, true, spaceRooms)).toBe(
+    '/home/!dm%3Aexample.org'
+  );
+  expect(restoredRoomPath([...rooms, dm], dm.room_id, HOME_SECTION, false, spaceRooms)).toBe(
+    '/direct/!dm%3Aexample.org'
+  );
+  expect(restoredRoomPath([...rooms, dm], dm.room_id, null, true, spaceRooms)).toBe(
+    '/direct/!dm%3Aexample.org'
+  );
+});
+
+test('keeps a direct message in the space it was filed under', () => {
+  const dm = room('!dm:example.org', { is_direct: true });
+  const dmSpaceRooms = (spaceId: string) => (spaceId === space.room_id ? [dm.room_id] : []);
+  expect(restoredRoomPath([...rooms, dm], dm.room_id, space.room_id, true, dmSpaceRooms)).toBe(
+    '/space/!space%3Aexample.org/!dm%3Aexample.org'
+  );
+  expect(restoredRoomPath([...rooms, dm], dm.room_id, other.room_id, true, dmSpaceRooms)).toBe(
+    '/direct/!dm%3Aexample.org'
+  );
+});
+
 test('falls back when Home is disabled', () => {
   expect(restoredRoomPath(rooms, '!room:example.org', HOME_SECTION, false, spaceRooms)).toBe(
     '/space/!space%3Aexample.org/!room%3Aexample.org'
@@ -50,7 +81,14 @@ test('restores the space a room was opened from', () => {
   const second = room('!second:example.org', {
     room_kind: 'space',
     space_children: [
-      { room_id: '!room:example.org', via: [], order: null, suggested: false, origin_server_ts: 0 },
+      {
+        room_id: '!room:example.org',
+        via: [],
+        order: null,
+        suggested: false,
+        origin_server_ts: 0,
+        private: false,
+      },
     ],
   });
   expect(

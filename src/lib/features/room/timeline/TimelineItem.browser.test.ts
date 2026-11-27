@@ -24,6 +24,7 @@ vi.mock('#lib/rooms/presence.svelte.js', async () => {
 
 import { core } from '#lib/core/__mocks__/context.js';
 import { expectNoA11yViolations, ICONS_HIDDEN_BY_LAYOUT } from '#lib/test-support/a11y.js';
+import { setCurrentLanguage } from '#lib/language.svelte.js';
 import { setPreference } from '#lib/settings/preferences.svelte.js';
 
 import TimelineItemHarness from './TimelineItemHarness.test.svelte';
@@ -308,6 +309,42 @@ test('the hover animation stacks over the still picture inside the frame', async
   ]);
 });
 
+test.each([
+  ['ltr', -1],
+  ['rtl', 1],
+] as const)(
+  'a %s swipe slides the row toward the inline start over its action',
+  async (dir, sign) => {
+    document.documentElement.dir = dir;
+    setCurrentLanguage(dir === 'rtl' ? 'ar' : 'en', dir);
+    onTestFinished(() => {
+      document.documentElement.dir = 'ltr';
+      setCurrentLanguage('en', 'ltr');
+    });
+    await mountItem(message('swipe', '@alice:example.test', 'Alice'), 'modern', {
+      onReply: vi.fn(),
+    });
+    const row = document.querySelector<HTMLElement>('article.message');
+    if (!row) throw new Error('the message row is not rendered');
+    const before = row.getBoundingClientRect();
+    const touch = (type: string, x: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'touches', { value: [{ clientX: x, clientY: 0 }] });
+      row.dispatchEvent(event);
+    };
+    touch('touchstart', 200);
+    touch('touchmove', 200 + sign * 40);
+
+    await expect
+      .poll(() => sign * (row.getBoundingClientRect().left - before.left))
+      .toBeGreaterThan(0);
+    const action = row.querySelector('.swipe-action')?.getBoundingClientRect();
+    if (!action) throw new Error('the swipe action is not rendered');
+    expect(action.left).toBeGreaterThanOrEqual(before.left - 1);
+    expect(action.right).toBeLessThanOrEqual(before.right + 1);
+  }
+);
+
 test('right-clicking the same message again reopens the menu at the pointer', async () => {
   await page.viewport(900, 600);
   const screen = await mountItem(message('menu-2', '@alice:example.test', 'Alice'));
@@ -435,6 +472,22 @@ test('an edited message keeps its marker on the body line', async () => {
   expect(heights).toHaveLength(2);
   expect(heights[1]).toBeCloseTo(heights[0] ?? 0, 0);
   expect(document.querySelectorAll('.edited, [class*="edited"]').length).toBeGreaterThan(0);
+});
+
+test.each([
+  ['subtext', '<sub data-md="-#">small print</sub>'],
+  ['a paragraph', '<p>first</p><p>second</p>'],
+])('the edited marker stays on the last line after %s', async (_, html) => {
+  await page.viewport(1280, 900);
+  const edited = message('marker-block', '@alice:example.test', 'Alice');
+  if (edited.content.kind !== 'message') throw new Error('expected a message');
+  edited.content = { ...edited.content, html, edited: true };
+  await mountItem(edited);
+
+  const last = document.querySelector('.formatted-body > :last-child');
+  const marker = document.querySelector('.edited');
+  if (!last || !marker) throw new Error('missing the body or the marker');
+  expect(marker.getBoundingClientRect().top).toBeLessThan(last.getBoundingClientRect().bottom);
 });
 
 test('a long handle in a narrow row gives way to the sender name', async () => {

@@ -22,16 +22,14 @@ function hit(eventId: string): SearchHitView {
     sender: '@kris:example.org',
     origin_server_ts: 1_700_000_000_000,
     score: 1,
+    matched: [],
     context_before: [],
     context_after: [],
   };
 }
 
-function page(
-  hits: SearchHitView[],
-  older: string | null = null
-): { hits: SearchHitView[]; older: string | null } {
-  return { hits, older };
+function page(hits: SearchHitView[]): { hits: SearchHitView[] } {
+  return { hits };
 }
 
 function coverage(
@@ -102,7 +100,7 @@ test('a slow response for an abandoned query never lands', async () => {
     .fn()
     .mockImplementationOnce(
       async () =>
-        new Promise<{ hits: SearchHitView[]; older: string | null }>((resolve) => {
+        new Promise<{ hits: SearchHitView[] }>((resolve) => {
           setTimeout(() => {
             resolve(page([hit('$stale')]));
           }, 1_000);
@@ -173,55 +171,6 @@ test('a full page loads more and appends', async () => {
   expect(search.exhausted).toBe(true);
 });
 
-test('a short page with messages on disk continues into older pages', async () => {
-  const searchMessages = vi
-    .fn()
-    .mockResolvedValueOnce(page([hit('$recent')], ''))
-    .mockResolvedValueOnce(page([hit('$older')], '100:3:!room:example.org'))
-    .mockResolvedValueOnce(page([hit('$oldest')]));
-  const { core } = coreReturning(searchMessages);
-  const search = new MessageSearch(core, () => directory);
-
-  search.query = 'deploy';
-  search.schedule();
-  await vi.advanceTimersByTimeAsync(500);
-  expect(search.older).toBe(true);
-  expect(search.exhausted).toBe(false);
-
-  await search.loadMore();
-  expect(searchMessages).toHaveBeenLastCalledWith(
-    expect.objectContaining({ query: 'deploy', older: '' })
-  );
-  await search.loadMore();
-  expect(searchMessages).toHaveBeenLastCalledWith(
-    expect.objectContaining({ query: 'deploy', older: '100:3:!room:example.org' })
-  );
-
-  expect(search.hits.map((entry) => entry.event_id)).toEqual(['$recent', '$older', '$oldest']);
-  expect(search.exhausted).toBe(true);
-  expect(search.older).toBe(false);
-});
-
-test('an older page that finds nothing still counts as a page, so scrolling asks again', async () => {
-  const searchMessages = vi
-    .fn()
-    .mockResolvedValueOnce(page([hit('$recent')], ''))
-    .mockResolvedValueOnce(page([], '100:3:!room:example.org'));
-  const { core } = coreReturning(searchMessages);
-  const search = new MessageSearch(core, () => directory);
-
-  search.query = 'deploy';
-  search.schedule();
-  await vi.advanceTimersByTimeAsync(500);
-  const before = search.pages;
-
-  await search.loadMore();
-
-  expect(search.hits).toHaveLength(1);
-  expect(search.pages).toBe(before + 1);
-  expect(search.exhausted).toBe(false);
-});
-
 test('a failure reports itself and stops paging', async () => {
   const searchMessages = vi.fn().mockRejectedValue(new Error('core is gone'));
   const { core } = coreReturning(searchMessages);
@@ -259,25 +208,6 @@ test('a failed next page keeps results and retries the same offset', async () =>
   expect(messages).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 30 }));
   expect(search.hits).toHaveLength(31);
   expect(search.pageFailed).toBe(false);
-});
-
-test('a failed older page retries its cursor without dropping recent results', async () => {
-  const messages = vi
-    .fn()
-    .mockResolvedValueOnce(page([hit('$recent')], 'cold-cursor'))
-    .mockRejectedValueOnce(new Error('offline'))
-    .mockResolvedValueOnce(page([hit('$old')]));
-  const { core } = coreReturning(messages);
-  const search = new MessageSearch(core, () => directory);
-  search.query = 'deploy';
-  search.schedule();
-  await vi.advanceTimersByTimeAsync(500);
-  await search.loadMore();
-  expect(search.hits.map((hit) => hit.event_id)).toEqual(['$recent']);
-  expect(search.failed).toBe(false);
-  await search.retryPage();
-  expect(messages).toHaveBeenLastCalledWith(expect.objectContaining({ older: 'cold-cursor' }));
-  expect(search.hits.map((hit) => hit.event_id)).toEqual(['$recent', '$old']);
 });
 
 test('indexing progress refreshes an unchanged query and coalesces updates', async () => {
@@ -540,4 +470,30 @@ test('a space with no joined rooms finds nothing instead of searching everywhere
   expect(search.hits).toEqual([]);
   expect(search.searching).toBe(false);
   expect(search.unresolved).toEqual([]);
+});
+
+test('a Japanese query is sent with the words the platform cut it into', async () => {
+  vi.stubGlobal('Intl', {
+    ...Intl,
+    Segmenter: class {
+      segment(text: string): { segment: string; isWordLike: boolean }[] {
+        return (text === '日本語勉強' ? ['日本語', '勉強'] : [text]).map((segment) => ({
+          segment,
+          isWordLike: true,
+        }));
+      }
+    },
+  });
+  const messages = vi.fn().mockResolvedValueOnce(page([hit('$recent')]));
+  const { core } = coreReturning(messages);
+  const search = new MessageSearch(core, () => directory);
+  search.query = '日本語勉強';
+  search.schedule();
+  await vi.advanceTimersByTimeAsync(500);
+  vi.unstubAllGlobals();
+
+  expect(messages).toHaveBeenNthCalledWith(
+    1,
+    expect.objectContaining({ query: '日本語勉強', words: ['日本語', '勉強'] })
+  );
 });

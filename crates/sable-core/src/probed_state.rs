@@ -1,3 +1,4 @@
+use crate::SignedIn;
 use crate::now_ms;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +12,9 @@ use serde_json::Value;
 use crate::protocol::RoomStateEventView;
 
 const MAX_PROBED_ROOMS: usize = 32;
+
+/// A state event's content, and its `origin_server_ts` when known.
+type ProbedEvent = (Value, Option<u64>);
 
 #[derive(Default)]
 pub(crate) struct ProbedState {
@@ -30,7 +34,7 @@ pub(crate) enum Probed {
 #[derive(Default)]
 struct ProbedRoom {
     full: Option<HashMap<String, Vec<RoomStateEventView>>>,
-    keys: HashMap<(String, String), Option<(Value, Option<u64>)>>,
+    keys: HashMap<(String, String), Option<ProbedEvent>>,
     written: u64,
 }
 
@@ -81,7 +85,7 @@ impl ProbedState {
         room_id: &RoomId,
         event_type: &str,
         state_key: &str,
-        content: Option<(Value, Option<u64>)>,
+        content: Option<ProbedEvent>,
     ) {
         self.room_mut(room_id)
             .keys
@@ -159,9 +163,11 @@ impl ProbedState {
     }
 }
 
-impl crate::Core {
-    pub(crate) fn probed_state(&self) -> parking_lot::MutexGuard<'_, ProbedState> {
-        self.probed_state.lock()
+impl SignedIn {
+    pub(crate) fn probed_state(
+        &self,
+    ) -> parking_lot::ArcMutexGuard<parking_lot::RawMutex, ProbedState> {
+        self.state().probed_state.lock_arc()
     }
 }
 
@@ -177,12 +183,12 @@ pub(crate) struct RecentState {
     members: HashMap<OwnedRoomId, u64>,
 }
 
-impl crate::Core {
+impl SignedIn {
     pub(crate) async fn room_state_snapshot(
         &self,
-        client: &matrix_sdk::Client,
         room_id: &RoomId,
     ) -> matrix_sdk::Result<RoomStateSnapshot> {
+        let client = self.client();
         let fetch = {
             let mut recent = self.recent_state();
             recent.fetches.retain(|_, lock| Arc::strong_count(lock) > 1);
@@ -220,7 +226,8 @@ impl crate::Core {
         self.recent_state().rooms.remove(room_id);
     }
 
-    pub(crate) fn watch_room_state(self: &Arc<Self>, client: &matrix_sdk::Client) {
+    pub(crate) fn watch_room_state(&self) {
+        let client = self.client();
         let handle = client.add_event_handler({
             let core = self.clone();
             move |raw: Raw<AnySyncStateEvent>, room: matrix_sdk::Room| {
@@ -263,8 +270,8 @@ impl crate::Core {
         self.recent_state().members.remove(room_id);
     }
 
-    fn recent_state(&self) -> parking_lot::MutexGuard<'_, RecentState> {
-        self.recent_state.lock()
+    fn recent_state(&self) -> parking_lot::ArcMutexGuard<parking_lot::RawMutex, RecentState> {
+        self.state().recent_state.lock_arc()
     }
 }
 

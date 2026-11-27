@@ -2,7 +2,11 @@
   "upcoming": {
     "added": [
       "deploymentTheme",
-      "showEncryptionStatusIcon"
+      "saturation",
+      "showActiveThreadsInSidebar",
+      "showEncryptionStatusIcon",
+      "matrixLinkSelector",
+      "matrixLinkCustom"
     ],
     "changed": []
   },

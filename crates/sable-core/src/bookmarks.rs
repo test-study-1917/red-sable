@@ -1,13 +1,13 @@
 use matrix_sdk::ruma::events::GlobalAccountDataEventType;
-use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
+use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, UserId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnError, VecSkipError, serde_as};
 
-use crate::Core;
 use crate::ResultExt;
+use crate::SignedIn;
 use crate::protocol::BookmarkView;
-use crate::protocol::RpcError;
+use crate::protocol::{RpcCode, RpcError};
 use crate::room_settings::EmptyContent;
 
 const INDEX_EVENT: &str = "pl.chrome.bookmarks.index";
@@ -120,7 +120,7 @@ fn item_event(id: &str) -> GlobalAccountDataEventType {
     GlobalAccountDataEventType::from(format!("{ITEM_PREFIX}{id}"))
 }
 
-impl Core {
+impl SignedIn {
     async fn bookmark_account_data<T: DeserializeOwned>(
         &self,
         event_type: GlobalAccountDataEventType,
@@ -187,7 +187,7 @@ impl Core {
             let index = current
                 .map(IndexIn::deserialize)
                 .transpose()
-                .or_failed(self, "bookmarks")?
+                .or_failed(self.core(), "bookmarks")?
                 .unwrap_or_default();
             let revision = index.revision.unwrap_or(0);
             let mut ids = unique_ids(index.bookmark_ids);
@@ -214,7 +214,7 @@ impl Core {
                 bookmark_ids: ids,
             })
             .map(Some)
-            .or_failed(self, "bookmarks")
+            .or_failed(self.core(), "bookmarks")
         })
         .await?;
 
@@ -228,12 +228,12 @@ impl Core {
         event_id: &OwnedEventId,
         now_ms: u64,
     ) -> Result<(), RpcError> {
-        let room = self.room(room_id).await?;
-        let encrypted = self.room_is_encrypted(&room).await?;
+        let room = self.room(room_id)?;
+        let encrypted = self.core().room_is_encrypted(&room).await?;
         let event = room
             .event(event_id, None)
             .await
-            .or_failed(self, "set_bookmark")?;
+            .or_failed(self.core(), "set_bookmark")?;
         let raw = event
             .raw()
             .deserialize_as_unchecked::<SourceEventIn>()
@@ -244,10 +244,19 @@ impl Core {
             .and_then(|content| content.body.as_deref())
             .map(|body| crate::inbox::preview(body.to_owned()));
 
+        let route = crate::routing::Route::cached(&room)
+            .await
+            .or_else(|| {
+                let sender = UserId::parse(raw.sender.as_deref()?).ok()?;
+                crate::routing::Route::claimed_by(&sender)
+            })
+            .ok_or(RpcCode::UnknownRoom)?;
         let item = ItemOut {
             version: 1,
             bookmark_id: id.to_owned(),
-            uri: room_id.matrix_event_uri(event_id.clone()).to_string(),
+            uri: room_id
+                .matrix_event_uri_via(event_id.clone(), route.into_servers())
+                .to_string(),
             room_id: room_id.clone(),
             event_id: event_id.clone(),
             event_ts: raw.origin_server_ts.unwrap_or(now_ms),

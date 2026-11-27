@@ -3,16 +3,16 @@ use std::collections::{BTreeMap, HashSet};
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::events::relation::RelationType;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, UserId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, UserId};
 use sable_model::truncate::truncate_graphemes;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use serde_with::{DefaultOnError, serde_as};
 
-use crate::Core;
 use crate::ResultExt;
+use crate::SignedIn;
 use crate::api::packs::ListOk;
-use crate::protocol::{ReactionShortcodeView, RpcCode, RpcError};
+use crate::protocol::{ReactionGroup, ReactionShortcodeView, RpcCode, RpcError};
 use crate::widgets::RelationsFilter;
 
 const MAX_SHORTCODE_BYTES: usize = 100;
@@ -66,18 +66,17 @@ fn is_redacted<T>(event: &Raw<T>) -> bool {
         .is_some_and(|unsigned| unsigned.contains_key("redacted_because"))
 }
 
-impl Core {
+impl SignedIn {
     pub(crate) async fn ensure_reaction_target(
         &self,
         room_id: &OwnedRoomId,
         event_id: &OwnedEventId,
     ) -> Result<(), RpcError> {
         let event = self
-            .room(room_id)
-            .await?
+            .room(room_id)?
             .load_or_fetch_event(event_id, None)
             .await
-            .or_failed(self, "reaction_target")?;
+            .or_failed(self.core(), "reaction_target")?;
         if can_annotate(event.raw()) && !is_redacted(event.raw()) {
             Ok(())
         } else {
@@ -85,19 +84,13 @@ impl Core {
         }
     }
 
-    /// Every `m.reaction` event `sender` sent to `event_id` with `key`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the relations cannot be fetched or pagination does not advance.
-    pub(crate) async fn reaction_event_ids(
+    async fn reaction_relations(
         &self,
         room_id: &OwnedRoomId,
         event_id: &OwnedEventId,
-        key: &str,
-        sender: &UserId,
-    ) -> Result<Vec<OwnedEventId>, RpcError> {
-        let mut found = Vec::new();
+        context: &'static str,
+    ) -> Result<Vec<Value>, RpcError> {
+        let mut events = Vec::new();
         let mut seen_pages = HashSet::new();
         let mut from: Option<String> = None;
         loop {
@@ -115,23 +108,99 @@ impl Core {
                     },
                 )
                 .await?;
-            for event in &page.chunk {
-                if let Some(id) = reaction_id(event, event_id, key, sender)
-                    && !found.contains(&id)
-                {
-                    found.push(id);
-                }
-            }
+            events.extend(page.chunk);
             let Some(next) = page.next_batch else {
-                return Ok(found);
+                return Ok(events);
             };
             if !seen_pages.insert(next.clone()) {
-                return Err(
-                    self.failed("reaction_event_ids", "reaction pagination did not advance")
-                );
+                return Err(self
+                    .core()
+                    .failed(context, "reaction pagination did not advance"));
             }
             from = Some(next);
         }
+    }
+
+    /// Every `m.reaction` event `sender` sent to `event_id` with `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relations cannot be fetched or pagination does not advance.
+    pub(crate) async fn reaction_event_ids(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &OwnedEventId,
+        key: &str,
+        sender: &UserId,
+    ) -> Result<Vec<OwnedEventId>, RpcError> {
+        let mut found = Vec::new();
+        for event in self
+            .reaction_relations(room_id, event_id, "reaction_event_ids")
+            .await?
+        {
+            if let Some(id) = reaction_id(&event, event_id, key, sender)
+                && !found.contains(&id)
+            {
+                found.push(id);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Toggles the user's `key` reaction on an event no open timeline holds, such as a forum post
+    /// older than the room's loaded messages. Returns whether the reaction was added.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relations cannot be fetched or the server refuses the change.
+    pub(crate) async fn toggle_reaction_outside_timeline(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &OwnedEventId,
+        key: &str,
+        extra: Option<Map<String, Value>>,
+    ) -> Result<bool, RpcError> {
+        let room = self.room(room_id)?;
+        let mine = self
+            .reaction_event_ids(room_id, event_id, key, room.own_user_id())
+            .await?;
+        if mine.is_empty() {
+            let mut content = extra.unwrap_or_default();
+            content.insert(
+                "m.relates_to".to_owned(),
+                serde_json::json!({
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": key,
+                }),
+            );
+            room.send_raw("m.reaction", Value::Object(content))
+                .await
+                .or_failed(self.core(), "react")?;
+            return Ok(true);
+        }
+        for id in mine {
+            room.redact(&id, None, None)
+                .await
+                .or_failed(self.core(), "react")?;
+        }
+        Ok(false)
+    }
+
+    /// Grouped `m.reaction` events targeting `event_id`, fetched from relations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the relations cannot be fetched or pagination does not advance.
+    pub(crate) async fn event_reactions(
+        &self,
+        room_id: &OwnedRoomId,
+        event_id: &OwnedEventId,
+    ) -> Result<Vec<ReactionGroup>, RpcError> {
+        let events = self
+            .reaction_relations(room_id, event_id, "event_reactions")
+            .await?;
+        Ok(group_reactions(&events, event_id))
     }
 
     /// MSC4027 custom-image reactions, which the timeline's reaction groups omit.
@@ -144,18 +213,18 @@ impl Core {
         room_id: &OwnedRoomId,
         event_id: &OwnedEventId,
     ) -> Result<Vec<ReactionShortcodeView>, RpcError> {
-        let room = self.room(room_id).await?;
+        let room = self.room(room_id)?;
         let client = room.client();
         let (cache, _handles) = client
             .event_cache()
             .ok_or(RpcCode::Unavailable)?
             .room(room_id)
             .await
-            .or_failed(self, "reaction_shortcodes")?;
+            .or_failed(self.core(), "reaction_shortcodes")?;
         let related = cache
             .find_event_with_relations(event_id, Some(vec![RelationType::Annotation]))
             .await
-            .or_failed(self, "reaction_shortcodes")?
+            .or_failed(self.core(), "reaction_shortcodes")?
             .filter(|(target, _)| can_annotate(target.raw()))
             .map(|(_, related)| related)
             .unwrap_or_default();
@@ -190,20 +259,52 @@ impl Core {
     }
 }
 
+fn reaction_annotation<'a>(event: &'a Value, target: &EventId) -> Option<(&'a str, &'a str)> {
+    if event.get("type")?.as_str()? != "m.reaction" {
+        return None;
+    }
+    let relation = event.get("content")?.get("m.relates_to")?;
+    (relation.get("rel_type")?.as_str()? == "m.annotation"
+        && relation.get("event_id")?.as_str()? == target)
+        .then(|| {
+            Some((
+                event.get("sender")?.as_str()?,
+                relation.get("key")?.as_str()?,
+            ))
+        })?
+}
+
 fn reaction_id(
     event: &Value,
     target: &EventId,
     key: &str,
     sender: &UserId,
 ) -> Option<OwnedEventId> {
-    if event.get("type")?.as_str()? != "m.reaction" || event.get("sender")?.as_str()? != sender {
-        return None;
+    let (ev_sender, ev_key) = reaction_annotation(event, target)?;
+    (ev_sender == sender && ev_key == key).then(|| event.get("event_id")?.as_str()?.parse().ok())?
+}
+
+fn group_reactions(events: &[Value], target: &EventId) -> Vec<ReactionGroup> {
+    let mut groups: Vec<ReactionGroup> = Vec::new();
+    for event in events {
+        let Some((sender, key)) = reaction_annotation(event, target) else {
+            continue;
+        };
+        let Ok(sender) = OwnedUserId::try_from(sender) else {
+            continue;
+        };
+        if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
+            if !group.senders.contains(&sender) {
+                group.senders.push(sender);
+            }
+        } else {
+            groups.push(ReactionGroup {
+                key: key.to_owned(),
+                senders: vec![sender],
+            });
+        }
     }
-    let relation = event.get("content")?.get("m.relates_to")?;
-    (relation.get("rel_type")?.as_str()? == "m.annotation"
-        && relation.get("event_id")?.as_str()? == target
-        && relation.get("key")?.as_str()? == key)
-        .then(|| event.get("event_id")?.as_str()?.parse().ok())?
+    groups
 }
 
 fn shortcodes(events: &[TimelineEvent], target: &EventId) -> Vec<ReactionShortcodeView> {
@@ -239,508 +340,5 @@ fn normalized(shortcode: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use matrix_sdk::deserialized_responses::TimelineEvent;
-    use matrix_sdk::ruma::{event_id, serde::Raw, user_id};
-    use serde_json::json;
-
-    use super::{can_annotate, is_redacted, shortcodes};
-
-    #[test]
-    fn annotation_targets_are_checked_by_relation_type() {
-        for (relation, allowed) in [
-            (
-                json!({"rel_type": "m.annotation", "event_id": "$original"}),
-                false,
-            ),
-            (
-                json!({"rel_type": "m.replace", "event_id": "$original"}),
-                false,
-            ),
-            (
-                json!({"rel_type": "m.thread", "event_id": "$original"}),
-                true,
-            ),
-            (
-                json!({"rel_type": "m.reference", "event_id": "$original"}),
-                true,
-            ),
-            (json!({"m.in_reply_to": {"event_id": "$original"}}), true),
-            (serde_json::Value::Null, true),
-        ] {
-            let event = Raw::new(&json!({
-                "type": "com.example.custom",
-                "content": {"m.relates_to": relation},
-            }))
-            .unwrap();
-            assert_eq!(can_annotate(&event), allowed);
-        }
-    }
-
-    #[tokio::test]
-    #[cfg(not(target_family = "wasm"))]
-    async fn reaction_ids_follow_pages_and_match_sender_and_key() {
-        use matrix_sdk::{ruma::room_id, test_utils::mocks::MatrixMockServer};
-        use matrix_sdk_test::JoinedRoomBuilder;
-        use wiremock::{
-            Mock, ResponseTemplate,
-            matchers::{method, path_regex, query_param, query_param_is_missing},
-        };
-
-        let reaction = |id: &str, sender: &str, key: &str, target: &str| {
-            json!({
-                "type": "m.reaction", "event_id": id, "sender": sender,
-                "content": {"m.relates_to": {
-                    "rel_type": "m.annotation", "event_id": target, "key": key,
-                }},
-            })
-        };
-        let server = MatrixMockServer::new().await;
-        let client = server.client_builder().build().await;
-        let room_id = room_id!("!reactions:example.org");
-        server
-            .sync_room(&client, JoinedRoomBuilder::new(room_id))
-            .await;
-        let relations = "/_matrix/client/v1/rooms/.*/relations/.*/m.annotation";
-        Mock::given(method("GET"))
-            .and(path_regex(relations))
-            .and(query_param_is_missing("from"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "chunk": [
-                    reaction("$mine", "@me:example.org", "👍", "$target"),
-                    reaction("$other_sender", "@you:example.org", "👍", "$target"),
-                    reaction("$other_key", "@me:example.org", "🎉", "$target"),
-                ],
-                "next_batch": "page2",
-            })))
-            .expect(1)
-            .mount(server.server())
-            .await;
-        Mock::given(method("GET"))
-            .and(path_regex(relations))
-            .and(query_param("from", "page2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "chunk": [
-                    reaction("$again", "@me:example.org", "👍", "$target"),
-                    reaction("$other_target", "@me:example.org", "👍", "$elsewhere"),
-                ],
-            })))
-            .expect(1)
-            .mount(server.server())
-            .await;
-        let core = crate::test_support::signed_in_core(&server, client).await.0;
-
-        let ids = core
-            .reaction_event_ids(
-                &room_id.to_owned(),
-                &event_id!("$target").to_owned(),
-                "👍",
-                user_id!("@me:example.org"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(ids, [event_id!("$mine"), event_id!("$again")]);
-    }
-
-    #[tokio::test]
-    #[cfg(not(target_family = "wasm"))]
-    async fn reaction_pagination_that_repeats_a_token_fails() {
-        use matrix_sdk::{ruma::room_id, test_utils::mocks::MatrixMockServer};
-        use matrix_sdk_test::JoinedRoomBuilder;
-        use wiremock::{Mock, ResponseTemplate, matchers::method, matchers::path_regex};
-
-        let server = MatrixMockServer::new().await;
-        let client = server.client_builder().build().await;
-        let room_id = room_id!("!reactions:example.org");
-        server
-            .sync_room(&client, JoinedRoomBuilder::new(room_id))
-            .await;
-        Mock::given(method("GET"))
-            .and(path_regex(
-                "/_matrix/client/v1/rooms/.*/relations/.*/m.annotation",
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"chunk": [], "next_batch": "stuck"})),
-            )
-            .mount(server.server())
-            .await;
-        let core = crate::test_support::signed_in_core(&server, client).await.0;
-
-        let result = core
-            .reaction_event_ids(
-                &room_id.to_owned(),
-                &event_id!("$target").to_owned(),
-                "👍",
-                user_id!("@me:example.org"),
-            )
-            .await;
-        result.unwrap_err();
-    }
-
-    #[tokio::test]
-    #[cfg(not(target_family = "wasm"))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one sequential flow kept in a single function"
-    )]
-    async fn nested_reactions_are_ignored() {
-        use std::sync::Arc;
-
-        use crate::{
-            Core,
-            api::timeline::TimelineFocusView,
-            protocol::{RpcCode, RpcError},
-            session::Session,
-            store::MemorySessionStore,
-        };
-        use matrix_sdk::{
-            ruma::{event_id, room_id},
-            test_utils::mocks::MatrixMockServer,
-        };
-        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
-        use matrix_sdk_ui::sync_service::SyncService;
-
-        for reactions_first in [false, true] {
-            let server = MatrixMockServer::new().await;
-            let client = server.client_builder().build().await;
-            server.mock_room_state_encryption().plain().mount().await;
-            let room_id = room_id!("!reactions:example.org");
-            let factory = EventFactory::new().room(room_id).sender(User::Alice);
-            let original = event_id!("$original");
-            let annotation = event_id!("$annotation");
-            let replacement = event_id!("$replacement");
-            let edit = event_id!("$edit");
-            let reaction = event_id!("$reaction");
-            let custom = |event_id, relation| {
-                Raw::new(&json!({
-                    "type": "com.example.custom", "event_id": event_id,
-                    "sender": User::Alice, "origin_server_ts": 1,
-                    "content": {"m.relates_to": {"rel_type": relation, "event_id": original}},
-                }))
-                .unwrap()
-                .cast_unchecked()
-            };
-            let image_reaction = |target, event_id| {
-                Raw::new(&json!({
-                    "type": "m.reaction", "event_id": event_id,
-                    "sender": User::Alice, "origin_server_ts": 2,
-                    "content": {
-                        "shortcode": "invalid",
-                        "m.relates_to": {"rel_type": "m.annotation", "event_id": target, "key": "mxc://example.org/invalid"},
-                    },
-                }))
-                .unwrap()
-                .cast_unchecked()
-            };
-            let targets = [
-                factory.text_msg("original").event_id(original).into_raw(),
-                custom(annotation, "m.annotation"),
-                custom(replacement, "m.replace"),
-                factory
-                    .text_msg("edited")
-                    .edit(
-                        original,
-                        ruma::events::room::message::RoomMessageEventContent::text_plain("edited")
-                            .into(),
-                    )
-                    .event_id(edit)
-                    .into_raw(),
-                factory
-                    .reaction(original, "👍")
-                    .event_id(reaction)
-                    .into_raw(),
-            ];
-            let annotations = [
-                image_reaction(annotation, event_id!("$nested")),
-                image_reaction(replacement, event_id!("$on-replacement")),
-                factory
-                    .reaction(edit, "👎")
-                    .event_id(event_id!("$on-edit"))
-                    .into_raw(),
-                image_reaction(reaction, event_id!("$on-reaction")),
-            ];
-            let events = if reactions_first {
-                annotations.into_iter().chain(targets).collect::<Vec<_>>()
-            } else {
-                targets.into_iter().chain(annotations).collect::<Vec<_>>()
-            };
-            let mut joined = JoinedRoomBuilder::new(room_id);
-            for event in events {
-                joined = joined.add_timeline_event(event);
-            }
-            let room = server.sync_room(&client, joined).await;
-            let timeline =
-                crate::timelines::build_room_timeline(&room, &TimelineFocusView::Live, true)
-                    .await
-                    .unwrap();
-            let views = timeline
-                .items()
-                .await
-                .iter()
-                .map(|item| {
-                    crate::view::timeline_item(
-                        item,
-                        client.user_id(),
-                        &crate::view::Highlights::default(),
-                        &crate::view::LocalContent::default(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let original_view = views
-                .iter()
-                .find(|item| item.event_id.as_deref() == Some(original))
-                .unwrap();
-            assert_eq!(original_view.reactions.len(), 1);
-            assert_eq!(original_view.reactions[0].key, "👍");
-            assert!(matches!(
-                &original_view.content,
-                crate::protocol::TimelineItemContentView::Message { edited: true, .. }
-            ));
-            assert!(
-                views
-                    .iter()
-                    .filter(|item| item.event_id.as_deref() != Some(original))
-                    .all(|item| item.reactions.is_empty())
-            );
-
-            let (core, _events) =
-                Core::new("reactions-test", Box::new(MemorySessionStore::default()));
-            *core.session.write().await = Some(Session {
-                account_id: "test".to_owned(),
-                sync_service: Arc::new(SyncService::builder(client.clone()).build().await.unwrap()),
-                client,
-                homeserver: server.server().uri(),
-                oauth: false,
-            });
-            core.ensure_reaction_target(&room_id.to_owned(), &original.to_owned())
-                .await
-                .unwrap();
-            assert!(
-                core.reaction_shortcodes(&room_id.to_owned(), &original.to_owned())
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-            for target in [annotation, replacement, edit, reaction] {
-                assert!(
-                    core.reaction_shortcodes(&room_id.to_owned(), &target.to_owned())
-                        .await
-                        .unwrap()
-                        .is_empty()
-                );
-                assert!(matches!(
-                    Box::pin(core.run(crate::api::messages::ReactParams {
-                        persona: None,
-                        room_id: room_id.to_owned(),
-                        event_id: target.to_owned(),
-                        key: "👍".to_owned(),
-                        source_pack: None,
-                        shortcode: None,
-                        thread_root: None,
-                        subscription: None,
-                    }))
-                    .await,
-                    Err(RpcError {
-                        code: RpcCode::Unsupported,
-                        ..
-                    })
-                ));
-            }
-        }
-    }
-
-    fn raw(event: &serde_json::Value) -> Raw<serde_json::Value> {
-        Raw::new(event).expect("raw event")
-    }
-
-    #[test]
-    fn a_redaction_marker_counts_even_when_null_and_wrong_shapes_read_as_absent() {
-        assert!(is_redacted(&raw(
-            &json!({ "unsigned": { "redacted_because": null } })
-        )));
-        assert!(!is_redacted(&raw(&json!({ "unsigned": {} }))));
-        assert!(!is_redacted(&raw(&json!({ "unsigned": "x" }))));
-        assert!(can_annotate(&raw(
-            &json!({ "content": { "m.relates_to": "x" } })
-        )));
-        assert!(can_annotate(&raw(&json!({ "content": "x" }))));
-        assert!(!can_annotate(&raw(&json!({
-            "content": { "m.relates_to": { "rel_type": "m.replace" } }
-        }))));
-    }
-
-    fn reaction(key: &str, shortcode: Option<&str>) -> TimelineEvent {
-        reaction_to(key, shortcode, "$target")
-    }
-
-    fn reaction_to(key: &str, shortcode: Option<&str>, target: &str) -> TimelineEvent {
-        let mut content = json!({
-            "m.relates_to": { "rel_type": "m.annotation", "event_id": target, "key": key },
-        });
-        if let Some(shortcode) = shortcode {
-            content["shortcode"] = json!(shortcode);
-        }
-        TimelineEvent::from_plaintext(
-            Raw::new(&json!({
-                "type": "m.reaction",
-                "event_id": format!("${key}{}", shortcode.unwrap_or_default()),
-                "sender": "@alice:example.org",
-                "origin_server_ts": 1,
-                "content": content,
-            }))
-            .unwrap_or_else(|error| panic!("{error}"))
-            .cast_unchecked(),
-        )
-    }
-
-    #[test]
-    fn test_each_custom_key_takes_the_first_shortcode_it_was_sent_with() {
-        let found = shortcodes(
-            &[
-                reaction("mxc://example.org/parrot", Some(":partyparrot:")),
-                reaction("mxc://example.org/parrot", Some(":other:")),
-                reaction("mxc://example.org/cat", Some("blobcat")),
-            ],
-            event_id!("$target"),
-        );
-
-        let pairs: Vec<_> = found
-            .iter()
-            .map(|view| (view.key.as_str(), view.shortcode.as_str()))
-            .collect();
-        assert_eq!(
-            pairs,
-            [
-                ("mxc://example.org/cat", "blobcat"),
-                ("mxc://example.org/parrot", "partyparrot"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_emoji_keys_and_reactions_without_a_shortcode_are_skipped() {
-        let found = shortcodes(
-            &[
-                reaction("👍", Some(":thumbsup:")),
-                reaction("mxc://example.org/nameless", None),
-                reaction("mxc://example.org/blank", Some("::")),
-            ],
-            event_id!("$target"),
-        );
-
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn test_an_oversized_shortcode_is_cut_to_100_bytes() {
-        let long = "é".repeat(80);
-        let found = shortcodes(
-            &[reaction("mxc://example.org/long", Some(&long))],
-            event_id!("$target"),
-        );
-
-        assert_eq!(found.first().map(|view| view.shortcode.len()), Some(100));
-    }
-
-    #[test]
-    fn shortcodes_exclude_nested_reactions() {
-        let found = shortcodes(
-            &[
-                reaction_to("mxc://example.org/parrot", Some("wrong"), "$reaction"),
-                reaction("mxc://example.org/parrot", Some("parrot")),
-                reaction_to("mxc://example.org/cat", Some("cat"), "$edit"),
-            ],
-            event_id!("$target"),
-        );
-
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].shortcode, "parrot");
-    }
-    #[tokio::test]
-    #[cfg(not(target_family = "wasm"))]
-    async fn a_redacted_message_shows_no_reactions() {
-        use matrix_sdk::{
-            ruma::{event_id, room_id},
-            test_utils::mocks::MatrixMockServer,
-        };
-        use matrix_sdk_test::{JoinedRoomBuilder, User, event_factory::EventFactory};
-        use matrix_sdk_ui::timeline::RoomExt as _;
-
-        let server = MatrixMockServer::new().await;
-        let client = server.client_builder().build().await;
-        server.mock_room_state_encryption().plain().mount().await;
-        let room_id = room_id!("!redacted:example.org");
-        let me = client.user_id().unwrap().to_owned();
-        let factory = EventFactory::new().room(room_id).sender(User::Alice);
-        let target = event_id!("$target");
-        let room = server
-            .sync_room(
-                &client,
-                JoinedRoomBuilder::new(room_id)
-                    .add_timeline_event(factory.text_msg("hi").event_id(target))
-                    .add_timeline_event(
-                        factory.redaction(target).event_id(event_id!("$redaction")),
-                    ),
-            )
-            .await;
-        let timeline = room.timeline().await.unwrap();
-        let reactions = |items: Vec<std::sync::Arc<matrix_sdk_ui::timeline::TimelineItem>>| {
-            items
-                .iter()
-                .find(|item| item.as_event().and_then(|e| e.event_id()) == Some(target))
-                .map(|item| item.as_event().unwrap().reactions().len())
-        };
-        let item_id = timeline
-            .items()
-            .await
-            .iter()
-            .find_map(|item| item.as_event().filter(|e| e.event_id() == Some(target)))
-            .unwrap()
-            .identifier();
-
-        server
-            .mock_room_send()
-            .ok(event_id!("$reaction"))
-            .mock_once()
-            .mount()
-            .await;
-        timeline.toggle_reaction(&item_id, "👍").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        server
-            .sync_room(
-                &client,
-                JoinedRoomBuilder::new(room_id).add_timeline_event(
-                    EventFactory::new()
-                        .room(room_id)
-                        .sender(&me)
-                        .reaction(target, "👍")
-                        .event_id(event_id!("$reaction")),
-                ),
-            )
-            .await;
-        assert_eq!(
-            reactions(timeline.items().await.iter().cloned().collect()),
-            Some(1)
-        );
-
-        let views = timeline
-            .items()
-            .await
-            .iter()
-            .map(|item| {
-                crate::view::timeline_item(
-                    item,
-                    client.user_id(),
-                    &crate::view::Highlights::default(),
-                    &crate::view::LocalContent::default(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let view = views
-            .iter()
-            .find(|item| item.event_id.as_deref() == Some(target))
-            .unwrap();
-        assert!(view.reactions.is_empty());
-    }
-}
+#[path = "reactions_tests.rs"]
+mod tests;

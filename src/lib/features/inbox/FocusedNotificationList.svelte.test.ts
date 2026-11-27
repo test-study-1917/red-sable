@@ -36,6 +36,7 @@ function notification(kind: string, read = false): InboxItemView {
     sender: '@alice:example.org',
     sender_name: 'Alice',
     body: `${kind} preview`,
+    emotes: [],
     ts: 1_700_000_000_000,
     kind,
     read,

@@ -12,7 +12,7 @@ use matrix_sdk_base::RequestedRequiredStates;
 fn person(user: &str, device: &str, joined: u64) -> CallMember {
     let mut value = member(CallMode::Compatibility, joined, &[]);
     value.user_id = user.try_into().unwrap();
-    value.device_id = Some(device.try_into().unwrap());
+    value.device_id = Some(device.into());
     value.member_id = Some(format!("{user}:{device}:{joined}"));
     value
 }
@@ -85,7 +85,7 @@ fn validates_payload_type_sender_timestamps_and_membership() {
     let mut state = valid.clone();
     state["state_key"] = json!("");
     invalid.push(state);
-    let mut ordinary = valid.clone();
+    let mut ordinary = valid;
     ordinary["content"] = json!({"emoji":"👋"});
     invalid.push(ordinary);
     let mut unobserved = event("@bob:example.org", 200);
@@ -485,7 +485,6 @@ fn check_expiry_correction(correction_at: u64, replace_same_key: bool) {
 async fn sdk_plain_live_event_reaches_reader_but_state_and_other_room_do_not() {
     use crate::calls::runtime::{State, watch_termination};
     use crate::protocol::CallSessionId;
-    use crate::{Core, store::MemorySessionStore};
     use matrix_sdk::{
         ruma::{events::AnySyncTimelineEvent, room_id, serde::Raw},
         test_utils::mocks::MatrixMockServer,
@@ -520,7 +519,7 @@ async fn sdk_plain_live_event_reaches_reader_but_state_and_other_room_do_not() {
         )
         .with_admission_roster(),
     ));
-    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&server, room.client()).await;
     server.mock_get_members().ok(vec![]).mount().await;
     room.sync_members().await.unwrap();
     let _guard = watch_termination(
@@ -582,7 +581,6 @@ async fn sdk_stable_sticky_join_is_visible_to_an_end_in_the_same_sync_batch() {
         runtime::{State, watch_termination},
     };
     use crate::protocol::CallSessionId;
-    use crate::{Core, store::MemorySessionStore};
     use matrix_sdk::{
         ruma::{api::client::sync::sync_events::msc4186, room_id, serde::Raw},
         test_utils::mocks::MatrixMockServer,
@@ -641,7 +639,7 @@ async fn sdk_stable_sticky_join_is_visible_to_an_end_in_the_same_sync_batch() {
         None,
         false,
     )));
-    let (core, _) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let core = crate::test_support::session_for(&server, room.client()).await;
     let _guard = watch_termination(
         &core,
         1,
@@ -688,10 +686,13 @@ async fn sdk_stable_sticky_join_is_visible_to_an_end_in_the_same_sync_batch() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "sets up two real encrypted SDK clients and a rejoin"
+)]
 async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
     use crate::calls::runtime::{State, join_handlers};
     use crate::protocol::CallSessionId;
-    use crate::{Core, store::MemorySessionStore};
     use matrix_sdk::{
         ruma::{events::AnySyncTimelineEvent, room_id, serde::Raw},
         test_utils::mocks::MatrixMockServer,
@@ -795,7 +796,8 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
         )
         .with_admission_roster(),
     ));
-    let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let (core, mut events) = crate::test_support::signed_in_core(&server, room.client()).await;
+    let core = core.signed_in().unwrap();
     let (_wake, _handlers, _keys) =
         join_handlers(&core, 1, CallSessionId(1), &room, &state, false).await;
     let encrypted = json!({"type":"m.room.encrypted", "sender":alice.user_id().unwrap(),
@@ -866,8 +868,7 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
     let requests = server.received_requests().await.unwrap();
     let control_ciphertext = requests
         .iter()
-        .filter(|request| request.url.path().contains("/send/m.room.encrypted/"))
-        .last()
+        .rfind(|request| request.url.path().contains("/send/m.room.encrypted/"))
         .unwrap();
     assert!(!String::from_utf8_lossy(&control_ciphertext.body).contains(super::MODERATE));
     let mut control_event = encrypted.clone();
@@ -921,8 +922,7 @@ async fn sdk_encrypted_event_waits_for_room_key_and_rechecks_join_boundary() {
     let requests = server.received_requests().await.unwrap();
     let latest = requests
         .iter()
-        .filter(|request| request.url.path().contains("/send/m.room.encrypted/"))
-        .last()
+        .rfind(|request| request.url.path().contains("/send/m.room.encrypted/"))
         .unwrap();
     let mut fresh = encrypted;
     fresh["event_id"] = json!("$fresh:example.org");
@@ -979,17 +979,15 @@ async fn sdk_retry_reuses_transaction_after_a_lost_response() {
         )
         .mount_as_scoped(server.server())
         .await;
-    assert!(
-        room.send_raw(EVENT_TYPE, attempt.content.clone())
-            .with_transaction_id(&attempt.transaction_id)
-            .with_request_config(
-                RequestConfig::new()
-                    .timeout(Duration::from_secs(5))
-                    .disable_retry()
-            )
-            .await
-            .is_err()
-    );
+    room.send_raw(EVENT_TYPE, attempt.content.clone())
+        .with_transaction_id(&attempt.transaction_id)
+        .with_request_config(
+            RequestConfig::new()
+                .timeout(Duration::from_secs(5))
+                .disable_retry(),
+        )
+        .await
+        .unwrap_err();
     drop(first);
     reader.attempt.as_mut().unwrap().sending = false;
     let retry = reader.begin_attempt(own.user_id.as_str(), 300).unwrap();
@@ -1040,13 +1038,18 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
         .await;
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
     let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".into(),
-        client: client.clone(),
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".into(),
+            client: client.clone(),
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let signed_in = core.signed_in().unwrap();
     let own = person(
         client.user_id().unwrap().as_str(),
         client.device_id().unwrap().as_str(),
@@ -1066,11 +1069,12 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
         .with_admission_roster(),
     ));
     let session = CallSessionId(99);
-    let membership = core
+    let membership = signed_in
+        .state()
         .call_memberships
         .acquire(core.lifecycle.current(), &room.room_id().to_owned())
         .await;
-    core.call_sessions.lock().await.insert(
+    signed_in.state().calls.lock().await.insert(
         session,
         CallSession {
             room: room.clone(),
@@ -1083,18 +1087,18 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
             termination_cancel: tokio::sync::watch::channel(false).0,
             state: state.clone(),
             sticky_member: None,
-            _handlers: Vec::new(),
+            handlers: Vec::new(),
         },
     );
     server.mock_get_members().ok(vec![]).mount().await;
     room.sync_members().await.unwrap();
     let signal = event(remote.user_id.as_str(), 200);
     let (_, _, leave) = tokio::join!(
-        receive_termination(&core, 1, session, &room, &state, signal.clone()),
-        receive_termination(&core, 1, session, &room, &state, signal),
-        core.leave_call(session),
+        receive_termination(&signed_in, 1, session, &room, &state, signal.clone()),
+        receive_termination(&signed_in, 1, session, &room, &state, signal),
+        signed_in.leave_call(session),
     );
-    assert!(!core.call_sessions.lock().await.contains_key(&session));
+    assert!(!signed_in.state().calls.lock().await.contains_key(session));
     tokio::task::yield_now().await;
     let mut ended = 0;
     while let Ok(event) = events.try_recv() {
@@ -1111,14 +1115,13 @@ async fn one_owner_takes_the_session_for_concurrent_end_and_leave() {
     } else {
         assert_eq!(ended, 0, "a winning ordinary leave does not broadcast");
     }
-    core.session_tasks.lock().clear();
+    signed_in.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
 async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
     use crate::calls::runtime::{State, receive_termination, termination_during_join};
     use crate::protocol::{CallSessionId, RpcCode};
-    use crate::{Core, store::MemorySessionStore};
     use matrix_sdk::{ruma::room_id, test_utils::mocks::MatrixMockServer};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -1145,12 +1148,13 @@ async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
         )
         .with_admission_roster(),
     ));
-    let (core, mut events) = Core::new("test", Box::new(MemorySessionStore::default()));
+    let (core, mut events) = crate::test_support::signed_in_core(&server, room.client()).await;
+    let signed_in = core.signed_in().unwrap();
     let session = CallSessionId(1);
     server.mock_get_members().ok(vec![]).mount().await;
     room.sync_members().await.unwrap();
     receive_termination(
-        &core,
+        &signed_in,
         1,
         session,
         &room,
@@ -1158,7 +1162,10 @@ async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
         event(remote.user_id.as_str(), 200),
     )
     .await;
-    assert!(events.try_recv().is_err());
+    assert_eq!(
+        events.try_recv().unwrap_err(),
+        tokio::sync::mpsc::error::TryRecvError::Empty
+    );
     let ended = state.lock().await.termination.ended.clone().unwrap();
     assert!(matches!(
         termination_during_join(session, room.room_id().to_owned(), ended).code,
@@ -1173,6 +1180,7 @@ async fn event_before_join_grant_is_retained_as_a_typed_normal_end() {
 struct RpcFixture {
     server: matrix_sdk::test_utils::mocks::MatrixMockServer,
     core: std::sync::Arc<crate::Core>,
+    signed_in: crate::SignedIn,
     room: matrix_sdk::Room,
     state: std::sync::Arc<tokio::sync::Mutex<crate::calls::runtime::State>>,
     session: crate::protocol::CallSessionId,
@@ -1197,13 +1205,18 @@ async fn rpc_fixture() -> RpcFixture {
     server.mock_get_members().ok(vec![]).mount().await;
     room.sync_members().await.unwrap();
     let (core, events) = Core::new("test", Box::new(MemorySessionStore::default()));
-    *core.session.write().await = Some(Session {
-        account_id: "test".into(),
-        client: client.clone(),
-        sync_service,
-        homeserver: server.server().uri(),
-        oauth: false,
-    });
+    crate::test_support::set_session(
+        &core,
+        Some(Session {
+            account_id: "test".into(),
+            client: client.clone(),
+            sync_service,
+            homeserver: server.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
+    let signed_in = core.signed_in().unwrap();
     let own = person(
         client.user_id().unwrap().as_str(),
         client.device_id().unwrap().as_str(),
@@ -1223,11 +1236,12 @@ async fn rpc_fixture() -> RpcFixture {
         .with_admission_roster(),
     ));
     let session = CallSessionId(99);
-    let membership = core
+    let membership = signed_in
+        .state()
         .call_memberships
         .acquire(core.lifecycle.current(), &room.room_id().to_owned())
         .await;
-    core.call_sessions.lock().await.insert(
+    signed_in.state().calls.lock().await.insert(
         session,
         CallSession {
             room: room.clone(),
@@ -1240,12 +1254,13 @@ async fn rpc_fixture() -> RpcFixture {
             termination_cancel: tokio::sync::watch::channel(false).0,
             state: state.clone(),
             sticky_member: None,
-            _handlers: Vec::new(),
+            handlers: Vec::new(),
         },
     );
     RpcFixture {
         server,
         core,
+        signed_in,
         room,
         state,
         session,
@@ -1260,9 +1275,9 @@ async fn a_limited_sync_can_invalidate_memberships_while_end_admission_waits_for
 
     let f = rpc_fixture().await;
     // The key-retry task uses this same admission path independently of sync.
-    let calls = f.core.call_sessions.lock().await;
+    let calls = f.signed_in.state().calls.lock().await;
     let mut admission = std::pin::pin!(receive_termination(
-        &f.core,
+        &f.signed_in,
         1,
         f.session,
         &f.room,
@@ -1337,8 +1352,18 @@ async fn production_rpc_retries_the_same_transaction_only_after_failure() {
             .map_err(|error| error.code),
         Err(RpcCode::Unavailable)
     ));
-    assert!(f.core.call_sessions.lock().await.contains_key(&f.session));
-    assert!(f.events.try_recv().is_err());
+    assert!(
+        f.signed_in
+            .state()
+            .calls
+            .lock()
+            .await
+            .contains_key(f.session)
+    );
+    assert_eq!(
+        f.events.try_recv().unwrap_err(),
+        tokio::sync::mpsc::error::TryRecvError::Empty
+    );
     drop(first);
     Mock::given(method("PUT"))
         .and(path_regex(r"/rooms/.*/send/io\.element\.call\.reaction/.*"))
@@ -1349,7 +1374,14 @@ async fn production_rpc_retries_the_same_transaction_only_after_failure() {
         .run(EndForEveryoneParams { session: f.session })
         .await
         .unwrap();
-    assert!(!f.core.call_sessions.lock().await.contains_key(&f.session));
+    assert!(
+        !f.signed_in
+            .state()
+            .calls
+            .lock()
+            .await
+            .contains_key(f.session)
+    );
     assert!(matches!(
         f.events.recv().await,
         Some(CoreEvent::CallTerminated { local: true, .. })
@@ -1378,7 +1410,7 @@ async fn production_rpc_retries_the_same_transaction_only_after_failure() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].url.path(), requests[1].url.path());
     assert_eq!(requests[0].body, requests[1].body);
-    f.core.session_tasks.lock().clear();
+    f.signed_in.state().session_tasks.lock().clear();
 }
 
 #[tokio::test]
@@ -1416,7 +1448,7 @@ async fn production_rpc_busy_and_leave_or_logout_cancel_an_in_flight_send() {
             if logout {
                 core.logout().await
             } else {
-                core.leave_call(session).await
+                core.signed_in()?.leave_call(session).await
             }
         });
         assert!(matches!(
@@ -1428,7 +1460,7 @@ async fn production_rpc_busy_and_leave_or_logout_cancel_an_in_flight_send() {
             Err(RpcCode::UnknownCall | RpcCode::NotLoggedIn)
         ));
         leaving.abort();
-        assert!(!f.core.call_sessions.lock().await.contains_key(&session));
+        assert!(!f.signed_in.state().calls.lock().await.contains_key(session));
         let requests = f.server.received_requests().await.unwrap();
         assert_eq!(
             requests
@@ -1440,7 +1472,7 @@ async fn production_rpc_busy_and_leave_or_logout_cancel_an_in_flight_send() {
                 .count(),
             1
         );
-        f.core.session_tasks.lock().clear();
+        f.signed_in.state().session_tasks.lock().clear();
     }
 }
 
@@ -1472,9 +1504,7 @@ async fn production_rpc_own_echo_and_response_are_one_normal_end_in_either_order
         let session = f.session;
         let sending = tokio::spawn(async move { core.run(EndForEveryoneParams { session }).await });
         wait_for_send(&f.server).await;
-        if !echo_first {
-            sending.await.unwrap().unwrap();
-        } else {
+        if echo_first {
             let request = f
                 .server
                 .received_requests()
@@ -1488,18 +1518,18 @@ async fn production_rpc_own_echo_and_response_are_one_normal_end_in_either_order
                         .contains("/send/io.element.call.reaction/")
                 })
                 .unwrap();
-            let transaction = request.url.path_segments().unwrap().last().unwrap();
+            let transaction = request.url.path_segments().unwrap().next_back().unwrap();
             let sender = f.room.client().user_id().unwrap().to_string();
             let mut echo = event(&sender, crate::now_ms());
             echo["event_id"] = json!("$accepted");
             echo["unsigned"] = json!({"transaction_id":transaction});
-            receive_termination(&f.core, 1, session, &f.room, &f.state, echo).await;
-            tokio::time::timeout(Duration::from_secs(2), sending)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            receive_termination(&f.signed_in, 1, session, &f.room, &f.state, echo).await;
         }
+        tokio::time::timeout(Duration::from_secs(2), sending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(2), f.events.recv())
             .await
             .unwrap()
@@ -1508,8 +1538,11 @@ async fn production_rpc_own_echo_and_response_are_one_normal_end_in_either_order
             ended,
             CoreEvent::CallTerminated { local: true, .. }
         ));
-        assert!(f.events.try_recv().is_err());
-        f.core.session_tasks.lock().clear();
+        assert_eq!(
+            f.events.try_recv().unwrap_err(),
+            tokio::sync::mpsc::error::TryRecvError::Empty
+        );
+        f.signed_in.state().session_tasks.lock().clear();
     }
 }
 
@@ -1521,7 +1554,7 @@ async fn remote_end_blocks_rejoin_before_the_cleanup_task_runs() {
     let room_id = f.room.room_id().to_owned();
     let generation = f.core.lifecycle.current();
     receive_termination(
-        &f.core,
+        &f.signed_in,
         generation,
         f.session,
         &f.room,
@@ -1533,17 +1566,23 @@ async fn remote_end_blocks_rejoin_before_the_cleanup_task_runs() {
     // The event and session removal already happened. The network task has
     // not run on this current-thread runtime, and publication must still wait.
     assert!(
-        !f.core
-            .call_sessions
+        !f.signed_in
+            .state()
+            .calls
             .try_lock()
             .unwrap()
-            .contains_key(&f.session)
+            .contains_key(f.session)
     );
     assert!(matches!(
         f.events.try_recv(),
         Ok(crate::protocol::CoreEvent::CallTerminated { .. })
     ));
-    let mut publishing = std::pin::pin!(f.core.call_memberships.acquire(generation, &room_id));
+    let mut publishing = std::pin::pin!(
+        f.signed_in
+            .state()
+            .call_memberships
+            .acquire(generation, &room_id)
+    );
     assert!(futures_util::poll!(&mut publishing).is_pending());
     f.core.end_all_calls().await;
     assert!(futures_util::poll!(&mut publishing).is_ready());
@@ -1565,7 +1604,7 @@ async fn a_claim_completed_after_account_switch_cannot_signal_on_the_replacement
     let generation = f.core.lifecycle.current();
     let value = event("@alice:example.org", crate::now_ms());
     let claim = f
-        .core
+        .signed_in
         .claim_call_termination(generation, f.session, &f.state, |state| {
             state.termination.admit(&value, crate::now_ms())
         })
@@ -1577,20 +1616,27 @@ async fn a_claim_completed_after_account_switch_cannot_signal_on_the_replacement
     let client = next.client_builder().build().await;
     next.sync_joined_room(&client, &room_id).await;
     let sync_service = Arc::new(SyncService::builder(client.clone()).build().await.unwrap());
-    f.core.lock_session_transition().await.invalidate();
-    f.core.session_tasks.lock().clear();
-    *f.core.session.write().await = Some(Session {
-        account_id: "replacement".into(),
-        client,
-        sync_service,
-        homeserver: next.server().uri(),
-        oauth: false,
-    });
+    f.core.lifecycle.set_current(generation + 1);
+    f.signed_in.state().session_tasks.lock().clear();
+    crate::test_support::set_session(
+        &f.core,
+        Some(Session {
+            account_id: "replacement".into(),
+            client,
+            sync_service,
+            homeserver: next.server().uri(),
+            oauth: false,
+            state: Arc::default(),
+        }),
+    );
 
-    f.core.complete_call_termination(claim);
-    f.core.end_all_calls().await;
-    assert!(f.core.session_tasks.lock().is_empty());
-    assert!(f.events.try_recv().is_err());
+    f.signed_in.complete_call_termination(claim);
+    f.signed_in.end_calls(false).await;
+    assert!(f.signed_in.state().session_tasks.lock().is_empty());
+    assert_eq!(
+        f.events.try_recv().unwrap_err(),
+        tokio::sync::mpsc::error::TryRecvError::Empty
+    );
     assert!(
         next.server()
             .received_requests()
@@ -1601,7 +1647,12 @@ async fn a_claim_completed_after_account_switch_cannot_signal_on_the_replacement
                 request.method.as_str() != "PUT" || !request.url.path().contains("/state/")
             })
     );
-    let mut lease = std::pin::pin!(f.core.call_memberships.acquire(generation, &room_id));
+    let mut lease = std::pin::pin!(
+        f.signed_in
+            .state()
+            .call_memberships
+            .acquire(generation, &room_id)
+    );
     assert!(futures_util::poll!(&mut lease).is_ready());
 }
 
@@ -1626,31 +1677,49 @@ async fn account_retirement_owns_unclaimed_calls_and_awaits_already_claimed_ones
         let value = event("@alice:example.org", crate::now_ms());
         if claimed_first {
             let claim = f
-                .core
+                .signed_in
                 .claim_call_termination(generation, f.session, &f.state, |state| {
                     state.termination.admit(&value, crate::now_ms())
                 })
                 .await
                 .unwrap()
                 .unwrap();
-            let mut retiring = std::pin::pin!(f.core.retire_calls());
+            let mut retiring = std::pin::pin!(f.signed_in.end_calls(true));
             assert!(futures_util::poll!(&mut retiring).is_pending());
-            f.core.complete_call_termination(claim);
-            f.core.session_tasks.lock().clear();
+            f.signed_in.complete_call_termination(claim);
+            f.signed_in.state().session_tasks.lock().clear();
             tokio::time::timeout(Duration::from_secs(5), retiring)
                 .await
                 .unwrap();
         } else {
             {
-                let _calls = f.core.call_sessions.lock().await;
-                f.core.call_memberships.retire(generation);
+                let _calls = f.signed_in.state().calls.lock().await;
+                f.signed_in.state().call_memberships.retire(generation);
             }
-            receive_termination(&f.core, generation, f.session, &f.room, &f.state, value).await;
-            assert!(f.core.call_sessions.lock().await.contains_key(&f.session));
-            f.core.retire_calls().await;
+            receive_termination(
+                &f.signed_in,
+                generation,
+                f.session,
+                &f.room,
+                &f.state,
+                value,
+            )
+            .await;
+            assert!(
+                f.signed_in
+                    .state()
+                    .calls
+                    .lock()
+                    .await
+                    .contains_key(f.session)
+            );
+            f.signed_in.end_calls(true).await;
         }
-        assert!(f.core.call_sessions.lock().await.is_empty());
-        assert!(f.events.try_recv().is_err());
+        assert!(f.signed_in.state().calls.lock().await.is_empty());
+        assert_eq!(
+            f.events.try_recv().unwrap_err(),
+            tokio::sync::mpsc::error::TryRecvError::Empty
+        );
         f.server.server().verify().await;
     }
 }
@@ -1698,21 +1767,27 @@ async fn rejoin_waits_for_old_membership_cleanup_without_delaying_media_end() {
 
         let room_id = f.room.room_id().to_owned();
         let generation = f.core.lifecycle.current();
-        let mut publishing = std::pin::pin!(f.core.call_memberships.acquire(generation, &room_id));
+        let mut publishing = std::pin::pin!(
+            f.signed_in
+                .state()
+                .call_memberships
+                .acquire(generation, &room_id)
+        );
         assert!(futures_util::poll!(&mut publishing).is_pending());
         if switch_account {
-            f.core.lock_session_transition().await.invalidate();
+            f.core.lifecycle.set_current(generation + 1);
             let replacement = f
-                .core
+                .signed_in
+                .state()
                 .call_memberships
                 .acquire(f.core.lifecycle.current(), &room_id);
             assert!(futures_util::poll!(std::pin::pin!(replacement)).is_ready());
-            f.core.session_tasks.lock().clear();
+            f.signed_in.state().session_tasks.lock().clear();
             assert!(futures_util::poll!(&mut publishing).is_pending());
         }
         let _lease = tokio::time::timeout(Duration::from_secs(5), publishing)
             .await
             .unwrap();
-        f.core.session_tasks.lock().clear();
+        f.signed_in.state().session_tasks.lock().clear();
     }
 }

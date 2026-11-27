@@ -1,13 +1,12 @@
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::Handler;
+use super::SessionHandler;
 use crate::search::MAX_SEARCH_RESULTS;
 use crate::protocol::{
     RpcError, SearchCoverageView, SearchFilter, SearchHitView, SearchMetricsView,
 };
-use crate::{Core, view};
+use crate::{view, SignedIn};
 
 const MAX_SEARCH_CONTEXT: usize = 3;
 
@@ -24,10 +23,10 @@ domain! {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct PeerStartParams {}
 
-impl Handler for PeerStartParams {
+impl SessionHandler for PeerStartParams {
     type Ok = ();
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.start_search_peers().await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session.start_search_peers().await
     }
 }
 
@@ -35,10 +34,10 @@ impl Handler for PeerStartParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct PeerFindParams {}
 
-impl Handler for PeerFindParams {
+impl SessionHandler for PeerFindParams {
     type Ok = ();
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        core.find_search_peers().await
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session.find_search_peers().await
     }
 }
 
@@ -46,11 +45,10 @@ impl Handler for PeerFindParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct PeerResetParams {}
 
-impl Handler for PeerResetParams {
+impl SessionHandler for PeerResetParams {
     type Ok = ();
-    async fn run(self, core: &Arc<Core>) -> Result<(), RpcError> {
-        let client = core.client().await?;
-        core.forget_search_sharing(&client).await;
+    async fn run(self, session: &SignedIn) -> Result<(), RpcError> {
+        session.forget_search_sharing().await;
         Ok(())
     }
 }
@@ -77,21 +75,24 @@ pub struct MessagesParams {
     pub offset: u32,
     #[serde(default)]
     pub context: u32,
+    /// The query's words as the platform's word segmenter cut them, which is
+    /// where Chinese and Japanese are split. Without them each unspaced run is
+    /// one word.
     #[serde(default)]
-    pub older: Option<String>,
+    pub words: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct MessagesOk {
     pub hits: Vec<SearchHitView>,
-    pub older: Option<String>,
 }
 
-impl Handler for MessagesParams {
+impl SessionHandler for MessagesParams {
     type Ok = MessagesOk;
+    const ENDS_WITH_SESSION: bool = true;
 
-    async fn run(self, core: &Arc<Core>) -> Result<MessagesOk, RpcError> {
+    async fn run(self, session: &SignedIn) -> Result<MessagesOk, RpcError> {
         let Self {
             query,
             filter,
@@ -99,30 +100,33 @@ impl Handler for MessagesParams {
             limit,
             offset,
             context,
-            older,
+            words,
         } = self;
-        let filter = crate::search::IndexFilter::try_from(filter)?;
-        core.prepare_search_query(&query).await?;
+        let filter = crate::search::IndexFilter {
+            words,
+            ..crate::search::IndexFilter::try_from(filter)?
+        };
         let limit = (limit as usize).min(MAX_SEARCH_RESULTS);
         let context = (context as usize).min(MAX_SEARCH_CONTEXT);
-        let (hits, older) = if let Some(cursor) = older {
-            core.search_older(&query, &filter, order, limit, &cursor, context)
-                .await
-        } else {
-            let hits = core
-                .search_messages(&query, &filter, order, limit, offset as usize, context)
-                .await;
-            let older = if core.searches_locally(&query, &filter, order).await {
-                core.older_start(&filter).await
-            } else {
-                None
-            };
-            (hits, older)
-        };
+        let hits = session
+            .search_messages(&query, &filter, order, limit, offset as usize, context)
+            .await;
 
+        let expand = crate::search::expands(order);
         Ok(MessagesOk {
-            hits: hits.into_iter().map(view::search_hit_view).collect(),
-            older,
+            hits: hits
+                .into_iter()
+                .map(|hit| {
+                    let matched = sable_search::matching::matched_words(
+                        &query,
+                        &filter.words,
+                        &hit.body,
+                        expand,
+                    )
+                    .unwrap_or_default();
+                    view::search_hit_view(hit, matched)
+                })
+                .collect(),
         })
     }
 }
@@ -131,11 +135,11 @@ impl Handler for MessagesParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct CoverageParams {}
 
-impl Handler for CoverageParams {
+impl SessionHandler for CoverageParams {
     type Ok = SearchCoverageView;
 
-    async fn run(self, core: &Arc<Core>) -> Result<SearchCoverageView, RpcError> {
-        Ok(core.search_coverage(&core.client().await?).await)
+    async fn run(self, session: &SignedIn) -> Result<SearchCoverageView, RpcError> {
+        Ok(session.search_coverage().await)
     }
 }
 
@@ -143,10 +147,10 @@ impl Handler for CoverageParams {
 #[cfg_attr(feature = "typegen", derive(specta::Type), specta(inline))]
 pub struct MetricsParams {}
 
-impl Handler for MetricsParams {
+impl SessionHandler for MetricsParams {
     type Ok = SearchMetricsView;
 
-    async fn run(self, core: &Arc<Core>) -> Result<SearchMetricsView, RpcError> {
-        Ok(core.search_metrics(&core.client().await?).await)
+    async fn run(self, session: &SignedIn) -> Result<SearchMetricsView, RpcError> {
+        Ok(session.search_metrics().await)
     }
 }

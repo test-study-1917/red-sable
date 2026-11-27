@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 
 import { expect, test } from './fixtures/test';
-import { timelineItem } from './fixtures/timeline-items';
+import { threadSummary, timelineItem } from './fixtures/timeline-items';
 
 test.use({ storageState: { cookies: [], origins: [] }, serviceWorkers: 'block' });
 
@@ -139,11 +139,11 @@ for (const theme of ['light', 'dark'] as const) {
             'theme-link',
             '<a href="https://example.org">Theme link</a> <code>code</code>'
           ),
-          thread_summary: {
+          thread_summary: threadSummary({
             num_replies: 3,
             latest_body: 'a reply',
             latest_sender: '@bob:example.test',
-          },
+          }),
         },
       },
     ]);
