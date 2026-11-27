@@ -1,5 +1,6 @@
 <script lang="ts">
   import DotsThreeIcon from 'phosphor-svelte/lib/DotsThreeIcon';
+  import { untrack } from 'svelte';
   import { i18n } from '#lib/i18n.js';
   import ActionMenu from '#lib/ui/primitives/ActionMenu.svelte';
   import ActionMenuItem from '#lib/ui/primitives/ActionMenuItem.svelte';
@@ -12,14 +13,29 @@
     muted: boolean;
     busy: boolean;
     onModerate: (action: CallModerationAction) => void;
+    onOverlayChange?: (open: boolean) => void;
   }
 
-  let { name, muted, busy, onModerate }: Props = $props();
+  let { name, muted, busy, onModerate, onOverlayChange }: Props = $props();
+  let menuOpen = $state(false);
   let confirmOpen = $state(false);
   let confirmRemove = $state.raw<(() => void) | undefined>();
+  let overlayOpen = $derived(menuOpen || confirmOpen);
+
+  $effect(() => {
+    const report = onOverlayChange;
+    if (!overlayOpen || !report) return;
+    untrack(() => report(true));
+    return () => report(false);
+  });
 </script>
 
-<ActionMenu label={i18n.t('call.participantActions', { name })} side="bottom" align="end">
+<ActionMenu
+  bind:open={menuOpen}
+  label={i18n.t('call.participantActions', { name })}
+  side="bottom"
+  align="end"
+>
   {#snippet trigger({ props })}
     <IconButton
       {...props}

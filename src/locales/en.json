@@ -4088,6 +4088,8 @@
     "sortFlagsHidden": "Hide from the picker"
   },
   "call": {
+    "hideAvatars": "Hide avatars",
+    "showAvatars": "Show avatars",
     "participantVolume": "Volume for {{name}}",
     "muteParticipant": "Mute {{name}} for me",
     "unmuteParticipant": "Unmute {{name}} for me",
@@ -4175,6 +4177,8 @@
     "statsKbps": "{{value, number}} kbps",
     "statsMbps": "{{value, number}} Mbps",
     "watchScreen": "Watch {{name}}’s screen",
+    "screenZoom": "Screen share zoom",
+    "screenZoomLevel": "Screen share zoom level",
     "watch": "Watch",
     "stopWatching": "Stop watching",
     "stopWatchingScreen": "Stop watching {{name}}’s screen",

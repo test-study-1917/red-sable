@@ -3,6 +3,7 @@
   import MicrophoneSlashIcon from 'phosphor-svelte/lib/MicrophoneSlashIcon';
   import CornersInIcon from 'phosphor-svelte/lib/CornersInIcon';
   import CornersOutIcon from 'phosphor-svelte/lib/CornersOutIcon';
+  import MagnifyingGlassIcon from 'phosphor-svelte/lib/MagnifyingGlassIcon';
   import MonitorIcon from 'phosphor-svelte/lib/MonitorIcon';
   import PushPinIcon from 'phosphor-svelte/lib/PushPinIcon';
   import PushPinSlashIcon from 'phosphor-svelte/lib/PushPinSlashIcon';
@@ -25,6 +26,7 @@
   import { cameraVisible, type CallTileSource } from './call-layout';
   import CallStatsOverlay from './CallStatsOverlay.svelte';
   import CallParticipantActions from './CallParticipantActions.svelte';
+  import ScreenShareZoom from './ScreenShareZoom.svelte';
   import type { CallModerationAction } from './call-moderation';
   import type {
     CallParticipant,
@@ -50,6 +52,7 @@
     name: string;
     userId: string;
     avatar: string | null;
+    hideAvatar?: boolean;
     pinned?: boolean;
     featured?: boolean;
     onPin?: () => void;
@@ -57,6 +60,7 @@
     onWatchScreen?: () => void;
     onVolumeChange?: (identity: string, volume: number) => void;
     onModerate?: (action: CallModerationAction) => void;
+    onModerationOverlayChange?: (open: boolean) => void;
     moderationPending?: boolean;
   }
 
@@ -69,6 +73,7 @@
     name,
     userId,
     avatar,
+    hideAvatar = false,
     pinned = false,
     featured = false,
     onPin,
@@ -76,6 +81,7 @@
     onWatchScreen,
     onVolumeChange,
     onModerate,
+    onModerationOverlayChange,
     moderationPending = false,
   }: Props = $props();
 
@@ -96,6 +102,7 @@
   let videoOn = $derived(
     screen ? participant.local === true || watchingScreen : cameraVisible(participant)
   );
+  let avatarHidden = $derived(hideAvatar && !screen && !videoOn);
   let videoTrackId = $derived.by(() => {
     const published = screen ? participant.screenShare : participant.camera;
     return published?.subscribed || participant.local ? published?.id : undefined;
@@ -106,6 +113,7 @@
   let label = $derived(screen ? i18n.t('call.screenOf', { name }) : name);
   let volume = $derived(participantVolume(volumeKey));
   let volumeOpen = $state(false);
+  let zoomOpen = $state(false);
   let revealed = $state(false);
   let element = $state<HTMLLIElement>();
   const fullscreen = callFullscreen(
@@ -114,7 +122,9 @@
   );
 
   $effect(() => {
-    if (!videoOn) fullscreen.exit();
+    if (videoOn) return;
+    fullscreen.exit();
+    zoomOpen = false;
   });
 
   function reveal(event: PointerEvent): void {
@@ -126,6 +136,7 @@
   function openVolume(event: MouseEvent): void {
     if (!adjustable) return;
     event.preventDefault();
+    zoomOpen = false;
     volumeOpen = true;
   }
   let unmutedVolume = 1;
@@ -175,6 +186,7 @@
       clear: () => remoteVideo.clear(trackId),
     };
   });
+  let canZoom = $derived(screen && videoOn && remoteSlot === undefined);
 
   function attachVideo(node: HTMLVideoElement) {
     if (videoTrackId === undefined) return;
@@ -201,6 +213,7 @@
       featured,
       revealed,
       audible: screen && adjustable,
+      'avatar-hidden': avatarHidden,
       'video-on': videoOn,
       expanded: fullscreen.expanded,
       overlaid: videoOn && remoteSlot !== undefined,
@@ -214,6 +227,10 @@
     <div class="video" {@attach nativeVideoSlot(localVideo)}></div>
   {:else if videoOn && remoteSlot}
     <div class="video" {@attach nativeVideoSlot(remoteSlot)}></div>
+  {:else if canZoom}
+    {#key participant.screenShare?.id}
+      <ScreenShareZoom {attachVideo} controlsOpen={zoomOpen} />
+    {/key}
   {:else if videoOn}
     <video
       class={['video', { mirrored: participant.local && !screen }]}
@@ -241,7 +258,7 @@
         </Button>
       {/if}
     </div>
-  {:else}
+  {:else if !avatarHidden}
     <div class="placeholder">
       <Avatar src={avatar} {name} id={userId} size="large" />
     </div>
@@ -263,7 +280,13 @@
 
   <div class="actions">
     {#if onModerate && !participant.local && !screen}
-      <CallParticipantActions {name} {muted} busy={moderationPending} {onModerate} />
+      <CallParticipantActions
+        {name}
+        {muted}
+        busy={moderationPending}
+        {onModerate}
+        onOverlayChange={onModerationOverlayChange}
+      />
     {/if}
     {#if onPin}
       <IconButton
@@ -296,6 +319,21 @@
         {/if}
       </IconButton>
     {/if}
+    {#if canZoom}
+      <IconButton
+        variant="ghost"
+        size="small"
+        class="tile-action"
+        label={i18n.t('call.screenZoom')}
+        aria-expanded={zoomOpen}
+        onclick={() => {
+          zoomOpen = !zoomOpen;
+          volumeOpen = false;
+        }}
+      >
+        <MagnifyingGlassIcon weight="bold" />
+      </IconButton>
+    {/if}
     {#if adjustable}
       <IconButton
         variant="ghost"
@@ -304,7 +342,10 @@
         label={volumeLabel}
         aria-expanded={volumeOpen}
         data-volume-toggle
-        onclick={() => (volumeOpen = !volumeOpen)}
+        onclick={() => {
+          volumeOpen = !volumeOpen;
+          zoomOpen = false;
+        }}
       >
         {#if volume === 0}
           <SpeakerSlashIcon />
@@ -316,7 +357,7 @@
   </div>
 
   {#if !screen || videoOn}
-    <div class="tag">
+    <div class="tag" class:centered={avatarHidden}>
       {#if screen}
         <MonitorIcon aria-hidden="true" weight="fill" />
       {:else if muted}
@@ -415,7 +456,7 @@
     transition: box-shadow var(--motion-normal) var(--motion-easing-emphasized);
   }
 
-  .tile.speaking.video-on::after {
+  .tile.speaking:is(.video-on, .avatar-hidden)::after {
     box-shadow:
       inset 0 0 0 0.1875rem var(--success-main),
       inset 0 0 0 0.3125rem color-mix(in srgb, var(--success-main) 30%, transparent);
@@ -526,6 +567,13 @@
     flex: none;
     height: 0.875rem;
     width: 0.875rem;
+  }
+
+  .tag.centered {
+    block-size: max-content;
+    inline-size: max-content;
+    inset: 0;
+    margin: auto;
   }
 
   .name {

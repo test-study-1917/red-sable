@@ -1,5 +1,7 @@
 <script lang="ts">
   import { i18n } from '#lib/i18n.js';
+  import CaretDownIcon from 'phosphor-svelte/lib/CaretDownIcon';
+  import CaretUpIcon from 'phosphor-svelte/lib/CaretUpIcon';
   import ColumnsIcon from 'phosphor-svelte/lib/ColumnsIcon';
   import RowsIcon from 'phosphor-svelte/lib/RowsIcon';
   import type { RoomCallLayoutState } from '../room/room-call-layout.svelte.js';
@@ -41,6 +43,7 @@
   import {
     bestGrid,
     callTiles,
+    cameraVisible,
     presentParticipants,
     GRID_GAP_PX,
     NARROW_STAGE_PX,
@@ -115,13 +118,16 @@
         : 'live'
   );
   let endOverlayOpen = $state(false);
+  let moderationOverlayCount = $state(0);
+  let hideAvatars = $state(false);
   let settled = $derived(
     ready &&
       health === 'live' &&
       session.deviceError === null &&
       session.endStatus !== 'sending' &&
       session.endStatus !== 'failed' &&
-      !endOverlayOpen
+      !endOverlayOpen &&
+      moderationOverlayCount === 0
   );
 
   let remotes = $derived(
@@ -138,6 +144,9 @@
   );
   let others = $derived(
     tiles.filter((tile) => tile.source === 'camera' && !tile.participant.local).length
+  );
+  let hasAvatars = $derived(
+    tiles.some((tile) => tile.source === 'camera' && !cameraVisible(tile.participant))
   );
   let failed = $derived(session.failure !== null);
   let alone = $derived(ready && tiles.length === 1 && tiles[0].participant.local === true);
@@ -213,6 +222,11 @@
   function rest(): void {
     clearTimeout(idleTimer);
     if (settled && !chromeHeld) chromeVisible = false;
+  }
+
+  function updateModerationOverlay(open: boolean): void {
+    moderationOverlayCount += open ? 1 : -1;
+    if (!open && stage?.isConnected) wake();
   }
 
   function trackOverflow(node: HTMLElement) {
@@ -505,39 +519,45 @@
           {/each}
         </ul>
         {#if strip.length > 0}
-          <ul
-            class="strip"
-            aria-label={i18n.t('call.participants', { count: strip.length })}
-            {@attach trackOverflow}
-          >
-            {#each strip as item (item.key)}
-              {@render tile(item, false)}
-            {/each}
-          </ul>
+          <div class="participant-area participant-strip">
+            {@render avatarToggle()}
+            <ul
+              class="strip"
+              aria-label={i18n.t('call.participants', { count: strip.length })}
+              {@attach trackOverflow}
+            >
+              {#each strip as item (item.key)}
+                {@render tile(item, false)}
+              {/each}
+            </ul>
+          </div>
         {/if}
       </div>
     {:else}
-      <CallTileGrid
-        {alone}
-        tileWidth={grid.width}
-        bind:width={mediaWidth}
-        bind:height={mediaHeight}
-      >
-        {#each tiles as item (item.key)}
-          {@render tile(item, false)}
-        {/each}
-        {#if alone}
-          <li class="waiting">
-            <p>{i18n.t('call.noParticipants')}</p>
-            {#if onInvite}
-              <Button variant="secondary" onclick={onInvite}>
-                <UserPlusIcon aria-hidden="true" weight="bold" />
-                {i18n.t('common.invitePeople')}
-              </Button>
-            {/if}
-          </li>
-        {/if}
-      </CallTileGrid>
+      <div class="participant-area participant-grid">
+        {@render avatarToggle()}
+        <CallTileGrid
+          {alone}
+          tileWidth={grid.width}
+          bind:width={mediaWidth}
+          bind:height={mediaHeight}
+        >
+          {#each tiles as item (item.key)}
+            {@render tile(item, false)}
+          {/each}
+          {#if alone}
+            <li class="waiting">
+              <p>{i18n.t('call.noParticipants')}</p>
+              {#if onInvite}
+                <Button variant="secondary" onclick={onInvite}>
+                  <UserPlusIcon aria-hidden="true" weight="bold" />
+                  {i18n.t('common.invitePeople')}
+                </Button>
+              {/if}
+            </li>
+          {/if}
+        </CallTileGrid>
+      </div>
     {/if}
   </div>
 
@@ -556,6 +576,27 @@
   {/if}
 </section>
 
+{#snippet avatarToggle()}
+  {#if ready && hasAvatars}
+    {@const label = i18n.t(hideAvatars ? 'call.showAvatars' : 'call.hideAvatars')}
+    <Tooltip {label}>
+      {#snippet trigger({ props })}
+        <IconButton
+          {...props}
+          class="avatar-toggle"
+          variant="secondary"
+          size="small"
+          {label}
+          aria-expanded={!hideAvatars}
+          onclick={() => (hideAvatars = !hideAvatars)}
+        >
+          {#if hideAvatars}<CaretDownIcon weight="bold" />{:else}<CaretUpIcon weight="bold" />{/if}
+        </IconButton>
+      {/snippet}
+    </Tooltip>
+  {/if}
+{/snippet}
+
 {#snippet tile(item: CallTile, large: boolean)}
   {@const profile = profileOf(item.participant.identity)}
   {@const screenShare = item.participant.screenShare}
@@ -568,7 +609,9 @@
     name={tileNames.get(item.participant.identity) ?? profile.name}
     userId={profile.userId}
     avatar={profile.avatar}
+    hideAvatar={hideAvatars}
     onModerate={session.participantControl(item.participant)}
+    onModerationOverlayChange={updateModerationOverlay}
     moderationPending={session.moderationPending}
     featured={large}
     pinned={featured.length === 1 && featured[0].key === item.key}
@@ -619,7 +662,7 @@
 
   .resting .chrome,
   .resting :global(.tile .actions:not(:has(:focus-visible))),
-  .resting :global(.tile .tag) {
+  .resting :global(.tile .tag:not(.centered)) {
     opacity: 0;
     pointer-events: none;
   }
@@ -819,13 +862,34 @@
     inline-size: var(--tile-width);
   }
 
+  .participant-area {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-100);
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .participant-grid {
+    flex: 1;
+  }
+
+  .participant-strip {
+    flex: 0 0 clamp(8rem, 20%, 15rem);
+  }
+
+  .participant-area > :global(.avatar-toggle) {
+    align-self: flex-end;
+  }
+
   .strip {
     display: flex;
-    flex: 0 0 clamp(8rem, 20%, 15rem);
+    flex: 1;
     flex-direction: column;
     gap: var(--space-200);
     list-style: none;
     margin: 0;
+    min-height: 0;
     overflow-y: auto;
     padding: 0;
     scroll-snap-type: y proximity;
@@ -848,8 +912,11 @@
       flex-direction: column;
     }
 
-    .strip {
+    .participant-strip {
       flex: 0 0 clamp(4.5rem, 22%, 8rem);
+    }
+
+    .strip {
       flex-direction: row;
       overflow: auto hidden;
       scroll-snap-type: x proximity;
